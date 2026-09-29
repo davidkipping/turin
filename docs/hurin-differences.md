@@ -179,7 +179,17 @@ Two notes on reading that table. The O-C values for epochs -1 and +1 are
 identical by construction, not by coincidence: a least-squares line through
 three equally spaced points forces `r(-1) = r(+1) = -r(0)/2`, so a
 three-transit O-C diagram carries exactly one degree of freedom. And the
-whole fit took 29 seconds per sampling round.
+whole fit took 29 seconds per sampling round, on turin 0.1.0.
+
+That last number is not comparable to a current one, and the reason is worth
+recording. 0.1.0 integrated the exposure by supersampling, which is cheap and
+wrong (see section 3); adopting MetalPlanet's contact-rule kernel in 0.1.6
+bought the accuracy at roughly twice the cost per evaluation, and the same
+fit took 220 s. Feeding that kernel its points in phase order (0.1.8) and
+setting `N_GL` from the log-likelihood (0.1.9) brought it back to 119 s —
+still above 82 s, but now for a model that integrates exposures correctly.
+The transit times themselves moved by at most 0.05 sigma across all of it,
+and their uncertainties by under 0.6%, so the table above stands as measured.
 
 ## Verification
 

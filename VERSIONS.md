@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.12 | — | 2026-09-29 | Docs: README gains a Performance section (measured 0.1.7 → now on two real targets); hurin-differences records why KOI-5162.01's wall time is not comparable across the supersampling → tau-kernel switch. (MODEL_REV unchanged at 3) |
 | 0.1.11 | — | 2026-09-29 | Docs: restore CLAUDE.md's point-order section (accidentally removed in 0.1.9), add the end-to-end KOI-448.02 timing (549 s → 118 s, medians within 0.02σ), retire the stale "tau kernel is 2x slower" note. (MODEL_REV unchanged at 3) |
 | 0.1.10 | — | 2026-09-29 | Version bump only: the intended docs edit failed in a script and landed in 0.1.11 |
 | 0.1.9 | — | 2026-09-29 | **MODEL_REV 2→3.** N_GL 9→5: judged on the log-likelihood rather than the kernel's own dF/dP, five is 40x below the float32 noise floor (sd 5e-4) and now 1.55x faster (14.1 → 9.1 ms on KOI-448.02) |

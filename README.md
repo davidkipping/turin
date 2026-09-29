@@ -190,6 +190,47 @@ Pinned by the test suite, against independent references:
 Every run reports `anvil.validate_precision` before sampling and refuses to
 start if the float32 error approaches the Metropolis scale.
 
+## Performance
+
+A fit's cost is one log-density-and-gradient evaluation per leapfrog step,
+times ~30 steps per iteration, times the iterations. Against turin 0.1.7,
+same machine, same anvil, same command, same seed:
+
+| | 0.1.7 | now |
+|---|---|---|
+| one value+gradient (KOI-448.02, 512 chains) | 45.8 ms | **9.1 ms** |
+| KOI-448.02, 30 transits, LinEph, 256 chains | 549 s | **118 s** |
+| KOI-5162.01, 3 transits, LinEph + TTV | 220 s | **119 s** |
+
+Posterior medians agree to 0.02 sigma across the two, and the KOI-5162.01
+transit times to 0.05 sigma against the 0.1.0 run in `docs/`.
+
+Almost all of what is left is MetalPlanet's kernel; turin's own profile solve,
+residual and priors are 0.7 ms of the 9.1. Two things got it there, and both
+are turin's responsibility rather than MetalPlanet's:
+
+- **Points go to the kernel in phase order** (`model.phase_order`). The
+  kernel runs one point per GPU thread in SIMD groups of 32, a group pays for
+  any branch one member takes, and an in-transit point costs ~8x an
+  out-of-transit one. Ordered by transit, epoch after epoch with ~10% of each
+  window in transit, nearly every group held a transit point and paid the
+  full price. Sorting by time from mid-transit — a static permutation, since
+  the reference ephemeris is fixed — was worth **2.7x** on its own, with
+  bit-identical log-likelihoods.
+- **Padded slots sit at quadrature.** Epochs are padded to a common length,
+  and those slots were parked at the epoch *centre*, where each cost a full
+  in-transit evaluation despite being weighted zero.
+
+If you add another route into the kernel, keep both: they are invisible in
+the answer and together worth 1.6x (KOI-5162.01) to 3.3x (KOI-448.02) on the
+log-density, the more the larger a fraction of each window is out of transit.
+
+`N_GL`, the Gauss-Legendre nodes per contact sub-interval, is 5. It is chosen
+on the log-likelihood rather than on the kernel's own `dF/d(period)`: at five
+nodes the error in `logL` has sd 5e-4, 40x below the float32 noise the `--PL`
+probe already accepts, and the worst gradient component is off by 0.5% of a
+posterior sd against float32's own 1.2%.
+
 ## Reliability
 
 hurin's headline failure was chains settling into a secondary transit-timing
