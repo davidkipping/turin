@@ -23,6 +23,9 @@ from . import __version__
 from .model import B_PRIORS, GEOMETRIES
 from .profile import PROFILE_MODES
 
+#: ``--PL`` accepts any solve mode, or "auto" to measure and choose.
+PL_CHOICES = ("auto",) + tuple(PROFILE_MODES)
+
 TARGET_RE = re.compile(r"^--(KOI-\d+\.\d+|TOI-\d+\.\d+)$", re.IGNORECASE)
 MODES = ("lineph", "ttv")
 SAMPLERS = ("chees", "ensemble")
@@ -77,13 +80,17 @@ usage: turin --KOI-448.02 [options]
   --bprior=transiting|nongrazing|box   (b, k) prior (default transiting)
   --nongrazing            alias for --bprior=nongrazing
   --TTVmax=MINUTES        declared TTV amplitude; sets the timing priors
-  --PL=exact|hybrid|ratio how the profile likelihood solves for the baseline
-                          coefficients. exact (default) is the true
-                          flux-space profile and is the right choice at
-                          Legendre sizes; ratio is hurin's form, faster but
-                          approximate to O(transit depth), so it suits
-                          shallow transits; hybrid is exact to float32 and
-                          overtakes exact only above ~14 basis columns
+  --PL=auto|exact|hybrid|ratio
+                          how the profile likelihood solves for the baseline
+                          coefficients. The default, auto, measures all three
+                          on this target -- precision against a float64
+                          reference over the posterior's own width, then
+                          speed -- and picks the fastest that is no less
+                          precise than exact. Takes a few seconds and is
+                          recorded in the products. Naming a mode skips it:
+                          exact is the true flux-space profile, ratio is
+                          hurin's O(transit depth) form, hybrid refines
+                          ratio's static factorization back to exact
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -115,7 +122,7 @@ class Args:
     ttv_max_min: float | None = None
     tag: str | None = None
     sampler: str = "chees"
-    profile_mode: str = "exact"
+    profile_mode: str = "auto"
     geometry: str = "circular"
     warmup: int = 400
     samples: int = 300
@@ -177,7 +184,7 @@ def parse_args(argv=None):
         args.b_prior = "nongrazing"
     _choice("bprior", args.b_prior, B_PRIORS)
     _choice("sampler", args.sampler, SAMPLERS)
-    _choice("PL", args.profile_mode, PROFILE_MODES)
+    _choice("PL", args.profile_mode, PL_CHOICES)
     _choice("geometry", args.geometry, GEOMETRIES)
     for mode in args.modes:
         _choice("modes", mode, MODES)

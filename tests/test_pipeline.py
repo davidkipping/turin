@@ -195,6 +195,66 @@ def test_ttvmax_wider_than_half_the_period_is_refused(tmp_path, fake_target):
                      log=lambda m: None)
 
 
+def test_pl_probe_runs_by_default_and_records_its_choice(tmp_path, fake_target):
+    """Omitting --PL measures the modes and bakes the winner into the run."""
+    from turin import profile
+
+    logs = []
+    args = _args(tmp_path)
+    assert args.profile_mode == "auto"
+    assert pipeline.run(args, log=logs.append) == 0
+    text = "\n".join(logs)
+    assert "PL probe" in text and "chose" in text
+    for mode in profile.PROFILE_MODES:
+        assert mode in text
+
+    # the RESOLVED mode is stored, never the literal "auto"
+    state = outputs.load_resume(str(tmp_path), "KOI-1.01", "lineph")
+    assert state.profile_mode in profile.PROFILE_MODES
+
+
+def test_a_resumed_run_reuses_the_stored_mode_without_reprobing(
+        tmp_path, fake_target):
+    """A continuation must not silently change its own likelihood."""
+    from turin import profile
+
+    pipeline.run(_args(tmp_path), log=lambda m: None)
+    state = outputs.load_resume(str(tmp_path), "KOI-1.01", "lineph")
+    # pin a mode the probe would be unlikely to pick on its own
+    state.profile_mode = "ratio"
+    state.done = False
+    outputs.save_resume(str(tmp_path), "KOI-1.01", "lineph", state)
+
+    logs = []
+    pipeline.run(_args(tmp_path), log=logs.append)
+    text = "\n".join(logs)
+    assert "carried over from the resumed run" in text
+    assert "PL probe" not in text
+    after = outputs.load_resume(str(tmp_path), "KOI-1.01", "lineph")
+    assert after.profile_mode == "ratio"
+
+
+def test_explicit_pl_skips_the_probe(tmp_path, fake_target):
+    logs = []
+    pipeline.run(_args(tmp_path, profile_mode="exact"), log=logs.append)
+    text = "\n".join(logs)
+    assert "PL probe" not in text
+    assert "--PL=exact" in text
+    assert outputs.load_resume(
+        str(tmp_path), "KOI-1.01", "lineph").profile_mode == "exact"
+
+
+def test_products_record_the_model_revision(tmp_path, fake_target):
+    from turin import MODEL_REV
+
+    pipeline.run(_args(tmp_path), log=lambda m: None)
+    body = open(os.path.join(str(tmp_path),
+                             "KOI-1.01_lineph_summary.csv")).read().splitlines()
+    assert f"rev{MODEL_REV}" in body[1]
+    assert outputs.load_resume(
+        str(tmp_path), "KOI-1.01", "lineph").model_rev == MODEL_REV
+
+
 def test_hurin_parity_mode_runs(tmp_path, fake_target):
     """The parity configuration must be a working configuration, not just flags."""
     assert pipeline.run(

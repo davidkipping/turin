@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import __version__
+from . import MODEL_REV, __version__
 from . import model as _model
 
 #: Filename tag for the current run, set by the CLI (--tag). Namespaces a run
@@ -51,7 +51,8 @@ def launch_command():
 
 
 def provenance():
-    return f"# turin {__version__} | {launch_command()}"
+    """The stamp on line 2 of every CSV: version, model revision, command."""
+    return f"# turin {__version__} rev{MODEL_REV} | {launch_command()}"
 
 
 def product_path(outdir, target, mode, name, ext):
@@ -134,7 +135,8 @@ def export_chains(outdir, target, mode, columns, arrays, *, log=None):
             name=os.path.basename(path).replace(".tar.gz", ""))
         info.size = len(csv_bytes)
         tar.addfile(info, io.BytesIO(csv_bytes))
-        ver = f"turin {__version__}\n{launch_command()}\n".encode()
+        ver = (f"turin {__version__} rev{MODEL_REV}\n"
+               f"{launch_command()}\n").encode()
         vinfo = tarfile.TarInfo(name="turin_version.txt")
         vinfo.size = len(ver)
         tar.addfile(vinfo, io.BytesIO(ver))
@@ -266,6 +268,10 @@ class ResumeState:
     # progress
     n_samples_done: int
     done: bool
+    #: The likelihood revision these chains were sampled under; see
+    #: :data:`turin.MODEL_REV`. Defaulted so a state written before this
+    #: field existed reads back as revision 1, which is what it was.
+    model_rev: int = 1
     ml_params: dict = field(default_factory=dict)
     #: anvil's own resumable state, when the installed version supports it
     anvil_state_path: str | None = None
@@ -273,6 +279,35 @@ class ResumeState:
     last_u: np.ndarray | None = None
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max")
+
+    def check_model_rev(self, log=None):
+        """Refuse to continue chains sampled under an older likelihood.
+
+        The guards above catch the *user* asking for a different model. This
+        catches the model changing underneath an unchanged command line --
+        a correction landing between one run and the next.
+
+        One exception, following hurin: a **finished LinEph** state is never
+        continued, and is only read for the maximum-likelihood shapes that
+        seed the TTV template sweep. Approximate shapes from a slightly older
+        likelihood are fine for an initialization, so it passes with a note.
+        """
+        from . import MODEL_REV
+
+        if self.model_rev == MODEL_REV:
+            return
+        if self.mode == "lineph" and self.done:
+            if log:
+                log(f"  note: this {self.mode} state predates model revision "
+                    f"{MODEL_REV} (it is rev {self.model_rev}), but it is "
+                    "complete and only seeds the TTV initialization, so it is "
+                    "used as-is")
+            return
+        raise SystemExit(
+            f"{self.target} {self.mode}: these chains were sampled under "
+            f"likelihood revision {self.model_rev}, but this turin is "
+            f"revision {MODEL_REV} -- the log-density has changed since, so "
+            "the chains cannot be continued. Re-run with --fresh.")
 
     def check(self, **cli):
         """Raise if the CLI disagrees with this state on any guarded field."""

@@ -82,6 +82,21 @@ is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
 and `log10_rho` are derived in float64 after sampling and appear in every
 product.
 
+### Choosing the profile solve
+
+The baseline coefficients can be solved three ways (`--PL`), trading exactness
+against speed. Which is right depends on the target, not on the code, so by
+default turin measures rather than guesses: it compares all three against a
+float64 reference over a ball scaled to the posterior's *own* width, then
+times them, and takes the fastest that is no less precise than `exact`. This
+costs a few seconds, is printed in full, and the winner is recorded in the
+products and reused on resume. Naming a mode skips the probe.
+
+The calibration to the posterior width is the part that matters. Judged on a
+ball much wider than the posterior, `ratio` looks catastrophic; judged on one
+much narrower, everything passes. Only at the posterior's own scale does the
+verdict mean "this would distort the answer".
+
 ## Options
 
 ```
@@ -96,7 +111,8 @@ product.
 
 --bprior=transiting|nongrazing|box      (b, k) prior; --nongrazing is an alias
 --TTVmax=MINUTES             declared TTV amplitude; sets the timing priors
---PL=exact|hybrid|ratio      how the baseline coefficients are solved
+--PL=auto|exact|hybrid|ratio how the baseline coefficients are solved
+                             (default auto: measured per target)
 --geometry=circular|chord    true circular orbit (default) or hurin's chord
 
 --sc                         prefer short cadence

@@ -29,7 +29,8 @@ def test_target_forms():
 def test_defaults_match_the_documented_ones():
     a = cli.parse_args(["--KOI-1.01"])
     assert a.b_prior == "transiting"
-    assert a.profile_mode == "exact"
+    # omitting --PL asks turin to measure and choose
+    assert a.profile_mode == "auto"
     assert a.geometry == "circular"
     assert a.sampler == "chees"
     assert a.modes == ("lineph", "ttv")
@@ -51,6 +52,11 @@ def test_hurin_parity_combination_parses():
     """Against hurin >= 0.1.68 the orbit is the only model difference."""
     a = cli.parse_args(["--KOI-1.01", "--geometry=chord", "--PL=ratio"])
     assert (a.geometry, a.profile_mode) == ("chord", "ratio")
+
+
+@pytest.mark.parametrize("mode", ["auto", "exact", "hybrid", "ratio"])
+def test_every_pl_mode_is_accepted(mode):
+    assert cli.parse_args(["--KOI-1.01", f"--PL={mode}"]).profile_mode == mode
 
 
 def test_modes_subset():
@@ -259,3 +265,65 @@ def test_summarize_percentiles_and_diagnostics():
     assert abs(s["std"] - 0.5) < 0.02
     assert s["lo"] < s["median"] < s["hi"]
     assert s["rhat"] == 1.004 and s["ess_bulk"] == 1234 and s["ess_tail"] == 999
+
+
+# -- likelihood revision flagging --------------------------------------
+
+def _state(**over):
+    base = dict(
+        target="KOI-1.01", mode="lineph", turin_version="0.1.0",
+        launch_command="turin --KOI-1.01", tag=None, b_prior="transiting",
+        profile_mode="exact", geometry="circular", sampler="chees",
+        n_chains=512, ttv_max=None, n_durations=5.0,
+        legendre_orders=np.zeros(3), exposure_time=0.02, num_resample=7,
+        n_samples_done=300, done=False)
+    base.update(over)
+    return outputs.ResumeState(**base)
+
+
+def test_model_rev_defaults_to_one_for_states_written_before_the_field():
+    assert _state().model_rev == 1
+
+
+def test_current_model_rev_passes():
+    from turin import MODEL_REV
+
+    _state(model_rev=MODEL_REV).check_model_rev()      # must not raise
+
+
+def test_an_older_model_rev_refuses_to_continue():
+    from turin import MODEL_REV
+
+    with pytest.raises(SystemExit, match="cannot be continued"):
+        _state(model_rev=MODEL_REV - 1).check_model_rev()
+    # the message must name both revisions and the way out
+    try:
+        _state(model_rev=MODEL_REV - 1).check_model_rev()
+    except SystemExit as exc:
+        text = str(exc)
+        assert str(MODEL_REV) in text and str(MODEL_REV - 1) in text
+        assert "--fresh" in text
+
+
+def test_a_done_lineph_state_survives_an_older_revision():
+    """It is never continued -- it only seeds the TTV initialization."""
+    from turin import MODEL_REV
+
+    logs = []
+    _state(model_rev=MODEL_REV - 1, mode="lineph", done=True
+           ).check_model_rev(log=logs.append)
+    assert any("only seeds" in m for m in logs)
+
+    # but an unfinished one, or a ttv one, still refuses
+    with pytest.raises(SystemExit):
+        _state(model_rev=MODEL_REV - 1, mode="lineph", done=False
+               ).check_model_rev()
+    with pytest.raises(SystemExit):
+        _state(model_rev=MODEL_REV - 1, mode="ttv", done=True
+               ).check_model_rev()
+
+
+def test_provenance_records_the_model_revision():
+    from turin import MODEL_REV
+
+    assert f"rev{MODEL_REV}" in outputs.provenance()

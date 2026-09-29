@@ -56,10 +56,10 @@ Three solves are available, selected by ``--PL``:
 
     Note the crossover is a property of this implementation, not of the
     mathematics: a proper batched Cholesky would push it out. Since turin's
-    cross-validation caps the Legendre order at 5 (six columns), **turin today
-    lives entirely to the left of the crossover and should use** ``exact``.
-    ``hybrid`` earns its place if the nuisance basis ever grows -- splines,
-    cotrending basis vectors, PLD pixel regressors.
+    cross-validation caps the Legendre order at 5 (six columns), turin today
+    lives to the left of it -- but none of these numbers need to be trusted
+    by hand. ``--PL`` defaults to ``auto``, which measures all three modes on
+    the actual target and machine; see :mod:`turin.plselect`.
 
 Implementation notes that matter:
 

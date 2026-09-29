@@ -15,12 +15,14 @@ import time
 import mlx.core as mx
 import numpy as np
 
+from . import MODEL_REV as _MODEL_REV
 from . import __version__
 from . import capabilities as _caps
 from . import likelihood as _likelihood
 from . import outputs as _outputs
 from . import params as _params
 from . import plots as _plots
+from . import plselect as _plselect
 from . import prep as _prep
 from . import profile as _profile
 from . import sampling as _sampling
@@ -134,9 +136,14 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
     prior_state = None if args.fresh else _outputs.load_resume(
         outdir, target, mode)
     if prior_state is not None:
-        prior_state.check(b_prior=args.b_prior, profile_mode=args.profile_mode,
-                          geometry=args.geometry, sampler=args.sampler,
-                          ttv_max=args.ttv_max_days)
+        prior_state.check_model_rev(log=log)
+        prior_state.check(
+            b_prior=args.b_prior, geometry=args.geometry,
+            sampler=args.sampler, ttv_max=args.ttv_max_days,
+            # "auto" is a request to measure, not a model choice, so it can
+            # never conflict with what a previous run resolved to
+            profile_mode=(None if args.profile_mode == "auto"
+                          else args.profile_mode))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -159,14 +166,28 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
     else:
         layout = _params.lineph_layout(prepared.eph, b_prior=args.b_prior)
 
+    build_kw = dict(num_resample=prepared.num_resample,
+                    exposure_time=prepared.exposure_time,
+                    geometry=args.geometry, n_chains_hint=args.chains)
+
+    # A resumed run keeps the mode it was sampled under: a continuation must
+    # not silently change its own likelihood. An explicit --PL wins otherwise.
+    if prior_state is not None and args.profile_mode == "auto":
+        pl_choice = _plselect.fixed_choice(
+            prior_state.profile_mode, "carried over from the resumed run")
+    elif args.profile_mode != "auto":
+        pl_choice = _plselect.fixed_choice(args.profile_mode)
+    else:
+        pl_choice = None                     # probed below, once the MAP exists
+
+    provisional = pl_choice.mode if pl_choice else "exact"
     target_obj, transform, lp, hi = _likelihood.build_target(
         layout, centering, epoch_data, orders,
-        num_resample=prepared.num_resample,
-        exposure_time=prepared.exposure_time,
-        profile_mode=args.profile_mode, geometry=args.geometry,
-        n_chains_hint=args.chains)
+        profile_mode=provisional, **build_kw)
     log(f"  log-density: dim {layout.dim}, "
         f"{len(lp.blocks)} epoch block(s) of <= {lp.block_size}")
+    if pl_choice is not None:
+        log(pl_choice.describe())
 
     # ---- initialization
     shape0 = dict(lineph_ml) if (mode == "ttv" and lineph_ml) else None
@@ -182,7 +203,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
             k=s["k"], b=b0, T14=s["T14"], q1=s["q1"], q2=s["q2"],
             period=layout.P_ref, num_resample=prepared.num_resample,
             exposure_time=prepared.exposure_time,
-            profile_mode=args.profile_mode, geometry=args.geometry)
+            profile_mode=provisional, geometry=args.geometry)
         weak = np.where(rival_gap < _seeding.RIVAL_GAP_WARN)[0]
         if weak.size:
             log(f"  WARNING: {weak.size} epoch(s) have a rival timing mode "
@@ -226,7 +247,24 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
             log(f"    WARNING: the best starts disagree by "
                 f"{map_res.top_spread:.1f} log-units — the posterior probably "
                 "has more than one basin")
+        if pl_choice is None:
+            # Probe at the MAP: the ball is scaled to the posterior's own
+            # width, so the modes are compared where sampling happens.
+            pl_choice = _plselect.select_pl_mode(
+                layout, centering, epoch_data, orders, map_res.u_best,
+                transform, build_kwargs=build_kw, n_chains=cfg.n_chains,
+                seed=args.seed, log=log)
         u0 = map_res.ball(cfg.n_chains, seed=args.seed + 1)
+
+    if pl_choice is None:                    # resumed without a MAP step
+        pl_choice = _plselect.fixed_choice(
+            provisional, "carried over from the resumed run")
+    if pl_choice.mode != provisional:
+        # the unconstrained space is identical across modes, so the MAP and
+        # its init ball carry over unchanged
+        target_obj, transform, lp, hi = _likelihood.build_target(
+            layout, centering, epoch_data, orders,
+            profile_mode=pl_choice.mode, **build_kw)
 
     if u0 is not None:
         _sampling.check_precision(target_obj, u0, log=log,
@@ -238,7 +276,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
     def on_round(results, verdict, rnd):
         _export_all(mode, args, prepared, epoch_data, centering, orders,
                     layout, transform, lp, results, verdict, outdir, caps,
-                    log=log, state_holder=state_holder, cfg=cfg)
+                    log=log, state_holder=state_holder, cfg=cfg,
+                    pl_mode=pl_choice.mode)
 
     results, verdict, total = _sampling.run_rounds(
         target_obj, list(layout.names), u0, cfg, log=log, on_round=on_round,
@@ -262,7 +301,7 @@ def _ml_row(results, lp, transform):
 
 def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                 transform, lp, results, verdict, outdir, caps, *, log,
-                state_holder, cfg):
+                state_holder, cfg, pl_mode):
     """Write every product for this mode. Called after each sampling round."""
     target = prepared.target
     names = list(layout.names)
@@ -356,8 +395,9 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     state = _outputs.ResumeState(
         target=target, mode=mode, turin_version=__version__,
         launch_command=_outputs.launch_command(), tag=args.tag,
-        b_prior=layout.b_prior, profile_mode=args.profile_mode,
+        b_prior=layout.b_prior, profile_mode=pl_mode,
         geometry=args.geometry, sampler=args.sampler,
+        model_rev=_MODEL_REV,
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
         n_durations=float(epoch_data["half_window"]
                           / (prepared.eph["duration"] / 24.0)),

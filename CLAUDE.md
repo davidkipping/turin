@@ -164,6 +164,14 @@ data axis across epoch boundaries and so cannot hold a per-epoch solve.
 
 - **One patch bump per commit.** 0.1.N is commit N; update
   `pyproject.toml`, `turin/__init__.py` and a `VERSIONS.md` row together.
+- **Bump `MODEL_REV` (`turin/__init__.py`) in any commit that changes the
+  value of the log-density**, and say so in the VERSIONS.md row. Resume
+  state records it and `ResumeState.check_model_rev` refuses to continue
+  chains sampled under an older revision, so a correction cannot silently
+  contaminate a long run. hurin added the same mechanism in 0.1.68 after a
+  limb-darkening fix changed its likelihood. The `GUARDS` tuple is the
+  other half: it catches the *user* asking for a different model,
+  `MODEL_REV` catches the model changing underneath them.
 - **Provenance stamping** on every product: `# turin <version> | <launch
   command>` on **line 2** of CSVs (after the header, because
   `np.genfromtxt(names=True)` treats a leading comment as the header), a
