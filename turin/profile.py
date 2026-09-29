@@ -36,22 +36,30 @@ Three solves are available, selected by ``--PL``:
     equations. Each step costs two ``O(n_pts m)`` matvecs, and the exact
     matrix is never formed.
 
-    **It is not currently faster.** Measured end to end (512 chains, 30
-    epochs, 2,573 points, value+grad, compiled), against ``exact`` = 1.00:
+    It is worth using only for a **large** basis. Measured end to end
+    (512 chains, 30 epochs, 2,573 points, value+grad, compiled):
 
-        basis cols     exact    hybrid     ratio
-                 3     14.9ms    17.3ms    12.4ms
-                 6     19.5ms    24.6ms    15.3ms
+        basis cols      exact     hybrid      ratio   hybrid/exact
+                 3     13.2ms     12.8ms     11.1ms          0.97x
+                 6     18.2ms     21.9ms     15.7ms          1.20x
+                10     21.2ms     27.1ms     13.9ms          1.27x
+                16     54.5ms     30.3ms     20.3ms          0.56x
+                24    216.2ms     55.7ms     14.4ms          0.26x
+                40   1785.4ms    101.4ms     36.6ms          0.06x
 
-    Two reasons. At Legendre sizes the profile solve is not the bottleneck --
-    the transit model is most of that time -- and each refinement step costs a
-    triangular substitution, which is ``O(m^2)`` *unrolled elementwise ops*
-    whose MLX launch overhead outweighs the fused contraction it replaces.
-    ``hybrid`` is kept because it is the right structure for a larger nuisance
-    basis (splines, cotrending vectors, PLD regressors), where ``exact``'s
-    ``O(n_pts m^2)`` contraction and ``O(m^3)`` factorization dominate and the
-    matrix is never formed -- but that case also wants a batched triangular
-    solve better than an unrolled one. At three to six columns, use ``exact``.
+    The crossover is around 12-14 columns. Below it the profile solve is not
+    the bottleneck at all (the transit model is), and hybrid's extra
+    triangular substitutions lose to one fused contraction. Above it
+    ``exact`` collapses -- its ``O(m^3)`` factorization is *unrolled
+    elementwise ops*, so m=40 issues on the order of 10,000 kernels -- while
+    hybrid stays near-linear because the exact matrix is never formed.
+
+    Note the crossover is a property of this implementation, not of the
+    mathematics: a proper batched Cholesky would push it out. Since turin's
+    cross-validation caps the Legendre order at 5 (six columns), **turin today
+    lives entirely to the left of the crossover and should use** ``exact``.
+    ``hybrid`` earns its place if the nuisance basis ever grows -- splines,
+    cotrending basis vectors, PLD pixel regressors.
 
 Implementation notes that matter:
 

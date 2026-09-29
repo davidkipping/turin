@@ -79,11 +79,11 @@ usage: turin --KOI-448.02 [options]
   --TTVmax=MINUTES        declared TTV amplitude; sets the timing priors
   --PL=exact|hybrid|ratio how the profile likelihood solves for the baseline
                           coefficients. exact (default) is the true
-                          flux-space profile; ratio is hurin's form, ~20%
-                          faster but O(transit depth) approximate; hybrid
-                          refines ratio's static factorization to exact
-                          accuracy, and is worthwhile only for a much larger
-                          nuisance basis than Legendre polynomials
+                          flux-space profile and is the right choice at
+                          Legendre sizes; ratio is hurin's form, faster but
+                          approximate to O(transit depth), so it suits
+                          shallow transits; hybrid is exact to float32 and
+                          overtakes exact only above ~14 basis columns
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
