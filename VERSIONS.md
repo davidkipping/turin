@@ -8,6 +8,8 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.11 | — | 2026-09-29 | Docs: restore CLAUDE.md's point-order section (accidentally removed in 0.1.9), add the end-to-end KOI-448.02 timing (549 s → 118 s, medians within 0.02σ), retire the stale "tau kernel is 2x slower" note. (MODEL_REV unchanged at 3) |
+| 0.1.10 | — | 2026-09-29 | Version bump only: the intended docs edit failed in a script and landed in 0.1.11 |
 | 0.1.9 | — | 2026-09-29 | **MODEL_REV 2→3.** N_GL 9→5: judged on the log-likelihood rather than the kernel's own dF/dP, five is 40x below the float32 noise floor (sd 5e-4) and now 1.55x faster (14.1 → 9.1 ms on KOI-448.02) |
 | 0.1.8 | — | 2026-09-29 | Feed MetalPlanet's kernel points in phase order and park padded slots at quadrature, removing SIMD divergence: log-density value+grad 3.3x faster on KOI-448.02 (45.8 → 14.1 ms). Values bit-identical. (MODEL_REV unchanged at 2) |
 | 0.1.7 | — | 2026-09-29 | Drop the chain-by-chain float64 workaround: MetalPlanet b3e9872 fixed the graph-path batching. Output bit-identical. (MODEL_REV unchanged at 2) |
