@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.DS_Store
+
+# fit products and caches (targets write <TARGET>/ directories in cwd)
+KOI-*/
+TOI-*/
+cache/
+tests/fixtures/*.npz

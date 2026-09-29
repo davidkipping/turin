@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turin"
+version = "0.1.0"
+description = "GPU transit fitting for Kepler and TESS: profile-likelihood polynomial detrending with MetalPlanet and anvil on Apple Silicon"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "David Kipping" }]
+dependencies = [
+    "mlx>=0.30",
+    "numpy>=1.24",
+    "lightkurve>=2.4",
+    "astropy>=5.3",
+    "requests>=2.31",
+    "matplotlib>=3.7",
+    "corner>=2.2",
+    "metalplanet @ git+https://github.com/davidkipping/MetalPlanet.git",
+    "anvil-mcmc @ git+https://github.com/davidkipping/anvil.git",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4", "scipy>=1.11"]
+gp = ["anvil-gp @ git+https://github.com/davidkipping/anvil-gp.git"]
+
+[project.scripts]
+turin = "turin.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["turin*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["slow: end-to-end fits and injection-recovery (minutes)"]
