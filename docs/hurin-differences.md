@@ -1,16 +1,29 @@
 # Where turin's model differs from hurin's, and why
 
-Measured 2026-09-28 while porting the forward model, on an M-series Mac with
-MLX 0.32.3, MetalPlanet 0.6.1, and hurin 0.1.67 in its own conda env. Every
-number here is reproduced by `tests/test_model.py`.
+Measured 2026-09-28/29 on an M-series Mac with MLX 0.32.3, MetalPlanet 0.6.1,
+and hurin in its own conda env. Every number here is reproduced by
+`tests/test_model.py`.
 
-turin is not bit-compatible with hurin, and two of the three reasons are
-corrections rather than choices. All three are switchable, so any hurin
-result can be reproduced for comparison.
+turin is not bit-compatible with hurin, and all the differences are
+switchable, so any hurin result can be reproduced for comparison.
 
-## 1. The limb-darkening map: hurin's is not Kipping (2013)
+**One of the three has since been fixed upstream.** turin's port surfaced a
+limb-darkening bug in hurin, and hurin 0.1.68 corrected it, so against current
+hurin only the orbit model and the profile form differ. The measurements for
+the limb-darkening case are kept below because they explain hurin results
+published before 0.1.68 — including the KOI-448.02 comparison in this
+document, which was run against hurin 0.1.62.
 
-**This looks like a bug in hurin.** `hurin/transit_fit.py:262` says
+## 1. The limb-darkening map — FIXED UPSTREAM in hurin 0.1.68
+
+**Status: resolved.** turin's port surfaced this, and hurin adopted the
+correct map in commit `bac2362`, "Fix Kipping (2013) limb-darkening map: both
+factors of 2 were missing". Against hurin >= 0.1.68 this difference no longer
+exists; `--ld=hurin` now reproduces *pre-0.1.68* hurin only. The measurements
+below are kept because they explain the older published results, including
+the KOI-448.02 comparison further down, which was made against hurin 0.1.62.
+
+The original finding: `hurin/transit_fit.py:262` said
 "Converts q1,q2 to u1,u2 via Kipping (2013) reparameterization" and then
 computes
 
@@ -39,10 +52,9 @@ At `(q1, q2) = (0.30, 0.45)`, `k = 0.08`, `b = 0.35` the two maps differ by
 magnitude above the fp32 noise floor. This is the largest of the three
 differences by far.
 
-turin defaults to `ld_map="kipping"` and offers `ld_map="hurin"` for parity.
-**Worth reporting upstream to hurin**, since it affects every fit that
-package has produced, and the fix would change published limb-darkening
-posteriors (and, weakly through the depth, `k`).
+turin defaults to `ld_map="kipping"`; `ld_map="hurin"` reproduces pre-0.1.68
+hurin. Any hurin result produced before 0.1.68 carries the truncated prior,
+which matters most for grazing systems (see the KOI-448.02 section below).
 
 ## 2. The orbit: jaxoplanet's `TransitOrbit` is a straight chord, not a circle
 
@@ -99,7 +111,7 @@ points, `--nongrazing`, per-epoch cross-validated Legendre orders). turin ran
 
 **Two conclusions, and the second is the interesting one.**
 
-**1. The stack is validated.** In hurin-compatibility mode
+**1. The stack is validated.** In compatibility mode for *that* hurin version
 (`--geometry=chord --ld=hurin --profile=ratio`) turin reproduces hurin on
 every parameter to **0.04 sigma or better**, with widths agreeing to 1-3%.
 Nothing is shared between the two implementations: MLX against JAX, ChEES-HMC
@@ -107,7 +119,9 @@ against NUTS, an unrolled Cholesky against `jnp.linalg.solve`, 256 chains
 against 8. Agreement at that level is strong evidence for both.
 
 **2. Fixing the limb-darkening map widens grazing-transit posteriors, because
-hurin's truncated prior was quietly regularizing them.** KOI-448.02 is
+the truncated prior was quietly regularizing them.** This now applies to hurin
+too, from 0.1.68 on: the effect below is a property of the correction, not of
+turin. KOI-448.02 is
 grazing (b = 0.949 against 1 - k = 0.952), and the corrected map lets the fit
 reach limb-darkening coefficients hurin could not represent at all:
 

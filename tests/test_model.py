@@ -288,37 +288,66 @@ def test_log10_rho_round_trips_through_a_over_rstar():
     assert 2.0 < got < 4.5
 
 
-@pytest.mark.skipif(not os.path.exists(_HURIN_PY),
-                    reason="hurin conda env not installed")
-def test_chord_plus_hurin_ld_reproduces_hurin_jaxoplanet():
-    """turin must be able to reproduce hurin's model, for parity validation.
-
-    hurin runs jaxoplanet in float32 (x64 is never enabled), so ~2e-7 is
-    hurin's own floor and the target tolerance.
-    """
-    q1_h, q2_h = 0.30, 0.45
+def _hurin_flux(q1, q2):
+    """Evaluate hurin's own transit model in the hurin environment."""
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "hf.npy")
         code = (
             "import numpy as np, sys\n"
             f"sys.path.insert(0, {_HURIN_DIR!r})\n"
             "import hurin.transit_fit as tf\n"
+            "import hurin\n"
             f"t = np.linspace(-0.25, 0.25, 601)\n"
             f"np.save({out!r}, np.asarray(tf.transit_model("
-            f"t, {P_REF}, 0.0, {B}, {K}, {T14}, {q1_h}, {q2_h}),"
+            f"t, {P_REF}, 0.0, {B}, {K}, {T14}, {q1}, {q2}),"
             " dtype=np.float64))\n"
+            "print(hurin.__version__)\n"
         )
         r = subprocess.run([_HURIN_PY, "-c", code], capture_output=True,
                            text=True, timeout=900)
         if r.returncode != 0:
             pytest.skip(f"hurin model call failed: {r.stderr[-400:]}")
-        hurin_f = np.load(out)
+        return np.load(out), r.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.skipif(not os.path.exists(_HURIN_PY),
+                    reason="hurin conda env not installed")
+def test_chord_geometry_reproduces_hurin_jaxoplanet():
+    """turin must be able to reproduce hurin's model, for parity validation.
+
+    hurin 0.1.68 fixed its limb-darkening map, so parity with *current* hurin
+    is ``geometry="chord"`` with the standard Kipping map -- the orbit model
+    is the only remaining difference. hurin runs jaxoplanet in float32 (x64 is
+    never enabled), so ~2e-7 is its own floor and the target tolerance.
+    """
+    q1_h, q2_h = 0.30, 0.45
+    hurin_f, version = _hurin_flux(q1_h, q2_h)
+    fixed_ld = tuple(int(p) for p in version.split(".")[:3]) >= (0, 1, 68)
+    ld = "kipping" if fixed_ld else "hurin"
 
     with mx.stream(mx.cpu):
         got = turin_flux(grid=one_epoch_grid(), q1=q1_h, q2=q2_h,
-                         geometry="chord", ld_map="hurin")
-        naive = turin_flux(grid=one_epoch_grid(), q1=q1_h, q2=q2_h,
-                           geometry="circular", ld_map="kipping")
-    assert np.abs(got - hurin_f).max() < 1e-6, "parity mode must match hurin"
-    # and the default configuration genuinely differs, dominated by the LD map
-    assert np.abs(naive - hurin_f).max() > 1e-5
+                         geometry="chord", ld_map=ld)
+        other = turin_flux(grid=one_epoch_grid(), q1=q1_h, q2=q2_h,
+                           geometry="chord",
+                           ld_map="hurin" if fixed_ld else "kipping")
+    assert np.abs(got - hurin_f).max() < 1e-6, (
+        f"parity mode must match hurin {version}")
+    # the other map is the pre-0.1.68 one, and is genuinely different
+    assert np.abs(other - hurin_f).max() > 1e-5
+
+
+@pytest.mark.skipif(not os.path.exists(_HURIN_PY),
+                    reason="hurin conda env not installed")
+def test_geometry_is_the_only_remaining_model_difference_from_hurin():
+    """With hurin >= 0.1.68 the limb darkening agrees; the orbit still differs."""
+    hurin_f, version = _hurin_flux(0.30, 0.45)
+    if tuple(int(p) for p in version.split(".")[:3]) < (0, 1, 68):
+        pytest.skip(f"hurin {version} predates the limb-darkening fix")
+    with mx.stream(mx.cpu):
+        circ = turin_flux(grid=one_epoch_grid(), q1=0.30, q2=0.45,
+                          geometry="circular", ld_map="kipping")
+    # turin's default still differs from hurin, now purely by the chord
+    # approximation: O((T14/P)^2), far above the float32 floor
+    d = np.abs(circ - hurin_f).max()
+    assert 1e-6 < d < 1e-4, d

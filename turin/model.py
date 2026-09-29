@@ -27,26 +27,28 @@ Two orbit geometries are available, because hurin's was an approximation:
     transit. It agrees with ``circular`` only to O((T14/P)^2) — measured
     4.6e-6 in flux at T14/P = 0.019.
 
-Likewise two limb-darkening maps, because hurin's is not the one it claims:
+Likewise two limb-darkening maps:
 
 ``kipping`` (default)
     Kipping (2013), as ``metalplanet.ld.q_to_u`` implements it:
     ``u1 = 2 sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - 2 q2)``. The unit square in
-    (q1, q2) maps onto the whole physically-allowed (u1, u2) triangle.
+    (q1, q2) maps onto the whole physically-allowed (u1, u2) triangle. This
+    is also what hurin uses from 0.1.68 onward.
 
 ``hurin``
-    ``u1 = sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - q2)`` — hurin's
-    ``transit_fit.transit_model``, whose docstring cites Kipping (2013) but
-    drops both factors of two. Its q2 is twice Kipping's, and its image is
-    only the ``u1, u2 >= 0`` sub-region: it cannot represent the negative
-    ``u2`` that quadratic-law fits to real stars often prefer. Provided for
-    parity runs, not recommended for science.
+    ``u1 = sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - q2)`` — the map hurin used
+    **before 0.1.68**, whose docstring cited Kipping (2013) but dropped both
+    factors of two. Its q2 is twice Kipping's, and its image is only the
+    ``u1, u2 >= 0`` sub-region: it cannot represent the negative ``u2`` that
+    quadratic-law fits to real stars often prefer. turin's port surfaced
+    this and hurin 0.1.68 adopted the correct map, so the option now serves
+    only to reproduce results from earlier hurin versions. Not for science.
 
 Validated against three independent references (see tests/test_model.py):
 fp64 circular agrees with MetalPlanet's batman-style frontend to 3.3e-16,
-fp32 to 1.6e-7 (MetalPlanet's documented fp32 floor), and ``chord`` plus the
-``hurin`` LD map reproduces hurin/jaxoplanet to 2.2e-7, which is hurin's own
-float32 floor.
+fp32 to 1.6e-7 (MetalPlanet's documented fp32 floor), and ``chord`` reproduces
+hurin/jaxoplanet to 2.2e-7, which is hurin's own float32 floor. Against
+hurin >= 0.1.68 the orbit model is the only remaining difference.
 """
 
 from __future__ import annotations

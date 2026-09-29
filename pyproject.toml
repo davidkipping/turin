@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turin"
-version = "0.1.1"
+version = "0.1.2"
 description = "GPU transit fitting for Kepler and TESS: profile-likelihood polynomial detrending with MetalPlanet and anvil on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -81,6 +81,11 @@ class ProfileDesign:
     Lw: mx.array         # (E, P, n) L scaled by the normalized solve weights
     G: mx.array          # (E, P, n, n) Lw_i * L_j, for the exact normal matrix
     M_ratio: mx.array    # (E, n, n) static normal matrix for ratio mode
+    #: (E, n, n) its Cholesky factor, precomputed in float64 on the host.
+    #: This is the structural payoff of the ratio formulation: the normal
+    #: matrix does not depend on the transit parameters, so it is factorized
+    #: once at setup and the hot loop is two triangular solves.
+    chol_ratio: mx.array
     diag_fix: mx.array   # (E, n, n) puts 1 on inactive diagonal entries
     y_dev: mx.array      # (E, P) observed flux MINUS 1, padded with 0.0
     inv_sigma: mx.array  # (E, P) 1/sigma with padded points zeroed
@@ -108,7 +113,8 @@ class ProfileDesign:
         """
         return ProfileDesign(
             L=self.L[lo:hi], Lw=self.Lw[lo:hi], G=self.G[lo:hi],
-            M_ratio=self.M_ratio[lo:hi], diag_fix=self.diag_fix[lo:hi],
+            M_ratio=self.M_ratio[lo:hi], chol_ratio=self.chol_ratio[lo:hi],
+            diag_fix=self.diag_fix[lo:hi],
             y_dev=self.y_dev[lo:hi], inv_sigma=self.inv_sigma[lo:hi],
             mask=self.mask[lo:hi], orders=self.orders[lo:hi],
             n_real_per_epoch=self.n_real_per_epoch[lo:hi],
@@ -170,6 +176,12 @@ def build_design(epoch_data, orders, dtype=mx.float32):
         for j in range(orders[i] + 1, n_cols):
             diag_fix[i, j, j] = 1.0
 
+    # Factorize the static ratio-mode normal matrix once, in float64. The
+    # same pinning and ridge the hot path would apply are baked in here.
+    ridge = RIDGE_REL.get(dtype, RIDGE_REL_DEFAULT)
+    M_r = (M_ratio + diag_fix) * (1.0 + ridge * np.eye(n_cols))
+    chol_ratio = np.linalg.cholesky(M_r)
+
     inv_sigma = np.where(mask > 0, 1.0 / np.maximum(ferr, 1e-300), 0.0)
     n_real = int(mask.sum())
 
@@ -181,7 +193,8 @@ def build_design(epoch_data, orders, dtype=mx.float32):
 
     up = lambda a: mx.array(np.ascontiguousarray(a), dtype=dtype)
     return ProfileDesign(
-        L=up(L), Lw=up(Lw), G=up(G), M_ratio=up(M_ratio), diag_fix=up(diag_fix),
+        L=up(L), Lw=up(Lw), G=up(G), M_ratio=up(M_ratio),
+        chol_ratio=up(chol_ratio), diag_fix=up(diag_fix),
         y_dev=up(flux - 1.0), inv_sigma=up(inv_sigma), mask=up(mask),
         orders=orders,
         n_real_per_epoch=n_real_per_epoch, n_real=n_real,
@@ -189,17 +202,9 @@ def build_design(epoch_data, orders, dtype=mx.float32):
     )
 
 
-def _cholesky_solve(M, rhs, n):
-    """Solve ``M c = rhs`` for symmetric positive-definite ``M``, unrolled.
-
-    ``M``: (..., n, n); ``rhs``: (..., n). Returns (..., n). Pure elementwise
-    MLX arithmetic on scalar slices: no ``linalg``, GPU-resident,
-    differentiable, and fixed-shape so it compiles.
-    """
+def _cholesky_factor(M, n):
+    """Cholesky factor of a batched SPD matrix, unrolled. ``M``: (..., n, n)."""
     a = [[M[..., i, j] for j in range(n)] for i in range(n)]
-    b = [rhs[..., i] for i in range(n)]
-
-    # Cholesky factorization, M = L L^T (lower triangular, in place)
     chol = [[None] * n for _ in range(n)]
     for j in range(n):
         d = a[j][j]
@@ -215,6 +220,16 @@ def _cholesky_solve(M, rhs, n):
             for k in range(j):
                 s = s - chol[i][k] * chol[j][k]
             chol[i][j] = s / ljj
+    return chol
+
+
+def _cholesky_substitute(chol, rhs, n):
+    """Forward then back substitution against a Cholesky factor.
+
+    ``chol`` is the nested-list factor from :func:`_cholesky_factor`, or any
+    lower-triangular factor sliced the same way. ``rhs``: (..., n).
+    """
+    b = [rhs[..., i] for i in range(n)]
 
     # forward substitution, L z = rhs
     z = [None] * n
@@ -233,6 +248,16 @@ def _cholesky_solve(M, rhs, n):
         c[i] = s / chol[i][i]
 
     return mx.stack(c, axis=-1)
+
+
+def _cholesky_solve(M, rhs, n):
+    """Solve ``M c = rhs`` for symmetric positive-definite ``M``, unrolled.
+
+    ``M``: (..., n, n); ``rhs``: (..., n). Returns (..., n). Pure elementwise
+    MLX arithmetic on scalar slices: no ``linalg``, GPU-resident,
+    differentiable, and fixed-shape so it compiles.
+    """
+    return _cholesky_substitute(_cholesky_factor(M, n), rhs, n)
 
 
 def solve_coefficients(design, f_dev, mode="exact"):
@@ -256,22 +281,31 @@ def solve_coefficients(design, f_dev, mode="exact"):
         f = 1.0 + f_dev
         M = mx.einsum("epij,cep->ceij", d.G, f * f)
         rhs = mx.einsum("epi,cep->cei", d.Lw, f * resid)
-    elif mode == "ratio":
-        # hurin: fit y/f - 1 against L, with the transit factored out of both
-        # the design and the weights, so the normal matrix is static.
-        # g_obs - 1 = (y - f)/f, again formed from the deviation.
-        f_safe = mx.maximum(1.0 + f_dev, 0.5)
-        M = mx.broadcast_to(d.M_ratio[None], (f_dev.shape[0],) + d.M_ratio.shape)
-        rhs = mx.einsum("epi,cep->cei", d.Lw, resid / f_safe)
-    else:
-        raise ValueError(
-            f"unknown profile mode {mode!r}; expected one of {PROFILE_MODES}")
+        # pin inactive columns, then a scale-free ridge on what remains
+        M = M + d.diag_fix[None]
+        ridge = RIDGE_REL.get(M.dtype, RIDGE_REL_DEFAULT)
+        M = M * (1.0 + ridge * mx.eye(n, dtype=M.dtype)[None, None])
+        return _cholesky_solve(M, rhs, n)
 
-    # pin inactive columns, then a scale-free ridge on what remains
-    M = M + d.diag_fix[None]
-    ridge = RIDGE_REL.get(M.dtype, RIDGE_REL_DEFAULT)
-    M = M * (1.0 + ridge * mx.eye(n, dtype=M.dtype)[None, None])
-    return _cholesky_solve(M, rhs, n)
+    if mode == "ratio":
+        # hurin: fit y/f - 1 against L, with the transit factored out of both
+        # the design and the weights. g_obs - 1 = (y - f)/f, formed from the
+        # deviation.
+        #
+        # The structural payoff: the normal matrix does not depend on the
+        # transit parameters, so its Cholesky factor was computed once, in
+        # float64, at setup -- pinning and ridge already applied. The hot loop
+        # is two triangular substitutions, with neither the O(n_pts * n^2)
+        # contraction nor the O(n^3) factorization that `exact` must redo on
+        # every evaluation. The saving grows with the size of the basis.
+        f_safe = mx.maximum(1.0 + f_dev, 0.5)
+        rhs = mx.einsum("epi,cep->cei", d.Lw, resid / f_safe)
+        chol = [[d.chol_ratio[None, :, i, j] for j in range(n)]
+                for i in range(n)]
+        return _cholesky_substitute(chol, rhs, n)
+
+    raise ValueError(
+        f"unknown profile mode {mode!r}; expected one of {PROFILE_MODES}")
 
 
 def poly(design, coeffs):
