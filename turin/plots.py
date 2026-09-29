@@ -171,11 +171,9 @@ def model_grid(lp, v_row, *, n=1000, span_durations=3.0, T14=None):
     with mx.stream(mx.cpu):
         grid = _model.build_grid(
             centering,
-            _prep.supersample_offsets(lp.grid.sub_offsets.shape[0] > 1
-                                      and float(np.ptp(np.array(
-                                          lp.grid.sub_offsets))) or 0.0,
-                                      lp.grid.n_sub),
-            dtype=mx.float64)
+            _prep.supersample_offsets(lp.grid.exp_time, lp.grid.n_sub),
+            dtype=mx.float64, exp_time=lp.grid.exp_time,
+            n_gl=lp.grid.n_gl)
         p = lp.unpack(mx.array(np.asarray(v_row, dtype=np.float64)[None, :],
                                dtype=mx.float64))
         f = _model.transit_flux(

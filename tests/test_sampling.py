@@ -34,7 +34,7 @@ def make_dataset(dtau_true=0.0, n_periods=10.0, seed=7, yerr=YERR):
                            (n_ep,)).copy()
 
     grid = M.build_grid(cen, prep.supersample_offsets(29.4 / 1440, 7),
-                        dtype=mx.float64)
+                        dtype=mx.float64, exp_time=29.4 / 1440)
     col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
     with mx.stream(mx.cpu):
         f = np.array(M.transit_flux(
@@ -282,3 +282,122 @@ def test_ttv_injection_recovery_of_displaced_transits():
             f"epoch {i}: {med:.5f} vs {want:.5f} (sd {sd:.5f})")
     # and the shape parameters are still recovered
     assert abs(np.median(post[:, layout.index("k")]) - K_T) < 0.2 * K_T
+
+
+# -- resumed continuation ----------------------------------------------
+
+class _Gaussian:
+    """A trivial target with anvil's LogDensity shape, for driver tests."""
+
+    dim = 4
+    supports_grad = True
+
+    def log_prob(self, u):
+        return -0.5 * mx.sum(u * u, axis=-1)
+
+    def log_prob_and_grad(self, u):
+        out, vjps = mx.vjp(self.log_prob, [u],
+                           [mx.ones(u.shape[:1], dtype=u.dtype)])
+        return out[0], vjps[0]
+
+
+def _drive(max_samples=120, n_samples=40, seed=3):
+    t = _Gaussian()
+    u0 = mx.array(np.random.default_rng(0).standard_normal(
+        (64, t.dim)).astype(np.float32))
+    cfg = sampling.SamplerConfig(n_chains=64, n_warmup=120,
+                                 n_samples=n_samples, max_samples=max_samples,
+                                 seed=seed).for_mode(t.dim)
+    logs = []
+    res, verdict, total = sampling.run_rounds(
+        t, list("abcd"), u0, cfg, log=logs.append)
+    return t, res, verdict, total, "\n".join(logs)
+
+
+@pytest.mark.skipif(not capabilities.detect().anvil_resume,
+                    reason="installed anvil has no resume")
+def test_extension_is_a_continuation_and_pools_its_draws():
+    """With resume, later rounds continue the same chains, so they pool."""
+    t, res, verdict, total, text = _drive()
+    assert "continuation, adaptation frozen" in text
+    assert "NEW chain" not in text
+    assert isinstance(res, sampling.Continuation)
+    # every requested draw is reported, not just the last round's
+    assert verdict.n_draws == total
+    chain = res.get_chain()
+    assert chain.shape == (total, 64, t.dim)
+    assert res.get_log_prob().shape == (total, 64)
+    assert res.get_chain(flat=True).shape == (total * 64, t.dim)
+
+
+@pytest.mark.skipif(not capabilities.detect().anvil_resume,
+                    reason="installed anvil has no resume")
+def test_a_pooled_continuation_still_samples_the_right_distribution():
+    """Pooling is only valid if the segments really are one chain."""
+    t, res, verdict, total, text = _drive()
+    flat = res.get_chain(flat=True).astype(np.float64)
+    np.testing.assert_allclose(flat.mean(axis=0), 0.0, atol=0.05)
+    np.testing.assert_allclose(flat.std(axis=0), 1.0, rtol=0.05)
+    assert not verdict.health.any_trapped
+
+
+@pytest.mark.skipif(not capabilities.detect().anvil_resume,
+                    reason="installed anvil has no resume")
+def test_continuation_delegates_state_saving_to_the_latest_segment(tmp_path):
+    """Resume state must describe where the chains ARE, not where they were."""
+    import anvil
+
+    t, res, _, _, _ = _drive()
+    path = str(tmp_path / "state.npz")
+    res.save_state(path)
+    state = anvil.load_state(path)
+    again = anvil.run(anvil.ChEESHMC(t, max_leapfrog=32), t, resume=state,
+                      n_samples=10, progress=False)
+    assert again.get_chain().shape == (10, 64, t.dim)
+
+
+@pytest.mark.skipif(not capabilities.detect().anvil_resume,
+                    reason="installed anvil has no resume")
+def test_per_chain_divergences_are_now_available():
+    """anvil reports the vector, so the trapped-chain check can tell the two
+    failure modes apart rather than guessing."""
+    _, res, _, _, _ = _drive()
+    per_chain = capabilities.per_chain_divergences(res)
+    assert per_chain is not None
+    assert len(per_chain) == 64
+    assert int(np.sum(per_chain)) == int(res.extras["n_divergent"])
+
+
+def test_continuation_presents_the_results_interface_turin_consumes():
+    """A hand-built Continuation, so the contract is pinned without sampling."""
+    class Seg:
+        def __init__(self, chain, lp, n=2):
+            self._c, self._lp = chain, lp
+            self.final_state = {"u": chain[-1]}
+            self.warmup_trace = {"iter": [1]}
+            self.extras = {"n_divergent": n}
+            self.accept_fraction = np.full(chain.shape[1], 0.7)
+            self.n_chains, self.dim = chain.shape[1], chain.shape[2]
+            self.n_warmup, self.thin = 10, 1
+
+        def get_chain(self, discard=0, thin=1, flat=False):
+            return self._c
+
+        def get_log_prob(self, discard=0, thin=1, flat=False):
+            return self._lp
+
+    rng = np.random.default_rng(0)
+    segs = [Seg(rng.standard_normal((5, 3, 2)), rng.standard_normal((5, 3)))
+            for _ in range(3)]
+    cont = sampling.Continuation(segs)
+    assert cont.get_chain().shape == (15, 3, 2)
+    assert cont.get_log_prob().shape == (15, 3)
+    assert cont.get_chain(flat=True).shape == (45, 2)
+    # accounting comes from the latest segment, as anvil specifies
+    assert cont.extras is segs[-1].extras
+    assert cont.final_state is segs[-1].final_state
+    # warmup happened in the first segment
+    assert cont.warmup_trace is segs[0].warmup_trace
+    # and the health check reads it without special-casing
+    health = sampling.chain_health(cont)
+    assert health.n_chains == 3

@@ -38,7 +38,15 @@ session; the user runs it there and reports back. Existing briefs:
   kernel with in-kernel exposure integration.
 
 `turin/capabilities.py` feature-detects every upstream capability and
-falls back when it is absent. **turin must always run against the
+falls back when it is absent. All four anvil asks and the MetalPlanet one
+have since landed; the fallbacks remain because turin must keep working
+against older installs.
+
+One upstream bug is worked around in `model.transit_flux_dev`: MetalPlanet's
+**float64 graph path** of `flux_dev_from_tau` cannot broadcast its per-chain
+parameters for `n_chains > 1` (any parameter shape, including scalars), so
+turin loops chain by chain there. The float32 kernel is unaffected. Remove
+the loop once it is fixed upstream. **turin must always run against the
 packages as currently published on GitHub.** When adding a dependency on
 an upstream feature, add the detection and the fallback in the same
 change.
@@ -132,6 +140,36 @@ batched shape stays fixed; `+1e-10 I` Tikhonov regularization as in hurin.
 **MLX `linalg` runs on the CPU only**, so the per-epoch solve is an
 unrolled Cholesky in elementwise MLX ops (at most 6x6, fixed size,
 differentiable, GPU-resident).
+
+### Exposure integration
+
+Kepler long cadence (29.4 min) is comparable to a short transit's ingress, so
+finite-exposure integration is mandatory. turin uses MetalPlanet's
+`flux_dev_from_tau` with the **contact rule** (`model.N_GL` Gauss-Legendre
+nodes per contact sub-interval), which integrates inside the kernel so the
+sub-exposure axis never reaches MLX.
+
+It replaced supersampling for **accuracy, not speed** — at turin's sizes it
+measured ~2x *slower*. What supersampling was costing, at the `n_sub` that
+Kipping (2010) Eq. 40 picks:
+
+- flux error 1.5e-4, about **2.3% of a transit depth**, against 6.4e-8;
+- `dF/d(period)` wrong by **~100x and with the wrong sign**. Differentiating
+  a supersampled kinked integrand amplifies its error, because the error
+  oscillates as nodes cross the contacts.
+
+`N_GL` is chosen for the gradient, not the value: five is already below the
+float32 floor on values, nine is needed to bring `dF/d(period)` to turin's own
+float32 gradient noise. It is affordable because the kernel is not
+arithmetic-bound at these sizes — 25 to 60 evaluations per point all measure
+the same.
+
+Two things to keep in mind. `geometry="chord"` has no kernel path and always
+supersamples. And **finite differences are not a valid gradient reference**
+under the contact rule: it freezes its split points (exact, since moving an
+interior split of a continuous integrand cancels), so an FD that recomputes
+them measures the quadrature's parameter sensitivity instead — and an FD
+straddling a contact is wrong at any step size.
 
 ### Why turin does not use MetalPlanet's sampler-facing API
 

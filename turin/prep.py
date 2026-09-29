@@ -400,7 +400,7 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
          f"(NEA: {eph['epoch']:.5f})")
     _log(f"  Period: {eph['period']:.6f} d, "
          f"Duration: {eph['duration']:.3f} h, cadence {cadence_days * 1440:.1f} min")
-    _log(f"  Sub-exposure nodes: {n_resam}")
+    _log(f"  Sub-exposure nodes (fallback route only): {n_resam}")
 
     return PreparedData(
         target=target,

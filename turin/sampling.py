@@ -282,6 +282,47 @@ def check_precision(target, u0, log=print, strict=True):
     return report
 
 
+class Continuation:
+    """The draws of several resumed segments, presented as one ``Results``.
+
+    Only valid when the segments really are a continuation of the same chains
+    -- i.e. anvil's ``resume`` was used, so nothing re-adapted between them.
+    Under the re-warmup fallback each round is a *different* Markov chain and
+    the segments must not be pooled; :func:`run_rounds` only builds this when
+    it resumed.
+
+    Presents the slice of ``anvil.Results`` that turin consumes. Per-segment
+    accounting (acceptance, divergences) is taken from the latest segment,
+    matching anvil's own contract that those describe the resumed segment.
+    """
+
+    def __init__(self, segments):
+        self.segments = list(segments)
+        last = self.segments[-1]
+        self.final_state = last.final_state
+        self.warmup_trace = self.segments[0].warmup_trace
+        self.extras = last.extras
+        self.accept_fraction = last.accept_fraction
+        self.n_chains = last.n_chains
+        self.dim = last.dim
+        self.n_warmup = self.segments[0].n_warmup
+        self.thin = last.thin
+        self._last = last
+
+    def get_chain(self, discard=0, thin=1, flat=False):
+        chain = np.concatenate([s.get_chain() for s in self.segments], axis=0)
+        chain = chain[discard::thin]
+        return chain.reshape(-1, chain.shape[-1]) if flat else chain
+
+    def get_log_prob(self, discard=0, thin=1, flat=False):
+        lp = np.concatenate([s.get_log_prob() for s in self.segments], axis=0)
+        lp = lp[discard::thin]
+        return lp.reshape(-1) if flat else lp
+
+    def save_state(self, path):
+        return self._last.save_state(path)
+
+
 def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                resume_state=None):
     """Sample, assess, and extend until converged or out of budget.
@@ -290,57 +331,75 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     the caller can re-export products each time -- hurin's behaviour, and what
     makes a long run interruptible.
 
-    Extension uses anvil's ``resume`` when available, which continues the same
-    chains with their adapted step size, trajectory length and preconditioner
-    frozen. Without it the only option is to start again from the previous
-    final positions *with* warmup: still useful, but not a continuation of the
-    same Markov chain, so the rounds cannot be concatenated. Either way turin
-    reports the latest round's draws, never a concatenation across re-adapted
-    rounds.
+    Extension uses anvil's ``resume``, which continues the same chains with
+    their adapted step size, trajectory length and preconditioner frozen, and
+    with the key stream continuing rather than forking (hence ``seed=None`` on
+    a continuation -- passing a seed would deliberately fork the segment).
+    Because those segments are one Markov chain, their draws are **pooled**:
+    a round that fails the convergence gates still contributes its samples,
+    so extending is cheap in both warmup and information.
+
+    Without ``resume`` the only option is to start again from the previous
+    final positions *with* warmup. That is a different Markov chain, so the
+    segments cannot be pooled and only the latest round is reported.
     """
     import anvil
 
     caps = _caps.detect()
     kernel = make_kernel(target, cfg, log=log)
     total = 0
+    segments = []
     results = None
     verdict = None
+    pooled = caps.anvil_resume
 
     for rnd in range(64):           # a bound, not an expectation
         n_samples = cfg.n_samples if rnd == 0 else min(
             cfg.n_samples * 2 ** rnd, max(1, cfg.max_samples - total))
-        kw = dict(n_samples=n_samples, thin=cfg.thin,
-                  seed=cfg.seed + rnd, progress=False)
+        kw = dict(n_samples=n_samples, thin=cfg.thin, progress=False)
 
         t0 = time.perf_counter()
         if rnd == 0 and resume_state is not None and caps.anvil_resume:
             log(f"  round {rnd}: resuming {n_samples} draws/chain "
                 "with frozen adaptation")
-            results = anvil.run(kernel, target, resume=resume_state,
+            # u0 is unused on a resume, but anvil checks its shape -- a free
+            # assertion that the stored state matches the requested chains
+            results = anvil.run(kernel, target, u0, resume=resume_state,
                                 n_warmup=0, **kw)
         elif rnd == 0:
             log(f"  round {rnd}: {cfg.n_warmup} warmup + {n_samples} "
                 f"draws/chain on {cfg.n_chains} chains")
-            results = anvil.run(kernel, target, u0, n_warmup=cfg.n_warmup, **kw)
+            results = anvil.run(kernel, target, u0, n_warmup=cfg.n_warmup,
+                                seed=cfg.seed, **kw)
         elif caps.anvil_resume:
             log(f"  round {rnd}: +{n_samples} draws/chain "
-                "(continuation, adaptation frozen)")
-            results = anvil.run(kernel, target, resume=results, n_warmup=0, **kw)
+                f"(continuation, adaptation frozen, "
+                f"{total} already banked)")
+            # seed=None continues the key stream instead of forking it
+            results = anvil.run(kernel, target, resume=results, n_warmup=0,
+                                **kw)
         else:
             log(f"  round {rnd}: +{n_samples} draws/chain — anvil has no "
                 "resume, so warmup is repeated from the last positions and "
                 "this round is a NEW chain, not a continuation")
             results = anvil.run(kernel, target, results.final_state["u"],
-                                n_warmup=cfg.n_warmup, **kw)
+                                n_warmup=cfg.n_warmup, seed=cfg.seed + rnd,
+                                **kw)
         el = time.perf_counter() - t0
         total += n_samples
+        segments.append(results)
 
-        verdict = assess(results, names)
+        reported = (Continuation(segments) if pooled and len(segments) > 1
+                    else results)
+        verdict = assess(reported, names)
         log(f"  round {rnd} took {el:.1f}s "
-            f"({n_samples * cfg.n_chains / max(el, 1e-9):.0f} draws/s)")
+            f"({n_samples * cfg.n_chains / max(el, 1e-9):.0f} draws/s)"
+            + (f"; pooled {verdict.n_draws} draws/chain over "
+               f"{len(segments)} segments" if pooled and len(segments) > 1
+               else ""))
         log(verdict.describe())
         if on_round is not None:
-            on_round(results, verdict, rnd)
+            on_round(reported, verdict, rnd)
 
         if verdict.converged:
             break
@@ -349,7 +408,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                 "without meeting the convergence gates")
             break
 
-    return results, verdict, total
+    return reported, verdict, total
 
 
 def certify(target, results, names, *, n_probe=256, target_ess=1e4, log=print):

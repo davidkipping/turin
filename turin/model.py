@@ -54,10 +54,54 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 import numpy as np
+import metalplanet
 from metalplanet.ld import q_to_u
 from metalplanet.metal import flux_dev_metal
 from metalplanet.orbit import separation_circular
 from metalplanet.trig import sincos
+
+#: MetalPlanet's tau-input kernel integrates the exposure *inside* the kernel,
+#: by the contact rule, so the sub-exposure axis never reaches MLX. turin
+#: asked for it in ``docs/upstream/metalplanet_prompt.md``; it landed on
+#: 2026-09-29. Tests set this to False to exercise the fallback.
+#:
+#: **turin adopted it for accuracy, not speed**, and the distinction matters
+#: because the brief expected the opposite. At turin's sizes (~2,500 points,
+#: 8 sub-exposures) it measured *2x slower* than expanding the axis --
+#: MetalPlanet's 2.3x win was at 15 sub-exposures, where materializing the
+#: expansion dominates. What it buys instead:
+#:
+#: * flux error 6.4e-8 against 1.5e-4, i.e. the old route was wrong by 2.3%
+#:   of a transit depth at the sub-exposure count Kipping (2010) Eq. 40 picks;
+#: * and, far more seriously, ``dF/d(period)`` correct to 1e-2 against
+#:   **98x wrong, with the wrong sign**. Supersampling a kinked integrand
+#:   gives an error that oscillates as nodes cross the contacts, so
+#:   differentiating it amplifies that error enormously even though the value
+#:   is merely mediocre.
+#:
+#: The posteriors turin produced before this were still valid -- HMC's
+#: Metropolis step uses the log-density, not the gradient, so a poor force
+#: field costs trajectory efficiency rather than correctness -- but there is
+#: no reason to keep paying for it.
+HAS_TAU_KERNEL = hasattr(metalplanet, "flux_dev_from_tau")
+#: Gauss-Legendre nodes per contact sub-interval.
+#:
+#: Chosen for the *gradient*, not the value: five already gives 6.4e-8 on the
+#: flux of a Kepler long-cadence transit, below float32's own 1.6e-7, but
+#: d(logL)/d(period) converges more slowly. Measured against a float64
+#: reference differentiated by central differences:
+#:
+#:     n_gl   evals/pt   rel. error in dF/d(period)
+#:        5         25   4.3e-2
+#:        7         35   1.6e-2
+#:        9         45   1.1e-2
+#:       12         60   2.6e-3
+#:
+#: Nine puts it at turin's own float32 gradient noise (~8e-3 on k). It is
+#: affordable because this kernel is not arithmetic-bound at turin's sizes:
+#: 25 through 60 evaluations per point all measured 33-34 ms for a
+#: 512-chain, 2,573-point value+grad, i.e. flat.
+N_GL = 9
 
 #: (b, k) prior parameterizations, after hurin's ``_sample_b_k``. Each maps a
 #: sampled fraction in [0, 1] to the impact parameter.
@@ -144,10 +188,13 @@ class EpochGrid:
     times: mx.array        # (n_epochs, max_pts) time minus epoch centre
     n_arr: mx.array        # (n_epochs,) integer epoch number vs the ephemeris
     d_arr: mx.array        # (n_epochs,) tau0_ref + n P_ref - centre, ~0
-    sub_offsets: mx.array   # (n_sub,) sub-exposure offsets about each sample
+    sub_offsets: mx.array   # (n_sub,) sub-exposure offsets, fallback route only
     P_ref: float
     tau0_ref: float
     dtype: mx.Dtype
+    #: exposure duration in days, for the in-kernel contact rule
+    exp_time: float = 0.0
+    n_gl: int = N_GL
 
     @property
     def n_epochs(self) -> int:
@@ -171,10 +218,13 @@ class EpochGrid:
             P_ref=self.P_ref,
             tau0_ref=self.tau0_ref,
             dtype=self.dtype,
+            exp_time=self.exp_time,
+            n_gl=self.n_gl,
         )
 
 
-def build_grid(centering, sub_offsets, dtype=mx.float32):
+def build_grid(centering, sub_offsets, dtype=mx.float32, *,
+               exp_time=0.0, n_gl=N_GL):
     """Upload the host-side centred arrays as an :class:`EpochGrid`.
 
     ``centering`` is :func:`turin.prep.centering_constants` output;
@@ -191,6 +241,8 @@ def build_grid(centering, sub_offsets, dtype=mx.float32):
         P_ref=float(centering["P_ref"]),
         tau0_ref=float(centering["tau0_ref"]),
         dtype=dtype,
+        exp_time=float(exp_time),
+        n_gl=int(n_gl),
     )
 
 
@@ -216,12 +268,42 @@ def mid_times_ttv(grid, dtau):
 
 
 def time_from_mid(grid, mid):
-    """Time of every sub-exposure node relative to its own mid-transit.
+    """Time of every *sample* relative to its own mid-transit.
 
-    Returns (n_chains, n_epochs, max_pts, n_sub).
+    Returns (n_chains, n_epochs, max_pts). The sub-exposure axis is not here:
+    the tau kernel integrates the exposure internally, and the fallback route
+    adds the axis itself in :func:`_expanded_flux_dev`.
     """
-    tau = grid.times[None, :, :] - mid[:, :, None]
-    return tau[..., None] + grid.sub_offsets[None, None, None, :]
+    return grid.times[None, :, :] - mid[:, :, None]
+
+
+def _expanded_flux_dev(grid, tau, *, k, b, T14, q1, q2, period, geometry):
+    """Fallback: materialize the sub-exposure axis and average it in MLX.
+
+    What turin did before MetalPlanet's tau kernel existed, and still the only
+    route for ``geometry="chord"``, which the kernel does not implement. Costs
+    ``n_sub`` times the memory -- measured 2.78 GB against 51 MB at 512 chains
+    x 5,000 points x 15 sub-exposures -- and, more importantly, integrates by
+    supersampling, whose error at a realistic ``n_sub`` is ~1.5e-4, about 2% of
+    a transit depth and 1000x the float32 floor.
+    """
+    n_chains = tau.shape[0]
+    nodes = tau[..., None] + grid.sub_offsets[None, None, None, :]
+    flat = nodes.reshape(n_chains, -1)
+
+    if geometry == "circular":
+        z = separation_circular(flat, period, b, a_over_rstar(T14, period, k, b))
+    elif geometry == "chord":
+        z = separation_chord(flat, T14, k, b)
+    else:
+        raise ValueError(
+            f"unknown geometry {geometry!r}; expected one of {GEOMETRIES}")
+
+    u1, u2 = limb_dark_coeffs(q1, q2)
+    dev = flux_dev_metal(z, k, u1, u2)
+    dev = dev.reshape(n_chains, grid.n_epochs, grid.max_pts,
+                      grid.sub_offsets.shape[0])
+    return mx.mean(dev, axis=-1)
 
 
 def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
@@ -243,26 +325,48 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
     several arrays of the *expanded* size -- which is why the likelihood
     chunks over epoch blocks.
     """
-    n_chains = mid.shape[0]
-    tau = time_from_mid(grid, mid)
-    flat = tau.reshape(n_chains, -1)
-
-    if geometry == "circular":
-        aRs = a_over_rstar(T14, period, k, b)
-        z = separation_circular(flat, period, b, aRs)
-    elif geometry == "chord":
-        z = separation_chord(flat, T14, k, b)
-    else:
+    if geometry not in GEOMETRIES:
         raise ValueError(
             f"unknown geometry {geometry!r}; expected one of {GEOMETRIES}")
+    n_chains = mid.shape[0]
+    tau = time_from_mid(grid, mid)
 
+    if not (HAS_TAU_KERNEL and geometry == "circular"):
+        return _expanded_flux_dev(grid, tau, k=k, b=b, T14=T14, q1=q1, q2=q2,
+                                  period=period, geometry=geometry)
+
+    # The tau kernel: exposure integrated in registers by the contact rule,
+    # so no sub-exposure axis exists to hold. Parameters stay (n_chains, 1);
+    # MetalPlanet canonicalizes that per chain itself.
     u1, u2 = limb_dark_coeffs(q1, q2)
-    # Parameters stay (n_chains, 1). The fused fp32 kernel canonicalizes that
-    # to (n_chains,) itself, while the fp64 analytic fallback broadcasts it
-    # against z's (n_chains, m) -- which a flat (n_chains,) would not do.
-    dev = flux_dev_metal(z, k, u1, u2)
-    dev = dev.reshape(n_chains, grid.n_epochs, grid.max_pts, grid.n_sub)
-    return mx.mean(dev, axis=-1)
+    aRs = a_over_rstar(T14, period, k, b)
+    integration = "contact" if grid.exp_time > 0 else "none"
+    flat = tau.reshape(n_chains, -1)
+
+    def call(t_flat, *params):
+        return metalplanet.flux_dev_from_tau(
+            t_flat, *params, exp_time=grid.exp_time,
+            integration=integration, n_gl=grid.n_gl)
+
+    args = (period, aRs, b, k, u1, u2)
+    if grid.dtype == mx.float64 and n_chains > 1:
+        # Upstream bug (MetalPlanet 2aaa4ce): the float64 *graph* path of
+        # flux_dev_from_tau fails to broadcast its per-chain parameters
+        # against its internal (n, m, 5*n_gl) node array, for every parameter
+        # shape including scalars -- so it only works one chain at a time.
+        # The fused float32 kernel is unaffected, which is why the production
+        # path never sees this; float64 is turin's reference path, used for
+        # log_prob_hi, validate_precision, certify and the PL probe, always at
+        # modest chain counts. Looping is the honest fix: it evaluates exactly
+        # the same model as float32 rather than silently substituting the
+        # supersampled route, which would make validate_precision report a
+        # quadrature difference as float32 error.
+        dev = mx.concatenate(
+            [call(flat[i:i + 1], *[p[i:i + 1] for p in args])
+             for i in range(n_chains)], axis=0)
+    else:
+        dev = call(flat, *args)
+    return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
 
 
 def transit_flux(grid, **kw):

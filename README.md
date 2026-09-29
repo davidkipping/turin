@@ -66,6 +66,11 @@ turin --help
    times** (5 shape parameters plus one time per transit), seeded from the
    linear-ephemeris maximum likelihood.
 
+Finite exposures are integrated by the contact rule inside MetalPlanet's
+kernel, which matters more than it sounds: the supersampling it replaced was
+wrong by ~2% of a transit depth at a typical sub-exposure count, and got
+`dF/d(period)` wrong by ~100x with the wrong sign.
+
 The baseline polynomial coefficients are never sampled. They are solved
 analytically inside every log-density evaluation — a profile likelihood — so a
 30-transit fit carries 7 parameters rather than 7 + 90.
@@ -174,7 +179,8 @@ Pinned by the test suite, against independent references:
 |---|---|---|
 | float64 model vs MetalPlanet's verified frontend | 1e-14 | 3.3e-16 |
 | float32 model vs the same | 5e-7 | 1.6e-7 |
-| exposure integration vs MetalPlanet supersampling | 1e-14 | 3.3e-16 |
+| exposure integration vs MetalPlanet's contact rule | 1e-14 | <1e-14 |
+| exposure integration vs a high-order float64 reference | 1e-7 | 6.4e-8 |
 | profile solve vs `np.linalg.solve`, float64 | 1e-9 | ~1e-12 |
 | `ratio` mode vs hurin's own solve | hurin's float32 floor | 1e-8 |
 | `hybrid` vs `exact` (3 refinements, 1% depth) | 1.2e-7 | 5.4e-9 |

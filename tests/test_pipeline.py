@@ -38,7 +38,7 @@ def fake_target(monkeypatch):
     ed = prep.segment_epochs(tw, fw, ew, P_TRUE, EPOCH_TRUE, DUR_H)
     cen = prep.centering_constants(ed, EPH)
     grid = M.build_grid(cen, prep.supersample_offsets(29.4 / 1440, 5),
-                        dtype=mx.float64)
+                        dtype=mx.float64, exp_time=29.4 / 1440)
     col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
     with mx.stream(mx.cpu):
         f = np.array(M.transit_flux(

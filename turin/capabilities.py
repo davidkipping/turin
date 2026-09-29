@@ -39,9 +39,16 @@ class Capabilities:
     anvil_per_chain_divergences: bool | None
     #: a progress callback on ``anvil.run``.
     anvil_callback: bool
+    #: anvil's bounded-parameter log-Jacobian stays finite at the prior edge,
+    #: so a chain that reaches one can come back. A behaviour fix with no API
+    #: surface, so it is probed by evaluating the transform directly.
+    anvil_boundary_survivable: bool
     #: MetalPlanet exposes a tau-input fused kernel with in-kernel exposure
-    #: integration. Without it turin builds z itself, which is correct but
-    #: materializes the sub-exposure axis.
+    #: integration. **Detected but not yet used**: turin builds ``z`` itself
+    #: and calls ``flux_dev_metal``, which is correct and is what every
+    #: accuracy figure in the tests was measured against. Switching over is a
+    #: performance change that needs its own parity tests, so it is deliberate
+    #: rather than automatic.
     metalplanet_flux_dev_from_tau: bool
     anvil_version: str = ""
     metalplanet_version: str = ""
@@ -53,10 +60,11 @@ class Capabilities:
              "extensions re-run warmup"),
             ("anvil state save/load", self.anvil_state_io,
              "resume state stored by turin, chains restart"),
+            ("anvil survivable prior boundary", self.anvil_boundary_survivable,
+             "a chain reaching a bound is lost; the MAP-centred init ball "
+             "keeps chains away from one"),
             ("anvil progress callback", self.anvil_callback,
              "anvil prints its own progress"),
-            ("MetalPlanet tau-input kernel", self.metalplanet_flux_dev_from_tau,
-             "turin builds z and supersamples itself"),
         ]
         out = [f"  anvil {self.anvil_version}, "
                f"MetalPlanet {self.metalplanet_version}"]
@@ -64,6 +72,10 @@ class Capabilities:
             out.append(f"  {'yes' if have else 'no ':3s}  {name}"
                        + ("" if have else f"  ->  {fallback}"))
         out.append("  ?    anvil per-chain divergences  ->  checked per run")
+        out.append(
+            f"  {'yes' if self.metalplanet_flux_dev_from_tau else 'no ':3s}  "
+            "MetalPlanet tau-input kernel (available but not yet used: turin "
+            "builds z itself)")
         return "\n".join(out)
 
 
@@ -79,11 +91,29 @@ def detect():
                         and hasattr(anvil, "load_state")),
         anvil_per_chain_divergences=None,
         anvil_callback=_has_param(anvil.run, "callback"),
+        anvil_boundary_survivable=_boundary_survivable(),
         metalplanet_flux_dev_from_tau=hasattr(metalplanet,
                                               "flux_dev_from_tau"),
         anvil_version=getattr(anvil, "__version__", "unknown"),
         metalplanet_version=getattr(metalplanet, "__version__", "unknown"),
     )
+
+
+def _boundary_survivable():
+    """Does a bounded parameter's log-Jacobian stay finite deep in the tail?
+
+    The probe anvil's own reply suggests: before the fix ``mx.sigmoid(25)``
+    saturates and ``log_det_jac`` returns ``-inf``, which made the boundary
+    absorbing under ChEES.
+    """
+    try:
+        import mlx.core as mx
+        from anvil import ParamSpec, Transform
+
+        tr = Transform([ParamSpec("p", lo=0.0, hi=1.0)])
+        return bool(mx.isfinite(tr.log_det_jac(mx.array([[25.0]]))).item())
+    except Exception:
+        return False
 
 
 def per_chain_divergences(results):

@@ -34,7 +34,7 @@ def dataset():
     n_ep = ed["n_epochs"]
 
     grid = M.build_grid(cen, prep.supersample_offsets(29.4 / 1440, 7),
-                        dtype=mx.float64)
+                        dtype=mx.float64, exp_time=29.4 / 1440)
     one = lambda v: mx.array([[float(v)]], dtype=mx.float64)
     with mx.stream(mx.cpu):
         f_true = np.array(M.transit_flux(
@@ -227,52 +227,75 @@ def test_validate_precision_is_ok(lineph):
     assert rep.max_abs_err < 1.0, str(rep)
 
 
-def test_fp32_gradient_matches_fp64_finite_differences(dataset):
-    """Gradients in model space, float32 analytic against a float64 FD.
-
-    anvil's ``log_prob_hi`` is value-only (it goes through NumPy), so the
-    float64 reference here is turin's own float64 log-density.
-    """
+def _grads(dataset, exposure_time, num_resample):
+    """float32 and float64 analytic gradients, plus a float64 FD closure."""
     ed, cen, orders = dataset
     layout = params.lineph_layout(EPH)
-    kw = dict(num_resample=7, exposure_time=29.4 / 1440, n_chains_hint=8)
+    kw = dict(num_resample=num_resample, exposure_time=exposure_time,
+              n_chains_hint=8)
     lo = likelihood.ProfiledTransitLogProb(layout, cen, ed, orders,
                                            dtype=mx.float32, **kw)
     with mx.stream(mx.cpu):
         hi = likelihood.ProfiledTransitLogProb(layout, cen, ed, orders,
                                                dtype=mx.float64, **kw)
-
+        g64 = np.array(mx.grad(lambda vv: mx.sum(hi(vv)))(
+            mx.array(V_TRUE[None, :], dtype=mx.float64)), dtype=np.float64)[0]
     g32 = np.array(mx.grad(lambda vv: mx.sum(lo(vv)))(
         mx.array(V_TRUE[None, :].astype(np.float32))), dtype=np.float64)[0]
 
-    with mx.stream(mx.cpu):
-        g64 = np.array(mx.grad(lambda vv: mx.sum(hi(vv)))(
-            mx.array(V_TRUE[None, :], dtype=mx.float64)), dtype=np.float64)[0]
+    def fd(i):
+        h = 1e-6 * max(1e-3, abs(V_TRUE[i]))
+        vp, vm = V_TRUE.copy(), V_TRUE.copy()
+        vp[i] += h
+        vm[i] -= h
+        with mx.stream(mx.cpu):
+            f = lambda v: float(np.array(
+                hi(mx.array(v[None, :], dtype=mx.float64)))[0])
+            return (f(vp) - f(vm)) / (2 * h)
 
-        def f(v):
-            return float(np.array(hi(mx.array(v[None, :], dtype=mx.float64)))[0])
+    return layout, g32, g64, fd
 
-        for i, name in enumerate(layout.names):
-            h = 1e-6 * max(1e-3, abs(V_TRUE[i]))
-            vp, vm = V_TRUE.copy(), V_TRUE.copy()
-            vp[i] += h
-            vm[i] -= h
-            fd = (f(vp) - f(vm)) / (2 * h)
-            scale = max(abs(fd), 1.0)
-            # the float64 gradient is the real correctness claim: measured
-            # 2e-9 to 2e-7 across the seven parameters
-            assert abs(g64[i] - fd) / scale < 1e-5, (
-                f"{name}: fp64 analytic {g64[i]} vs fd {fd}")
-            # float32 agrees to ~1e-4, except k, whose gradient is a
-            # cancellation between three channels (the radius ratio, the
-            # impact parameter and a/R*) and lands at ~8e-3. That does not
-            # bias the posterior: leapfrog with any smooth force field stays
-            # volume-preserving and reversible, and the Metropolis step uses
-            # the log-density itself, which validate_precision bounds at
-            # ~1e-3. It only costs a little trajectory efficiency.
-            tol = 2e-2 if name == "k" else 2e-3
-            assert abs(g32[i] - g64[i]) / scale < tol, (
-                f"{name}: fp32 {g32[i]} vs fp64 {g64[i]}")
+
+def test_fp64_gradient_matches_finite_differences_without_exposure(dataset):
+    """The strict check, where finite differences are a clean reference.
+
+    With the exposure integrated, they are not -- see the test below.
+    """
+    layout, _, g64, fd = _grads(dataset, exposure_time=0.0, num_resample=1)
+    for i, name in enumerate(layout.names):
+        d = fd(i)
+        assert abs(g64[i] - d) / max(abs(d), 1.0) < 1e-5, (
+            f"{name}: fp64 analytic {g64[i]} vs fd {d}")
+
+
+def test_fp32_gradient_tracks_fp64_under_exposure_integration(dataset):
+    """At production settings, compare the two precisions of the same model.
+
+    Finite differences are deliberately *not* the reference here. The contact
+    rule freezes its quadrature split points -- exact for the integral, since
+    moving an interior split of a continuous integrand cancels -- so a central
+    difference, which recomputes the splits at each step, measures the
+    quadrature error's parameter dependence rather than the gradient. Worse,
+    MetalPlanet's own docs note that a difference straddling a contact is
+    wrong at any step size, because the light curve's tau-derivative genuinely
+    jumps there. So FD gets a loose sanity bound and the precise claim is
+    float32 against float64.
+    """
+    layout, g32, g64, fd = _grads(dataset, exposure_time=29.4 / 1440,
+                                  num_resample=7)
+    for i, name in enumerate(layout.names):
+        scale = max(abs(g64[i]), 1.0)
+        # float32 agrees to ~1e-4, except k, whose gradient is a cancellation
+        # between three channels (the radius ratio, the impact parameter and
+        # a/R*). That does not bias the posterior: leapfrog with any smooth
+        # force field stays volume-preserving and reversible, and the
+        # Metropolis step uses the log-density, which validate_precision
+        # bounds at ~1e-3. It costs a little trajectory efficiency.
+        tol = 2e-2 if name == "k" else 2e-3
+        assert abs(g32[i] - g64[i]) / scale < tol, (
+            f"{name}: fp32 {g32[i]} vs fp64 {g64[i]}")
+        # FD still has to agree to the quadrature's own parameter sensitivity
+        assert abs(g64[i] - fd(i)) / scale < 1e-3, name
 
 
 def test_log_prob_compiles(lineph):

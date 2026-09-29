@@ -41,7 +41,7 @@ def build_dataset(true_dtau, seed=5, trend=True, yerr=YERR, decoy=None):
                            (n_ep,)).copy()
 
     grid = M.build_grid(cen, prep.supersample_offsets(29.4 / 1440, 7),
-                        dtype=mx.float64)
+                        dtype=mx.float64, exp_time=29.4 / 1440)
     col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
     with mx.stream(mx.cpu):
         mid = M.mid_times_ttv(grid, mx.array(dtau[None, :], dtype=mx.float64))

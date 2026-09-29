@@ -46,8 +46,10 @@ def one_epoch_grid(times=TIMES, n=0.0, d=0.0, n_sub=1, exp_time=0.0,
     centering = dict(times_centered=np.asarray(times)[None, :],
                      n_arr=np.array([float(n)]), d_arr=np.array([float(d)]),
                      P_ref=P_REF, tau0_ref=0.0)
+    # exp_time drives BOTH routes: the fallback's sub-exposure offsets and
+    # the tau kernel's in-kernel contact rule
     return M.build_grid(centering, prep.supersample_offsets(exp_time, n_sub),
-                        dtype=dtype)
+                        dtype=dtype, exp_time=exp_time)
 
 
 def turin_flux(*, grid, k=K, b=B, T14_=T14, q1=Q1, q2=Q2, period=P_REF,
@@ -92,23 +94,175 @@ def test_fp32_circular_matches_to_metalplanet_fp32_floor():
     assert np.abs(got - ref).max() < 5e-7
 
 
-@pytest.mark.parametrize("n_sub,exp_time", [(7, 29.4 / 1440), (15, 29.4 / 1440)])
-def test_exposure_integration_matches_metalplanet_supersampling(n_sub, exp_time):
-    ref, _ = metalplanet_reference(n_sub=n_sub, exp_time=exp_time)
+def metalplanet_contact(n_gl, exp_time):
+    """MetalPlanet's frontend with the same contact rule turin now uses."""
     with mx.stream(mx.cpu):
-        got = turin_flux(grid=one_epoch_grid(n_sub=n_sub, exp_time=exp_time))
-        inst = turin_flux(grid=one_epoch_grid())
+        aRs = float(M.a_over_rstar(*[mx.array([[v]], dtype=mx.float64)
+                                     for v in (T14, P_REF, K, B)])[0, 0])
+    pars = TransitParams()
+    pars.t0, pars.per, pars.rp, pars.a = 0.0, P_REF, K, aRs
+    pars.inc = math.degrees(math.acos(B / aRs))
+    pars.ecc, pars.w = 0.0, 90.0
+    pars.u, pars.limb_dark = [float(U1), float(U2)], "quadratic"
+    return TransitModel(pars, TIMES, dtype=mx.float64, exp_time=exp_time,
+                        integration="contact", n_gl=n_gl).light_curve(pars)
+
+
+def test_exposure_integration_matches_metalplanet_contact_rule():
+    """turin's in-kernel integration is MetalPlanet's, so it must agree exactly."""
+    exp = 29.4 / 1440
+    ref = metalplanet_contact(M.N_GL, exp)
+    with mx.stream(mx.cpu):
+        got = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=exp))
     assert np.abs(got - ref).max() < 1e-14
-    # smearing must actually do something at Kepler long cadence
-    assert (1 - inst.min()) - (1 - got.min()) > 1e-6
 
 
-def test_supersample_offsets_average_to_the_instantaneous_model():
-    """n_sub=1 and exp_time=0 must be the same graph, not merely close."""
+def test_contact_integration_is_far_more_accurate_than_supersampling():
+    """Why turin switched: the route it replaced was wrong by ~2% of a depth.
+
+    Both are compared against a high-order float64 contact reference, which
+    is neither of the rules being judged -- scoring supersampling against a
+    supersampled reference would flatter it.
+    """
+    exp = 29.4 / 1440
+    ref = metalplanet_contact(12, exp)
     with mx.stream(mx.cpu):
-        a = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=0.0))
-        b = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=29.4 / 1440))
-    np.testing.assert_array_equal(a, b)
+        contact = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=exp))
+        old = M.HAS_TAU_KERNEL
+        M.HAS_TAU_KERNEL = False
+        try:
+            supersampled = turin_flux(
+                grid=one_epoch_grid(n_sub=8, exp_time=exp))
+        finally:
+            M.HAS_TAU_KERNEL = old
+
+    err_contact = np.abs(contact - ref).max()
+    err_super = np.abs(supersampled - ref).max()
+    assert err_contact < 1e-7, err_contact          # below the float32 floor
+    assert err_super > 100 * err_contact, (err_contact, err_super)
+    # and the old error was a sizeable fraction of the transit depth
+    depth = 1.0 - ref.min()
+    assert err_super > 0.005 * depth
+
+
+def test_the_fallback_route_still_matches_metalplanet_supersampling():
+    """Without the tau kernel turin supersamples, and must do so exactly.
+
+    This is the route ``geometry="chord"`` always takes, and the one any
+    machine without the kernel falls back to.
+    """
+    exp = 29.4 / 1440
+    for n_sub in (7, 15):
+        with mx.stream(mx.cpu):
+            aRs = float(M.a_over_rstar(*[mx.array([[v]], dtype=mx.float64)
+                                         for v in (T14, P_REF, K, B)])[0, 0])
+            pars = TransitParams()
+            pars.t0, pars.per, pars.rp, pars.a = 0.0, P_REF, K, aRs
+            pars.inc = math.degrees(math.acos(B / aRs))
+            pars.ecc, pars.w = 0.0, 90.0
+            pars.u, pars.limb_dark = [float(U1), float(U2)], "quadratic"
+            ref = TransitModel(pars, TIMES, dtype=mx.float64,
+                               supersample_factor=n_sub,
+                               exp_time=exp).light_curve(pars)
+            old = M.HAS_TAU_KERNEL
+            M.HAS_TAU_KERNEL = False
+            try:
+                got = turin_flux(grid=one_epoch_grid(n_sub=n_sub,
+                                                     exp_time=exp))
+            finally:
+                M.HAS_TAU_KERNEL = old
+        assert np.abs(got - ref).max() < 1e-14, n_sub
+
+
+def test_the_period_gradient_survives_exposure_integration():
+    """The reason for the switch, pinned.
+
+    Differentiating a supersampled kinked integrand amplifies its error: the
+    route turin used before got ``dF/d(period)`` wrong by ~100x *and* with
+    the wrong sign once exposure integration was on. The reference is a
+    float64 high-order contact model differentiated by central differences,
+    independent of either route.
+    """
+    exp, n_arr, dtau0 = 29.4 / 1440, 3.0, 0.001
+
+    def reference(dP):
+        per = P_REF + dP
+        with mx.stream(mx.cpu):
+            aRs = float(M.a_over_rstar(
+                *[mx.array([[v]], dtype=mx.float64)
+                  for v in (T14, per, K, B)])[0, 0])
+        pars = TransitParams()
+        pars.t0 = dtau0 + n_arr * dP
+        pars.per, pars.rp, pars.a = per, K, aRs
+        pars.inc = math.degrees(math.acos(B / aRs))
+        pars.ecc, pars.w = 0.0, 90.0
+        pars.u, pars.limb_dark = [float(U1), float(U2)], "quadratic"
+        f = TransitModel(pars, TIMES, dtype=mx.float64, exp_time=exp,
+                         integration="contact", n_gl=16).light_curve(pars)
+        return float(np.sum(np.asarray(f, dtype=np.float64) ** 2))
+
+    h = 1e-6
+    fd = (reference(h) - reference(-h)) / (2 * h)
+
+    def analytic(use_kernel):
+        def scalar(v):
+            grid = one_epoch_grid(n=n_arr, n_sub=8, exp_time=exp)
+            col = lambda i: v[i].reshape(1, 1)
+            b = M.impact_parameter(col(3), col(2), "transiting")
+            f = M.transit_flux(
+                grid, mid=M.mid_times_lineph(grid, col(0), col(1)),
+                k=col(2), b=b, T14=col(4), q1=col(5), q2=col(6),
+                period=grid.P_ref + col(0))
+            return mx.sum(f * f)
+
+        v0 = np.array([0.0, dtau0, K, B / (1 + K), T14, Q1, Q2])
+        old = M.HAS_TAU_KERNEL
+        M.HAS_TAU_KERNEL = use_kernel
+        try:
+            with mx.stream(mx.cpu):
+                return float(np.array(mx.grad(scalar)(
+                    mx.array(v0, dtype=mx.float64)))[0])
+        finally:
+            M.HAS_TAU_KERNEL = old
+
+    assert abs(analytic(True) - fd) / abs(fd) < 0.05
+    # and the route it replaced really was that bad
+    bad = analytic(False)
+    assert abs(bad - fd) / abs(fd) > 1.0
+    assert np.sign(bad) != np.sign(fd)
+
+
+def test_exposure_time_alone_decides_whether_smearing_happens():
+    """The tau kernel integrates from exp_time; n_sub only feeds the fallback.
+
+    This is a cleaner contract than the one it replaced, where the
+    sub-exposure count both chose the quadrature *and* decided whether
+    integration happened at all.
+    """
+    exp = 29.4 / 1440
+    with mx.stream(mx.cpu):
+        instant = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=0.0))
+        # n_sub is irrelevant on the kernel path: both integrate
+        smeared_1 = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=exp))
+        smeared_8 = turin_flux(grid=one_epoch_grid(n_sub=8, exp_time=exp))
+
+    np.testing.assert_array_equal(smeared_1, smeared_8)
+    # and smearing a 29-minute exposure across a 4.2 h transit does something
+    assert np.abs(smeared_1 - instant).max() > 1e-5
+    assert (1 - instant.min()) > (1 - smeared_1.min())     # blunted ingress
+
+    # on the fallback route n_sub is what chooses the quadrature, so there
+    # n_sub=1 genuinely means instantaneous
+    old = M.HAS_TAU_KERNEL
+    M.HAS_TAU_KERNEL = False
+    try:
+        with mx.stream(mx.cpu):
+            fb_1 = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=exp))
+            fb_8 = turin_flux(grid=one_epoch_grid(n_sub=8, exp_time=exp))
+    finally:
+        M.HAS_TAU_KERNEL = old
+    np.testing.assert_array_equal(fb_1, instant)
+    assert np.abs(fb_8 - instant).max() > 1e-5
 
 
 def test_geometry_difference_is_second_order_in_T14_over_P():

@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.6 | — | 2026-09-29 | **MODEL_REV 1→2.** Integrate MetalPlanet's tau kernel: exposures integrated in-kernel by the contact rule, fixing a 1.5e-4 flux error (~2% of a depth) and a dF/d(period) that was ~100x wrong with the wrong sign. Use anvil's resume: extensions are true continuations and their draws pool |
 | 0.1.5 | — | 2026-09-29 | --PL defaults to auto: measure all three solves per target and choose. Add MODEL_REV likelihood-revision flagging. Private GitHub repo. (MODEL_REV unchanged at 1) |
 | 0.1.4 | — | 2026-09-29 | Measure the exact/hybrid crossover end to end (~14 basis columns) and document which --PL mode suits which regime |
 | 0.1.3 | — | 2026-09-29 | Rename --profile to --PL and add --PL=hybrid (preconditioned refinement); drop the pre-0.1.68 hurin limb-darkening map now that hurin is fixed |

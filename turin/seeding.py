@@ -109,9 +109,9 @@ def template_sweep_taus(epoch_data, centering, design, *, tau_half,
 
     # one batched evaluation: the leading axis is grid position, and every
     # epoch is offset by its own row of the grid
-    grid = _model.build_grid(centering, _supersample(exposure_time,
-                                                     num_resample),
-                             dtype=dtype)
+    grid = _model.build_grid(centering,
+                             _supersample(exposure_time, num_resample),
+                             dtype=dtype, exp_time=exposure_time)
     scores = np.empty((n_epochs, n_grid), dtype=np.float64)
     col = lambda v: mx.full((n_grid, 1), float(v), dtype=dtype)
     dtau = mx.array(np.ascontiguousarray(grids.T), dtype=dtype)  # (n_grid, E)

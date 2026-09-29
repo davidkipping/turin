@@ -186,6 +186,17 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
         profile_mode=provisional, **build_kw)
     log(f"  log-density: dim {layout.dim}, "
         f"{len(lp.blocks)} epoch block(s) of <= {lp.block_size}")
+    if prepared.exposure_time > 0:
+        from .model import HAS_TAU_KERNEL, N_GL
+
+        if HAS_TAU_KERNEL and args.geometry == "circular":
+            log(f"  exposure integration: contact rule in-kernel, "
+                f"n_gl={N_GL} ({5 * N_GL} evaluations per point)")
+        else:
+            log(f"  exposure integration: supersampling, "
+                f"{prepared.num_resample} nodes per point"
+                + ("" if args.geometry == "circular"
+                   else " (chord geometry has no kernel path)"))
     if pl_choice is not None:
         log(pl_choice.describe())
 
