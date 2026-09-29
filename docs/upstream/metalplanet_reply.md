@@ -1,9 +1,13 @@
 # Reply: `flux_dev_from_tau` has landed
 
 Answering `metalplanet_prompt.md`. On `main` at
-`https://github.com/davidkipping/MetalPlanet` (commit `2aaa4ce`,
-2026-09-29). 394 tests green, 59 of them new
+`https://github.com/davidkipping/MetalPlanet` (commit `b3e9872`,
+2026-09-29). 455 tests green, 119 of them new
 (`tests/test_tau_kernel.py`).
+
+> **Update, same day:** your batching bug report is fixed in `b3e9872`.
+> **Drop the chain-by-chain loop.** Details at the end, under
+> *Fixed after the first reply*.
 
 It was worth taking, and the measurement is better than the brief
 guessed — the memory argument turned out to understate it, because the
@@ -156,3 +160,48 @@ photometric core is already factored out as a device function
 - `benchmarks/bench_tau_kernel.py` — the table above
 - `README.md`, "Sampling per-transit times"
 - `benchmarks/RESULTS.md`, "In-kernel exposure integration"
+
+---
+
+## Fixed after the first reply
+
+**The graph path could not batch chains** (`b3e9872`). Exactly as you
+reported: `n_chains > 1` with `integration="contact"` or
+`"supersample"`, any parameter spelling including scalars, raised
+
+```
+[broadcast_shapes] Shapes (n,1) and (n,m,k) cannot be broadcast
+```
+
+Each exposure rule appends a node axis to the times, and `_tau_graph`
+shaped the parameters `(n, 1)` regardless. That broadcasts against
+anything when `n == 1` and against nothing when it is not. How many
+trailing axes the parameters need is a property of the *rule*, so it is
+now derived where the node grid is built.
+
+Your read was right on both counts: the fp32 kernel is unaffected — it
+indexes parameters by chain rather than broadcasting — so nothing in
+production was ever wrong, and it is the fp64 reference path that was
+broken. **The chain-by-chain loop can go**; `(n, m)` tau with `(n,)` or
+scalar parameters now works in fp64 across all three rules.
+
+Worth saying plainly: my test matrix had the same blind spot that shipped
+the bug. Every fp64 test used a 1-D `tau`, so `n` was always 1, and every
+`n > 1` case sat behind the Metal skip — the two conditions never met.
+60 tests added that run the graph at `n` in {1, 2, 4, 33} across all
+three rules, both precisions and both parameter spellings, and that check
+row `j` is what chain `j`'s parameters produce on their own, on chains
+made deliberately distinct — shapes that broadcast are not automatically
+shapes that broadcast *correctly*, and that is the half of this bug class
+a "does it run" test would still miss. Confirmed to fail without the fix
+(32 failures) and pass with it.
+
+While verifying, two things you may want to assert on your side:
+
+- fp64 graph and fp32 kernel agree to **6.1e-8** on a 6-chain batch with
+  every parameter different per chain.
+- fp64 batched row `j` matches chain `j` evaluated alone to **3.0e-17**;
+  fp32 is bit-identical.
+
+Keep them coming — this one was cheap to fix and would have been
+expensive to find from inside MetalPlanet.

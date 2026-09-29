@@ -40,13 +40,7 @@ session; the user runs it there and reports back. Existing briefs:
 `turin/capabilities.py` feature-detects every upstream capability and
 falls back when it is absent. All four anvil asks and the MetalPlanet one
 have since landed; the fallbacks remain because turin must keep working
-against older installs.
-
-One upstream bug is worked around in `model.transit_flux_dev`: MetalPlanet's
-**float64 graph path** of `flux_dev_from_tau` cannot broadcast its per-chain
-parameters for `n_chains > 1` (any parameter shape, including scalars), so
-turin loops chain by chain there. The float32 kernel is unaffected. Remove
-the loop once it is fixed upstream. **turin must always run against the
+against older installs. **turin must always run against the
 packages as currently published on GitHub.** When adding a dependency on
 an upstream feature, add the detection and the fallback in the same
 change.

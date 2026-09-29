@@ -339,33 +339,12 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
     # so no sub-exposure axis exists to hold. Parameters stay (n_chains, 1);
     # MetalPlanet canonicalizes that per chain itself.
     u1, u2 = limb_dark_coeffs(q1, q2)
-    aRs = a_over_rstar(T14, period, k, b)
-    integration = "contact" if grid.exp_time > 0 else "none"
-    flat = tau.reshape(n_chains, -1)
-
-    def call(t_flat, *params):
-        return metalplanet.flux_dev_from_tau(
-            t_flat, *params, exp_time=grid.exp_time,
-            integration=integration, n_gl=grid.n_gl)
-
-    args = (period, aRs, b, k, u1, u2)
-    if grid.dtype == mx.float64 and n_chains > 1:
-        # Upstream bug (MetalPlanet 2aaa4ce): the float64 *graph* path of
-        # flux_dev_from_tau fails to broadcast its per-chain parameters
-        # against its internal (n, m, 5*n_gl) node array, for every parameter
-        # shape including scalars -- so it only works one chain at a time.
-        # The fused float32 kernel is unaffected, which is why the production
-        # path never sees this; float64 is turin's reference path, used for
-        # log_prob_hi, validate_precision, certify and the PL probe, always at
-        # modest chain counts. Looping is the honest fix: it evaluates exactly
-        # the same model as float32 rather than silently substituting the
-        # supersampled route, which would make validate_precision report a
-        # quadrature difference as float32 error.
-        dev = mx.concatenate(
-            [call(flat[i:i + 1], *[p[i:i + 1] for p in args])
-             for i in range(n_chains)], axis=0)
-    else:
-        dev = call(flat, *args)
+    dev = metalplanet.flux_dev_from_tau(
+        tau.reshape(n_chains, -1), period,
+        a_over_rstar(T14, period, k, b), b, k, u1, u2,
+        exp_time=grid.exp_time,
+        integration="contact" if grid.exp_time > 0 else "none",
+        n_gl=grid.n_gl)
     return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
 
 
