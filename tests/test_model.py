@@ -33,7 +33,7 @@ from turin import prep
 
 P_REF, T14, K, B = 9.3456, 0.175, 0.08, 0.35
 Q1, Q2 = 0.30, 0.225
-U1, U2 = M.limb_dark_coeffs_np(Q1, Q2, "kipping")
+U1, U2 = M.limb_dark_coeffs_np(Q1, Q2)
 TIMES = np.linspace(-0.25, 0.25, 601)
 
 _HURIN_PY = "/Users/dkipping/miniconda3/envs/hurin/bin/python"
@@ -51,12 +51,12 @@ def one_epoch_grid(times=TIMES, n=0.0, d=0.0, n_sub=1, exp_time=0.0,
 
 
 def turin_flux(*, grid, k=K, b=B, T14_=T14, q1=Q1, q2=Q2, period=P_REF,
-               mid=0.0, geometry="circular", ld_map="kipping"):
+               mid=0.0, geometry="circular"):
     dt = grid.dtype
     col = lambda v: mx.array([[float(v)]], dtype=dt)
     f = M.transit_flux(grid, mid=col(mid), k=col(k), b=col(b), T14=col(T14_),
                        q1=col(q1), q2=col(q2), period=col(period),
-                       geometry=geometry, ld_map=ld_map)
+                       geometry=geometry)
     return np.array(f, dtype=np.float64)[0, 0]
 
 
@@ -123,24 +123,55 @@ def test_geometry_difference_is_second_order_in_T14_over_P():
     assert d < 1e-4
 
 
-def test_ld_maps_differ_and_are_related_by_a_factor_of_two_in_q2():
-    """hurin's map is Kipping's with both factors of 2 dropped."""
-    u1_k, u2_k = M.limb_dark_coeffs_np(Q1, Q2, "kipping")
-    u1_h, u2_h = M.limb_dark_coeffs_np(Q1, 2 * Q2, "hurin")
-    np.testing.assert_allclose([u1_k, u2_k], [u1_h, u2_h], rtol=1e-14)
-    # both maps preserve u1 + u2 = sqrt(q1)
-    np.testing.assert_allclose(u1_k + u2_k, math.sqrt(Q1), rtol=1e-14)
-    # only Kipping's reaches negative u2 (q2 > 0.5)
-    assert M.limb_dark_coeffs_np(Q1, 0.9, "kipping")[1] < 0
-    assert M.limb_dark_coeffs_np(Q1, 0.9, "hurin")[1] > 0
-    # and the MLX path agrees with the host replica
+def test_kipping_map_and_its_host_replica():
+    """Kipping (2013), and the float64 replica must match the MLX path."""
+    u1, u2 = M.limb_dark_coeffs_np(Q1, Q2)
+    np.testing.assert_allclose([u1, u2],
+                               [2 * math.sqrt(Q1) * Q2,
+                                math.sqrt(Q1) * (1 - 2 * Q2)], rtol=1e-14)
+    # u1 + u2 = sqrt(q1), so q1 alone fixes the intensity at the limb
+    np.testing.assert_allclose(u1 + u2, math.sqrt(Q1), rtol=1e-14)
     with mx.stream(mx.cpu):
-        for ld in M.LD_MAPS:
-            u = M.limb_dark_coeffs(mx.array(Q1, dtype=mx.float64),
-                                   mx.array(Q2, dtype=mx.float64), ld)
-            np.testing.assert_allclose([float(u[0]), float(u[1])],
-                                       M.limb_dark_coeffs_np(Q1, Q2, ld),
-                                       rtol=1e-14)
+        u = M.limb_dark_coeffs(mx.array(Q1, dtype=mx.float64),
+                               mx.array(Q2, dtype=mx.float64))
+        np.testing.assert_allclose([float(u[0]), float(u[1])], [u1, u2],
+                                   rtol=1e-14)
+
+
+@pytest.mark.parametrize("q1,q2", [(0.3, 0.225), (0.3, 0.45), (0.96, 0.93),
+                                   (0.5, 0.0), (0.5, 1.0), (0.99, 0.99)])
+def test_kipping_square_maps_into_physical_profiles(q1, q2):
+    """Every (q1, q2) in the unit square must give a valid intensity profile.
+
+    That is the whole point of Kipping (2013), and it is what makes the map
+    compatible with the polynomial (Agol et al.) formulation MetalPlanet
+    implements: the quadratic law is that law's N=2 case.
+    """
+    u1, u2 = M.limb_dark_coeffs_np(q1, q2)
+    mu = np.linspace(0.0, 1.0, 2001)
+    I = 1.0 - u1 * (1 - mu) - u2 * (1 - mu) ** 2
+    assert I.min() >= 0.0, (u1, u2, I.min())          # never negative
+    assert np.all(np.diff(I) >= -1e-12)               # brightest at centre
+    np.testing.assert_allclose(I[0], 1.0 - math.sqrt(q1), atol=1e-12)
+
+
+def test_quadratic_law_is_the_n2_case_of_the_polynomial_law():
+    """MetalPlanet's 'quadratic' and 'polynomial' must agree at the same u.
+
+    If they did not, Kipping's (q1, q2) -- which parameterizes the *quadratic*
+    law -- would not be the right thing to feed this model.
+    """
+    from metalplanet.api import TransitModel, TransitParams
+
+    tt = np.linspace(-0.2, 0.2, 401)
+    for u1, u2 in ((0.35, 0.22), (0.61, 0.36), (1.82, -0.84)):
+        out = []
+        for law in ("quadratic", "polynomial"):
+            p = TransitParams()
+            p.t0, p.per, p.rp, p.a, p.inc = 0.0, 9.3456, 0.09, 17.4, 88.85
+            p.ecc, p.w, p.u, p.limb_dark = 0.0, 90.0, [u1, u2], law
+            out.append(TransitModel(p, tt, dtype=mx.float64).light_curve(p))
+        assert np.abs(out[0] - out[1]).max() < 1e-14, (u1, u2)
 
 
 def test_impact_parameter_maps():
@@ -315,39 +346,25 @@ def _hurin_flux(q1, q2):
 def test_chord_geometry_reproduces_hurin_jaxoplanet():
     """turin must be able to reproduce hurin's model, for parity validation.
 
-    hurin 0.1.68 fixed its limb-darkening map, so parity with *current* hurin
-    is ``geometry="chord"`` with the standard Kipping map -- the orbit model
-    is the only remaining difference. hurin runs jaxoplanet in float32 (x64 is
-    never enabled), so ~2e-7 is its own floor and the target tolerance.
+    Both packages now use the same limb darkening (hurin adopted the correct
+    Kipping map in 0.1.68), so ``geometry="chord"`` is the whole of parity.
+    hurin runs jaxoplanet in float32 -- x64 is never enabled -- so ~2e-7 is
+    its own floor and the target tolerance.
     """
     q1_h, q2_h = 0.30, 0.45
     hurin_f, version = _hurin_flux(q1_h, q2_h)
-    fixed_ld = tuple(int(p) for p in version.split(".")[:3]) >= (0, 1, 68)
-    ld = "kipping" if fixed_ld else "hurin"
+    if tuple(int(p) for p in version.split(".")[:3]) < (0, 1, 68):
+        pytest.skip(f"hurin {version} predates the limb-darkening fix; "
+                    "turin no longer carries the old map")
 
     with mx.stream(mx.cpu):
         got = turin_flux(grid=one_epoch_grid(), q1=q1_h, q2=q2_h,
-                         geometry="chord", ld_map=ld)
-        other = turin_flux(grid=one_epoch_grid(), q1=q1_h, q2=q2_h,
-                           geometry="chord",
-                           ld_map="hurin" if fixed_ld else "kipping")
+                         geometry="chord")
+        circ = turin_flux(grid=one_epoch_grid(), q1=q1_h, q2=q2_h,
+                          geometry="circular")
     assert np.abs(got - hurin_f).max() < 1e-6, (
         f"parity mode must match hurin {version}")
-    # the other map is the pre-0.1.68 one, and is genuinely different
-    assert np.abs(other - hurin_f).max() > 1e-5
-
-
-@pytest.mark.skipif(not os.path.exists(_HURIN_PY),
-                    reason="hurin conda env not installed")
-def test_geometry_is_the_only_remaining_model_difference_from_hurin():
-    """With hurin >= 0.1.68 the limb darkening agrees; the orbit still differs."""
-    hurin_f, version = _hurin_flux(0.30, 0.45)
-    if tuple(int(p) for p in version.split(".")[:3]) < (0, 1, 68):
-        pytest.skip(f"hurin {version} predates the limb-darkening fix")
-    with mx.stream(mx.cpu):
-        circ = turin_flux(grid=one_epoch_grid(), q1=0.30, q2=0.45,
-                          geometry="circular", ld_map="kipping")
-    # turin's default still differs from hurin, now purely by the chord
-    # approximation: O((T14/P)^2), far above the float32 floor
+    # and turin's default still differs, now purely by the chord
+    # approximation: O((T14/P)^2), well above the float32 floor
     d = np.abs(circ - hurin_f).max()
     assert 1e-6 < d < 1e-4, d

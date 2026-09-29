@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 
 from . import __version__
-from .model import B_PRIORS, GEOMETRIES, LD_MAPS
+from .model import B_PRIORS, GEOMETRIES
 from .profile import PROFILE_MODES
 
 TARGET_RE = re.compile(r"^--(KOI-\d+\.\d+|TOI-\d+\.\d+)$", re.IGNORECASE)
@@ -46,9 +46,8 @@ _VALUE_FLAGS = {
     "--TTVmax": "ttv_max_min",
     "--tag": "tag",
     "--sampler": "sampler",
-    "--profile": "profile_mode",
+    "--PL": "profile_mode",
     "--geometry": "geometry",
-    "--ld": "ld_map",
     "--warmup": "warmup",
     "--samples": "samples",
     "--max-samples": "max_samples",
@@ -78,9 +77,14 @@ usage: turin --KOI-448.02 [options]
   --bprior=transiting|nongrazing|box   (b, k) prior (default transiting)
   --nongrazing            alias for --bprior=nongrazing
   --TTVmax=MINUTES        declared TTV amplitude; sets the timing priors
-  --profile=exact|ratio   flux-space profile (default) or hurin's ratio form
+  --PL=exact|hybrid|ratio how the profile likelihood solves for the baseline
+                          coefficients. exact (default) is the true
+                          flux-space profile; ratio is hurin's form, ~20%
+                          faster but O(transit depth) approximate; hybrid
+                          refines ratio's static factorization to exact
+                          accuracy, and is worthwhile only for a much larger
+                          nuisance basis than Legendre polynomials
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
-  --ld=kipping|hurin      Kipping (2013) limb darkening (default) or hurin's
 
   --sc                    prefer short cadence
   --cache-dir=PATH --outdir=PATH
@@ -88,8 +92,8 @@ usage: turin --KOI-448.02 [options]
   --capabilities          report what the installed anvil/MetalPlanet can do
   --version --help
 
-turin is not bit-compatible with hurin: --geometry=chord --ld=hurin
---profile=ratio reproduces it. See docs/hurin-differences.md.
+Against hurin >= 0.1.68 the orbit model is the only model difference:
+--geometry=chord --PL=ratio reproduces hurin. See docs/hurin-differences.md.
 """
 
 
@@ -113,7 +117,6 @@ class Args:
     sampler: str = "chees"
     profile_mode: str = "exact"
     geometry: str = "circular"
-    ld_map: str = "kipping"
     warmup: int = 400
     samples: int = 300
     max_samples: int = 16384
@@ -174,9 +177,8 @@ def parse_args(argv=None):
         args.b_prior = "nongrazing"
     _choice("bprior", args.b_prior, B_PRIORS)
     _choice("sampler", args.sampler, SAMPLERS)
-    _choice("profile", args.profile_mode, PROFILE_MODES)
+    _choice("PL", args.profile_mode, PROFILE_MODES)
     _choice("geometry", args.geometry, GEOMETRIES)
-    _choice("ld", args.ld_map, LD_MAPS)
     for mode in args.modes:
         _choice("modes", mode, MODES)
     if args.tag is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):

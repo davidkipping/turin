@@ -256,7 +256,6 @@ class ResumeState:
     b_prior: str
     profile_mode: str
     geometry: str
-    ld_map: str
     sampler: str
     n_chains: int
     ttv_max: float | None
@@ -273,8 +272,7 @@ class ResumeState:
     #: last positions in unconstrained space, the fallback restart point
     last_u: np.ndarray | None = None
 
-    GUARDS = ("b_prior", "profile_mode", "geometry", "ld_map", "sampler",
-              "ttv_max")
+    GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max")
 
     def check(self, **cli):
         """Raise if the CLI disagrees with this state on any guarded field."""

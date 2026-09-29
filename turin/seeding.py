@@ -68,7 +68,7 @@ def template_sweep_taus(epoch_data, centering, design, *, tau_half,
                         k, b, T14, q1, q2, period, num_resample=1,
                         exposure_time=0.0, n_grid=N_SWEEP_GRID,
                         profile_mode="exact", geometry="circular",
-                        ld_map="kipping", dtype=mx.float32):
+                        dtype=mx.float32):
     """Per-epoch timing seeds from a dense template sweep.
 
     Evaluates the profiled log-likelihood with the transit template held at
@@ -118,7 +118,7 @@ def template_sweep_taus(epoch_data, centering, design, *, tau_half,
     mid = dtau + mx.array(np.ascontiguousarray(d_arr), dtype=dtype)[None, :]
     f_dev = _model.transit_flux_dev(
         grid, mid=mid, k=col(k), b=col(b), T14=col(T14), q1=col(q1),
-        q2=col(q2), period=col(period), geometry=geometry, ld_map=ld_map)
+        q2=col(q2), period=col(period), geometry=geometry)
     c = _profile.solve_coefficients(design, f_dev, profile_mode)
     resid = _profile.residual_dev(design, f_dev, c)
     # (n_grid, n_epochs) -> per-epoch rows

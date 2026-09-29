@@ -181,5 +181,5 @@ def model_grid(lp, v_row, *, n=1000, span_durations=3.0, T14=None):
         f = _model.transit_flux(
             grid, mid=mx.zeros((1, 1), dtype=mx.float64), k=p["k"], b=p["b"],
             T14=p["T14"], q1=p["q1"], q2=p["q2"], period=p["period"],
-            geometry=lp.geometry, ld_map=lp.ld_map)
+            geometry=lp.geometry)
         return tt, np.array(f, dtype=np.float64)[0, 0]

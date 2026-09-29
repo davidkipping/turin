@@ -27,22 +27,18 @@ Two orbit geometries are available, because hurin's was an approximation:
     transit. It agrees with ``circular`` only to O((T14/P)^2) — measured
     4.6e-6 in flux at T14/P = 0.019.
 
-Likewise two limb-darkening maps:
+Limb darkening is Kipping (2013) throughout, via
+``metalplanet.ld.q_to_u``: ``u1 = 2 sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - 2 q2)``,
+whose unit square in (q1, q2) maps onto the whole physically-allowed (u1, u2)
+triangle. hurin used a variant missing both factors of two until turin's port
+surfaced it; hurin 0.1.68 adopted the correct map, so both packages now agree
+and turin carries no alternative.
 
-``kipping`` (default)
-    Kipping (2013), as ``metalplanet.ld.q_to_u`` implements it:
-    ``u1 = 2 sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - 2 q2)``. The unit square in
-    (q1, q2) maps onto the whole physically-allowed (u1, u2) triangle. This
-    is also what hurin uses from 0.1.68 onward.
-
-``hurin``
-    ``u1 = sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - q2)`` — the map hurin used
-    **before 0.1.68**, whose docstring cited Kipping (2013) but dropped both
-    factors of two. Its q2 is twice Kipping's, and its image is only the
-    ``u1, u2 >= 0`` sub-region: it cannot represent the negative ``u2`` that
-    quadratic-law fits to real stars often prefer. turin's port surfaced
-    this and hurin 0.1.68 adopted the correct map, so the option now serves
-    only to reproduce results from earlier hurin versions. Not for science.
+Note the quadratic law is exactly the N=2 case of the polynomial law
+MetalPlanet implements (``I(mu)/I0 = 1 - sum u_n (1-mu)^n``), so Kipping's
+reparameterization applies directly; verified in tests/test_model.py. The
+Green's basis MetalPlanet uses internally is an affine change of basis for
+the integration, not a different law.
 
 Validated against three independent references (see tests/test_model.py):
 fp64 circular agrees with MetalPlanet's batman-style frontend to 3.3e-16,
@@ -67,28 +63,18 @@ from metalplanet.trig import sincos
 #: sampled fraction in [0, 1] to the impact parameter.
 B_PRIORS = ("transiting", "nongrazing", "box")
 GEOMETRIES = ("circular", "chord")
-LD_MAPS = ("kipping", "hurin")
 
 
-def limb_dark_coeffs(q1, q2, ld_map="kipping"):
-    """(q1, q2) -> (u1, u2) under the chosen map; see the module docstring."""
-    if ld_map == "kipping":
-        return q_to_u(q1, q2)
-    if ld_map == "hurin":
-        sq1 = mx.sqrt(mx.maximum(q1, 1e-12))
-        return sq1 * q2, sq1 * (1.0 - q2)
-    raise ValueError(f"unknown ld_map {ld_map!r}; expected one of {LD_MAPS}")
+def limb_dark_coeffs(q1, q2):
+    """Kipping (2013) (q1, q2) -> quadratic (u1, u2), MLX, differentiable."""
+    return q_to_u(q1, q2)
 
 
-def limb_dark_coeffs_np(q1, q2, ld_map="kipping"):
+def limb_dark_coeffs_np(q1, q2):
     """Float64 host-side replica of :func:`limb_dark_coeffs`."""
     sq1 = np.sqrt(np.maximum(np.asarray(q1, dtype=np.float64), 1e-12))
     q2 = np.asarray(q2, dtype=np.float64)
-    if ld_map == "kipping":
-        return 2.0 * sq1 * q2, sq1 * (1.0 - 2.0 * q2)
-    if ld_map == "hurin":
-        return sq1 * q2, sq1 * (1.0 - q2)
-    raise ValueError(f"unknown ld_map {ld_map!r}; expected one of {LD_MAPS}")
+    return 2.0 * sq1 * q2, sq1 * (1.0 - 2.0 * q2)
 
 
 def impact_parameter(beta, k, b_prior="transiting"):
@@ -239,7 +225,7 @@ def time_from_mid(grid, mid):
 
 
 def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
-                     geometry="circular", ld_map="kipping"):
+                     geometry="circular"):
     """Exposure-averaged transit flux **deviation**, ``f - 1``.
 
     Shape ``(n_chains, n_epochs, max_pts)``. Scalar-per-chain parameters
@@ -270,7 +256,7 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
         raise ValueError(
             f"unknown geometry {geometry!r}; expected one of {GEOMETRIES}")
 
-    u1, u2 = limb_dark_coeffs(q1, q2, ld_map)
+    u1, u2 = limb_dark_coeffs(q1, q2)
     # Parameters stay (n_chains, 1). The fused fp32 kernel canonicalizes that
     # to (n_chains,) itself, while the fp64 analytic fallback broadcasts it
     # against z's (n_chains, m) -- which a flat (n_chains,) would not do.

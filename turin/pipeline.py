@@ -135,8 +135,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
         outdir, target, mode)
     if prior_state is not None:
         prior_state.check(b_prior=args.b_prior, profile_mode=args.profile_mode,
-                          geometry=args.geometry, ld_map=args.ld_map,
-                          sampler=args.sampler, ttv_max=args.ttv_max_days)
+                          geometry=args.geometry, sampler=args.sampler,
+                          ttv_max=args.ttv_max_days)
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -164,7 +164,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
         num_resample=prepared.num_resample,
         exposure_time=prepared.exposure_time,
         profile_mode=args.profile_mode, geometry=args.geometry,
-        ld_map=args.ld_map, n_chains_hint=args.chains)
+        n_chains_hint=args.chains)
     log(f"  log-density: dim {layout.dim}, "
         f"{len(lp.blocks)} epoch block(s) of <= {lp.block_size}")
 
@@ -182,8 +182,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
             k=s["k"], b=b0, T14=s["T14"], q1=s["q1"], q2=s["q2"],
             period=layout.P_ref, num_resample=prepared.num_resample,
             exposure_time=prepared.exposure_time,
-            profile_mode=args.profile_mode, geometry=args.geometry,
-            ld_map=args.ld_map)
+            profile_mode=args.profile_mode, geometry=args.geometry)
         weak = np.where(rival_gap < _seeding.RIVAL_GAP_WARN)[0]
         if weak.size:
             log(f"  WARNING: {weak.size} epoch(s) have a rival timing mode "
@@ -358,7 +357,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         target=target, mode=mode, turin_version=__version__,
         launch_command=_outputs.launch_command(), tag=args.tag,
         b_prior=layout.b_prior, profile_mode=args.profile_mode,
-        geometry=args.geometry, ld_map=args.ld_map, sampler=args.sampler,
+        geometry=args.geometry, sampler=args.sampler,
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
         n_durations=float(epoch_data["half_window"]
                           / (prepared.eph["duration"] / 24.0)),

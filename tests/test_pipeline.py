@@ -195,11 +195,10 @@ def test_ttvmax_wider_than_half_the_period_is_refused(tmp_path, fake_target):
                      log=lambda m: None)
 
 
-def test_hurin_compat_mode_runs(tmp_path, fake_target):
+def test_hurin_parity_mode_runs(tmp_path, fake_target):
     """The parity configuration must be a working configuration, not just flags."""
     assert pipeline.run(
-        _args(tmp_path, geometry="chord", ld_map="hurin",
-              profile_mode="ratio"), log=lambda m: None) == 0
+        _args(tmp_path, geometry="chord", profile_mode="ratio"),
+        log=lambda m: None) == 0
     state = outputs.load_resume(str(tmp_path), "KOI-1.01", "lineph")
-    assert (state.geometry, state.ld_map, state.profile_mode) == (
-        "chord", "hurin", "ratio")
+    assert (state.geometry, state.profile_mode) == ("chord", "ratio")

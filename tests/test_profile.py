@@ -94,7 +94,10 @@ def test_matches_numpy_normal_equations(segmented, centering, mode, order):
     ref = profile.solve_coefficients_np(
         segmented, orders, 1.0 + np.array(f, dtype=np.float64), mode)
     assert got.shape == ref.shape
-    np.testing.assert_allclose(got, ref, rtol=1e-9, atol=1e-12)
+    # hybrid converges to the exact normal equations rather than solving them
+    # outright, so it gets the tolerance its refinement count earns
+    rtol = 1e-5 if mode == "hybrid" else 1e-9
+    np.testing.assert_allclose(got, ref, rtol=rtol, atol=1e-12)
     # inactive columns must be exactly zero, not merely small
     if design.n_cols > order + 1:
         assert np.all(got[..., order + 1:] == 0.0)
@@ -203,6 +206,68 @@ def test_ratio_mode_matches_hurin_profile_detrend(segmented, centering, tmp_path
     real = segmented["mask"] > 0
     np.testing.assert_allclose(model_mine[real], ref["m"][real],
                                rtol=0, atol=2e-7)
+
+
+@pytest.mark.parametrize("depth", [1e-4, 1e-3, 1e-2])
+def test_hybrid_converges_to_exact_geometrically_in_depth(depth):
+    """Each refinement step must contract the error by ~the transit depth.
+
+    That is the claim the mode rests on: ratio's static factor is a
+    preconditioner whose error is O(depth), so refinement is geometric and a
+    fixed, small number of steps suffices.
+    """
+    n_ep, n_pts = 4, 90
+    t = np.linspace(-0.4, 0.4, n_pts)
+    rng = np.random.default_rng(3)
+    ed = dict(times_padded=np.tile(t, (n_ep, 1)),
+              flux_padded=1.0 + rng.normal(0, 2e-4, (n_ep, n_pts)),
+              ferr_padded=np.full((n_ep, n_pts), 2e-4),
+              mask=np.ones((n_ep, n_pts)), epoch_centers=np.zeros(n_ep),
+              half_window=0.5, n_epochs=n_ep, max_pts=n_pts)
+    prof = np.where(np.abs(t) < 0.08, -depth, 0.0)
+
+    with mx.stream(mx.cpu):
+        design = profile.build_design(ed, np.full(n_ep, 2), dtype=mx.float64)
+        f_dev = mx.array(np.tile(prof, (n_ep, 1))[None], dtype=mx.float64)
+        ref = np.array(profile.solve_coefficients(design, f_dev, "exact"),
+                       dtype=np.float64)
+        scale = np.abs(ref).max()
+        errs = []
+        for k in (0, 1, 2):
+            old = profile.N_REFINE
+            profile.N_REFINE = k
+            try:
+                got = np.array(
+                    profile.solve_coefficients(design, f_dev, "hybrid"),
+                    dtype=np.float64)
+            finally:
+                profile.N_REFINE = old
+            errs.append(np.abs(got - ref).max() / scale)
+
+    # Each step contracts by ~the depth, but never below float64 round-off
+    # on these quantities (~1e-11), so the bound carries that floor.
+    for a, b in zip(errs, errs[1:]):
+        assert b < max(a * depth * 3.0, 1e-11), errs
+    assert errs[0] > errs[-1] * 100, errs
+    # and the shipped default is at or below float32's own precision
+    with mx.stream(mx.cpu):
+        got = np.array(profile.solve_coefficients(design, f_dev, "hybrid"),
+                       dtype=np.float64)
+    assert np.abs(got - ref).max() / scale < 1.2e-7, profile.N_REFINE
+
+
+def test_hybrid_beats_ratio_at_every_depth(segmented, centering):
+    """hybrid must be strictly more accurate than the ratio form it refines."""
+    orders = np.full(segmented["n_epochs"], 2)
+    with mx.stream(mx.cpu):
+        f = transit_on(segmented, centering, n_chains=1, dtype=mx.float64)
+        design = profile.build_design(segmented, orders, dtype=mx.float64)
+        ref = np.array(profile.solve_coefficients(design, f, "exact"))
+        hyb = np.array(profile.solve_coefficients(design, f, "hybrid"))
+        rat = np.array(profile.solve_coefficients(design, f, "ratio"))
+    e_h = np.abs(hyb - ref).max()
+    e_r = np.abs(rat - ref).max()
+    assert e_h < 1e-3 * e_r, (e_h, e_r)
 
 
 def test_exact_and_ratio_differ_by_order_depth(segmented, centering):

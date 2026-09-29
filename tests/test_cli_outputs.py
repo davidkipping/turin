@@ -31,7 +31,6 @@ def test_defaults_match_the_documented_ones():
     assert a.b_prior == "transiting"
     assert a.profile_mode == "exact"
     assert a.geometry == "circular"
-    assert a.ld_map == "kipping"
     assert a.sampler == "chees"
     assert a.modes == ("lineph", "ttv")
     assert a.ttv_max_days is None
@@ -48,10 +47,10 @@ def test_ttvmax_is_minutes_on_the_command_line():
     np.testing.assert_allclose(a.ttv_max_days, 0.5)
 
 
-def test_hurin_compat_combination_parses():
-    a = cli.parse_args(["--KOI-1.01", "--geometry=chord", "--ld=hurin",
-                        "--profile=ratio"])
-    assert (a.geometry, a.ld_map, a.profile_mode) == ("chord", "hurin", "ratio")
+def test_hurin_parity_combination_parses():
+    """Against hurin >= 0.1.68 the orbit is the only model difference."""
+    a = cli.parse_args(["--KOI-1.01", "--geometry=chord", "--PL=ratio"])
+    assert (a.geometry, a.profile_mode) == ("chord", "ratio")
 
 
 def test_modes_subset():
@@ -63,9 +62,8 @@ def test_modes_subset():
     (["--KOI-1.01", "--chanis=8"], "unrecognized"),
     (["--KOI-1.01", "--bprior=nonsense"], "not one of"),
     (["--KOI-1.01", "--sampler=nuts"], "not one of"),
-    (["--KOI-1.01", "--profile=approx"], "not one of"),
+    (["--KOI-1.01", "--PL=approx"], "not one of"),
     (["--KOI-1.01", "--geometry=kepler"], "not one of"),
-    (["--KOI-1.01", "--ld=quadratic"], "not one of"),
     (["--KOI-1.01", "--modes=lineph,nope"], "not one of"),
     (["--KOI-1.01", "--chains=0"], "positive"),
     (["--KOI-1.01", "--chains=abc"], "positive"),
@@ -197,15 +195,14 @@ def test_resume_state_guards_refuse_a_mismatch():
     state = outputs.ResumeState(
         target="KOI-1.01", mode="lineph", turin_version="0.1.0",
         launch_command="turin --KOI-1.01", tag=None, b_prior="transiting",
-        profile_mode="exact", geometry="circular", ld_map="kipping",
+        profile_mode="exact", geometry="circular",
         sampler="chees", n_chains=512, ttv_max=None, n_durations=5.0,
         legendre_orders=np.zeros(3), exposure_time=0.02, num_resample=7,
         n_samples_done=300, done=False)
 
     state.check(b_prior="transiting", profile_mode="exact")   # agrees
     for bad in (dict(b_prior="box"), dict(profile_mode="ratio"),
-                dict(geometry="chord"), dict(ld_map="hurin"),
-                dict(sampler="ensemble")):
+                dict(geometry="chord"), dict(sampler="ensemble")):
         with pytest.raises(SystemExit, match="use --|Use --"):
             state.check(**bad)
 
@@ -214,7 +211,7 @@ def test_resume_state_round_trips(tmp_path):
     state = outputs.ResumeState(
         target="KOI-1.01", mode="ttv", turin_version="0.1.0",
         launch_command="turin --KOI-1.01", tag=None, b_prior="nongrazing",
-        profile_mode="ratio", geometry="chord", ld_map="hurin",
+        profile_mode="ratio", geometry="chord",
         sampler="ensemble", n_chains=128, ttv_max=0.5, n_durations=7.0,
         legendre_orders=np.array([1, 2, 3]), exposure_time=0.02,
         num_resample=5, n_samples_done=1200, done=True,

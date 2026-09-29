@@ -8,7 +8,7 @@ profile likelihood -- a plug-in maximum-likelihood estimate of the nuisance
 parameters -- not a marginalization, so no ``-0.5 log det`` Occam factor is
 added. That matches hurin.
 
-Two solves are available:
+Three solves are available, selected by ``--PL``:
 
 ``exact`` (default)
     The true flux-space profile. Minimizing ``sum w (y - f (1 + L c))^2``
@@ -16,12 +16,42 @@ Two solves are available:
 
         (A^T W A) c = A^T W (y - f)
 
+    Correct, but the matrix carries ``f``, so both the ``O(n_pts m^2)``
+    contraction and the ``O(m^3)`` factorization are redone every evaluation.
+
 ``ratio``
     hurin's form (``transit_fit.py:323``): a weighted least-squares fit in
     *ratio* space, ``g_obs = y / max(f, 0.5)`` against ``L`` with weights
     ``1/sigma^2``, which drops the ``f`` factors from the design and the
-    weights. It agrees with ``exact`` to O(depth) and exists to reproduce
-    hurin's likelihood surface.
+    weights. It agrees with ``exact`` to O(depth). Its structural advantage
+    is that the normal matrix is then independent of the transit parameters,
+    so it is factorized once at setup and each evaluation is two triangular
+    substitutions.
+
+``hybrid``
+    Both: ``ratio``'s static factor used as a *preconditioner*, then
+    :data:`N_REFINE` steps of iterative refinement toward ``exact``. Since
+    ``||I - M_ratio^-1 M_exact|| = O(depth)``, the error contracts by a factor
+    of the transit depth per step, and the fixed point is the exact normal
+    equations. Each step costs two ``O(n_pts m)`` matvecs, and the exact
+    matrix is never formed.
+
+    **It is not currently faster.** Measured end to end (512 chains, 30
+    epochs, 2,573 points, value+grad, compiled), against ``exact`` = 1.00:
+
+        basis cols     exact    hybrid     ratio
+                 3     14.9ms    17.3ms    12.4ms
+                 6     19.5ms    24.6ms    15.3ms
+
+    Two reasons. At Legendre sizes the profile solve is not the bottleneck --
+    the transit model is most of that time -- and each refinement step costs a
+    triangular substitution, which is ``O(m^2)`` *unrolled elementwise ops*
+    whose MLX launch overhead outweighs the fused contraction it replaces.
+    ``hybrid`` is kept because it is the right structure for a larger nuisance
+    basis (splines, cotrending vectors, PLD regressors), where ``exact``'s
+    ``O(n_pts m^2)`` contraction and ``O(m^3)`` factorization dominate and the
+    matrix is never formed -- but that case also wants a batched triangular
+    solve better than an unrolled one. At three to six columns, use ``exact``.
 
 Implementation notes that matter:
 
@@ -56,7 +86,22 @@ import numpy as np
 
 from .prep import legendre_matrix
 
-PROFILE_MODES = ("exact", "ratio")
+PROFILE_MODES = ("exact", "hybrid", "ratio")
+
+#: Refinement steps for ``hybrid``. Each step contracts the error by a factor
+#: of order the transit depth. Measured relative error against ``exact``:
+#:
+#:     depth     k=0      k=1      k=2      k=3
+#:     1e-4    6.7e-5   5.8e-9   1e-12        -
+#:     1e-3    8.1e-4   7.0e-7   6.0e-10  7e-13
+#:     1e-2    8.5e-3   7.3e-5   6.3e-7   5.4e-9
+#:     5e-2    4.2e-2   1.8e-3   7.4e-5   3.1e-6
+#:
+#: Three puts every depth up to a per-cent below float32's own 1.2e-7
+#: precision, i.e. indistinguishable from ``exact`` on the production path,
+#: and still beats ``ratio`` by four orders on a 5% eclipse. Each step costs
+#: two O(n_pts * m) matvecs, so this is cheap insurance.
+N_REFINE = 3
 
 #: Relative ridge on active diagonal entries, by working precision. Scale-free
 #: so that it survives float32 -- hurin's absolute ``1e-10`` against a
@@ -250,6 +295,12 @@ def _cholesky_substitute(chol, rhs, n):
     return mx.stack(c, axis=-1)
 
 
+def _ratio_factor(design, n):
+    """The precomputed ratio-mode Cholesky factor, sliced for substitution."""
+    return [[design.chol_ratio[None, :, i, j] for j in range(n)]
+            for i in range(n)]
+
+
 def _cholesky_solve(M, rhs, n):
     """Solve ``M c = rhs`` for symmetric positive-definite ``M``, unrolled.
 
@@ -287,6 +338,34 @@ def solve_coefficients(design, f_dev, mode="exact"):
         M = M * (1.0 + ridge * mx.eye(n, dtype=M.dtype)[None, None])
         return _cholesky_solve(M, rhs, n)
 
+    if mode == "hybrid":
+        # Exact accuracy at close to ratio's cost.
+        #
+        # The exact normal matrix is M_e = L^T W F^2 L with F = diag(f), and
+        # the ratio matrix M_r = L^T W L is M_e with F -> I, so
+        # ||I - M_r^-1 M_e|| = O(depth). That makes M_r an excellent
+        # *preconditioner*, and M_r is exactly what was factorized once at
+        # setup. So: solve with M_r, then refine.
+        #
+        #     c_0 = M_r^-1 b
+        #     c_k = c_{k-1} + M_r^-1 (b - M_e c_{k-1})
+        #
+        # The fixed point satisfies b = M_e c, i.e. the exact normal
+        # equations, and the error contracts by O(depth) per step. The trick
+        # is that M_e c never needs M_e to be *formed*: it is
+        # ``L^T W (f^2 (L c))``, two matvecs at O(n_pts * m) -- never the
+        # O(n_pts * m^2) contraction nor the O(m^3) factorization.
+        f = 1.0 + f_dev
+        f2 = f * f
+        b = mx.einsum("epi,cep->cei", d.Lw, f * resid)
+        chol = _ratio_factor(d, n)
+        c = _cholesky_substitute(chol, b, n)
+        for _ in range(N_REFINE):
+            Mc = mx.einsum("epi,cep->cei", d.Lw,
+                           f2 * mx.einsum("epi,cei->cep", d.L, c))
+            c = c + _cholesky_substitute(chol, b - Mc, n)
+        return c
+
     if mode == "ratio":
         # hurin: fit y/f - 1 against L, with the transit factored out of both
         # the design and the weights. g_obs - 1 = (y - f)/f, formed from the
@@ -300,9 +379,7 @@ def solve_coefficients(design, f_dev, mode="exact"):
         # every evaluation. The saving grows with the size of the basis.
         f_safe = mx.maximum(1.0 + f_dev, 0.5)
         rhs = mx.einsum("epi,cep->cei", d.Lw, resid / f_safe)
-        chol = [[d.chol_ratio[None, :, i, j] for j in range(n)]
-                for i in range(n)]
-        return _cholesky_substitute(chol, rhs, n)
+        return _cholesky_substitute(_ratio_factor(d, n), rhs, n)
 
     raise ValueError(
         f"unknown profile mode {mode!r}; expected one of {PROFILE_MODES}")
@@ -395,7 +472,8 @@ def solve_coefficients_np(epoch_data, orders, f_transit, mode="exact"):
             Lf = legendre_matrix((times[e][sel] - centers[e]) / hw, k - 1)
             w = 1.0 / ferr[e][sel] ** 2
             f = f_transit[ch, e][sel]
-            if mode == "exact":
+            if mode in ("exact", "hybrid"):
+                # hybrid's fixed point IS the exact normal equations
                 A = f[:, None] * Lf
                 target = flux[e][sel] - f
             elif mode == "ratio":

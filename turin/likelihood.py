@@ -93,7 +93,7 @@ class ProfiledTransitLogProb:
 
     def __init__(self, layout, centering, epoch_data, orders, *,
                  num_resample=1, exposure_time=0.0, profile_mode="exact",
-                 geometry="circular", ld_map="kipping", noise=None,
+                 geometry="circular", noise=None,
                  n_chains_hint=512, dtype=mx.float32,
                  budget_bytes=DEFAULT_BLOCK_BUDGET_BYTES):
         if profile_mode not in _profile.PROFILE_MODES:
@@ -102,7 +102,6 @@ class ProfiledTransitLogProb:
         self.mode = layout.mode
         self.profile_mode = profile_mode
         self.geometry = geometry
-        self.ld_map = ld_map
         self.noise = noise or WhiteNoise()
         self.dtype = dtype
         self.dim = layout.dim
@@ -184,8 +183,7 @@ class ProfiledTransitLogProb:
             f_dev = _model.transit_flux_dev(
                 blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
                 k=p["k"], b=p["b"], T14=p["T14"], q1=p["q1"], q2=p["q2"],
-                period=p["period"], geometry=self.geometry,
-                ld_map=self.ld_map)
+                period=p["period"], geometry=self.geometry)
             c = _profile.solve_coefficients(blk.design, f_dev,
                                             self.profile_mode)
             resid = _profile.residual_dev(blk.design, f_dev, c)
@@ -213,7 +211,7 @@ class ProfiledTransitLogProb:
         f_dev = _model.transit_flux_dev(
             self.grid, mid=self.mid_times(self.grid, p, 0, self.n_epochs),
             k=p["k"], b=p["b"], T14=p["T14"], q1=p["q1"], q2=p["q2"],
-            period=p["period"], geometry=self.geometry, ld_map=self.ld_map)
+            period=p["period"], geometry=self.geometry)
         return _profile.detrended_model(self.design, f_dev, self.profile_mode)
 
 

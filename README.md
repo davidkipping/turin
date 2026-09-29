@@ -96,9 +96,8 @@ product.
 
 --bprior=transiting|nongrazing|box      (b, k) prior; --nongrazing is an alias
 --TTVmax=MINUTES             declared TTV amplitude; sets the timing priors
---profile=exact|ratio        flux-space profile (default) or hurin's ratio form
+--PL=exact|hybrid|ratio      how the baseline coefficients are solved
 --geometry=circular|chord    true circular orbit (default) or hurin's chord
---ld=kipping|hurin           Kipping (2013) limb darkening (default) or hurin's
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache
@@ -126,19 +125,28 @@ Every product records turin's version and the exact command that made it.
 
 ## Differences from hurin
 
-turin is **not** bit-compatible with hurin, and two of the three reasons are
-corrections. `--geometry=chord --ld=hurin --profile=ratio` reproduces hurin
-for comparison. In short:
+Against **hurin >= 0.1.68** two differences remain, and
+`--geometry=chord --PL=ratio` reproduces hurin for comparison:
 
-- **Limb darkening.** hurin's map drops both factors of two from Kipping
-  (2013), so its `q2` is twice the published one and its prior cannot reach
-  the negative `u2` that real stars often prefer. Worth 2.4e-4 in flux, about
-  3% of a typical depth. turin uses the published map.
 - **Orbit.** jaxoplanet's `TransitOrbit` is a straight-chord constant-speed
-  approximation; turin uses the true circular projection, which is also what
-  makes the reported `log10_rho` consistent with the fitted geometry.
+  approximation, not a Keplerian orbit; turin uses the true circular
+  projection, which is also what makes the reported `log10_rho` consistent
+  with the fitted geometry. Worth 4.6e-6 in flux at T14/P = 0.019.
 - **Profile form.** hurin fits the baseline in ratio space, an O(depth)
   approximation; turin defaults to the exact flux-space profile.
+
+A third difference is now **resolved upstream**: hurin's limb-darkening map
+dropped both factors of two from Kipping (2013), so its prior could not reach
+the negative `u2` that real stars often prefer. turin's port surfaced it and
+hurin 0.1.68 adopted the correct map, so both packages now agree. It mattered:
+on a grazing system the truncated prior was quietly tightening `k` and `b`.
+
+Limb darkening is Kipping (2013) throughout. That is compatible with the
+polynomial (Agol et al.) formulation MetalPlanet implements, because the
+quadratic law is exactly that law's `N=2` case
+(`I(mu)/I0 = 1 - sum u_n (1-mu)^n`); the Green's basis MetalPlanet uses
+internally is an affine change of basis, not a different law. Both are pinned
+by tests.
 
 `docs/hurin-differences.md` has the measurements and the reasoning.
 
@@ -153,6 +161,7 @@ Pinned by the test suite, against independent references:
 | exposure integration vs MetalPlanet supersampling | 1e-14 | 3.3e-16 |
 | profile solve vs `np.linalg.solve`, float64 | 1e-9 | ~1e-12 |
 | `ratio` mode vs hurin's own solve | hurin's float32 floor | 1e-8 |
+| `hybrid` vs `exact` (3 refinements, 1% depth) | 1.2e-7 | 5.4e-9 |
 | float64 gradients vs finite differences | 1e-5 | 2e-9 to 2e-7 |
 | float32 log-density vs float64 (`validate_precision`) | 0.1 | 3e-4 |
 
