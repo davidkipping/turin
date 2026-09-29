@@ -152,24 +152,11 @@ Kipping (2010) Eq. 40 picks:
   a supersampled kinked integrand amplifies its error, because the error
   oscillates as nodes cross the contacts.
 
-`N_GL` is chosen for the gradient, not the value: five is already below the
-float32 floor on values, nine is needed to bring `dF/d(period)` to turin's own
-float32 gradient noise. It is affordable because the kernel is not
-arithmetic-bound at these sizes — 25 to 60 evaluations per point all measure
-the same.
-
-**Point order is a 3x speed lever.** The kernel runs one point per GPU
-thread in SIMD groups of 32, and a group pays for any branch one member
-takes; an in-transit point costs ~8x an out-of-transit one. Storage order
-(epoch by epoch, ~10% of each window in transit) puts a transit point in
-most groups, so nearly every group paid the in-transit price.
-`model.phase_order` sorts the flattened points by time from the reference
-mid-transit, and `build_grid(mask=...)` moves padded slots, which
-`segment_epochs` parks at the epoch *centre*, to quadrature. KOI-448.02, 512
-chains, compiled value+grad: 45.8 ms before, 14.1 ms after, with bit-identical
-log-likelihoods. Any new route into the kernel should keep both. Before this,
-MetalPlanet's cost looked flat in `N_GL` because divergence swamped the
-arithmetic; it is not flat any more.
+`N_GL` is 5, judged on the log-likelihood (the table is in `model.py`): its
+error there is sd 5e-4, 40x below the float32 noise the `--PL` probe
+accepts, and the worst gradient component is off by <0.6%. It was 9 until
+0.1.9, chosen on the kernel's own `dF/d(period)` while divergence (below)
+made cost look flat in `N_GL`; 5 is 1.55x faster.
 
 Two things to keep in mind. `geometry="chord"` has no kernel path and always
 supersamples. And **finite differences are not a valid gradient reference**

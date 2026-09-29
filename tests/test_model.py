@@ -42,14 +42,14 @@ _HURIN_DIR = os.path.abspath(
 
 
 def one_epoch_grid(times=TIMES, n=0.0, d=0.0, n_sub=1, exp_time=0.0,
-                   dtype=mx.float64):
+                   dtype=mx.float64, n_gl=M.N_GL):
     centering = dict(times_centered=np.asarray(times)[None, :],
                      n_arr=np.array([float(n)]), d_arr=np.array([float(d)]),
                      P_ref=P_REF, tau0_ref=0.0)
     # exp_time drives BOTH routes: the fallback's sub-exposure offsets and
     # the tau kernel's in-kernel contact rule
     return M.build_grid(centering, prep.supersample_offsets(exp_time, n_sub),
-                        dtype=dtype, exp_time=exp_time)
+                        dtype=dtype, exp_time=exp_time, n_gl=n_gl)
 
 
 def turin_flux(*, grid, k=K, b=B, T14_=T14, q1=Q1, q2=Q2, period=P_REF,
@@ -206,7 +206,11 @@ def test_the_period_gradient_survives_exposure_integration():
 
     def analytic(use_kernel):
         def scalar(v):
-            grid = one_epoch_grid(n=n_arr, n_sub=8, exp_time=exp)
+            # n_gl pinned: this tests the route, not the production N_GL,
+            # whose cost/accuracy trade is judged on logL (see model.N_GL).
+            # The kernel's bare period partial is the slowest quantity to
+            # converge: 11.6% off at five nodes, inside 5% from nine.
+            grid = one_epoch_grid(n=n_arr, n_sub=8, exp_time=exp, n_gl=9)
             col = lambda i: v[i].reshape(1, 1)
             b = M.impact_parameter(col(3), col(2), "transiting")
             f = M.transit_flux(

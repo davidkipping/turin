@@ -157,7 +157,9 @@ def test_rerunning_skips_a_converged_mode(tmp_path, fake_target):
 
 
 def test_resume_guard_refuses_a_changed_model(tmp_path, fake_target):
-    pipeline.run(_args(tmp_path), log=lambda m: None)
+    # explicit mode: under --PL=auto the probe's pick is timing-dependent and
+    # can itself be ratio, which would make the second run a match
+    pipeline.run(_args(tmp_path, profile_mode="exact"), log=lambda m: None)
     with pytest.raises(SystemExit, match="ratio"):
         pipeline.run(_args(tmp_path, profile_mode="ratio"),
                      log=lambda m: None)

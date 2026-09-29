@@ -86,22 +86,24 @@ from metalplanet.trig import sincos
 HAS_TAU_KERNEL = hasattr(metalplanet, "flux_dev_from_tau")
 #: Gauss-Legendre nodes per contact sub-interval.
 #:
-#: Chosen for the *gradient*, not the value: five already gives 6.4e-8 on the
-#: flux of a Kepler long-cadence transit, below float32's own 1.6e-7, but
-#: d(logL)/d(period) converges more slowly. Measured against a float64
-#: reference differentiated by central differences:
+#: Judged on the log-likelihood, which is what the sampler sees. The kernel's
+#: own partial dF/d(period) converges slowly (rel. error 4.3e-2 at five nodes,
+#: 1.1e-2 at nine), and nine was first chosen on that basis, while SIMD
+#: divergence made the kernel's cost look flat in N_GL. Diluted through the
+#: whole likelihood the error is small, and with divergence gone
+#: (phase_order) the cost is not flat. KOI-448.02, float64 against n_gl=32,
+#: at 24 posterior draws; gradient errors in units of the posterior sd, i.e.
+#: the force error HMC feels (the typical force is ~1):
 #:
-#:     n_gl   evals/pt   rel. error in dF/d(period)
-#:        5         25   4.3e-2
-#:        7         35   1.6e-2
-#:        9         45   1.1e-2
-#:       12         60   2.6e-3
+#:     n_gl  sd logL error  worst grad error x sd       v+g, 512 chains
+#:        5      5.0e-4       5.3e-3 (beta)               9.1 ms
+#:        9      3.0e-5       1.0e-3 (beta)              14.1 ms
+#:       12                                              18.0 ms
+#:   float32 noise alone, at either n_gl:  1.2e-2 (beta)
 #:
-#: Nine puts it at turin's own float32 gradient noise (~8e-3 on k). It is
-#: affordable because this kernel is not arithmetic-bound at turin's sizes:
-#: 25 through 60 evaluations per point all measured 33-34 ms for a
-#: 512-chain, 2,573-point value+grad, i.e. flat.
-N_GL = 9
+#: So at five the quadrature error is below float32's own on the gradient,
+#: and 40x below it on the value (the --PL probe accepts sd 0.02).
+N_GL = 5
 
 #: (b, k) prior parameterizations, after hurin's ``_sample_b_k``. Each maps a
 #: sampled fraction in [0, 1] to the impact parameter.
