@@ -136,6 +136,37 @@ one yet.
 The ephemeris is unaffected either way: P and tau0 agree across all three
 columns, which is the part of the fit that does not care about the limb.
 
+## Measured on real data: KOI-5162.01, the trapped-mode target
+
+The target hurin documents as its headline failure: a 628-day period with
+only **three** observed transits, where hurin's chains settled 35.6 log-units
+below the global optimum with R-hat <= 1.01. turin ran 256 ChEES chains,
+LinEph then TTV, with template-sweep timing seeds.
+
+| epoch | hurin t_mid | turin t_mid | agreement | turin's precision |
+|---|---|---|---|---|
+| -1 | 152.70142 ± 0.1055 | 152.74169 ± 0.0432 | 0.35 sigma | 2.4x tighter |
+| 0 | 781.18863 ± 0.0885 | 781.15475 ± 0.0175 | 0.38 sigma | 5.1x tighter |
+| +1 | 1408.47498 ± 0.3368 | 1408.22771 ± 0.0380 | 0.73 sigma | 8.9x tighter |
+
+The times agree, so neither fit is in a different mode. What changed is the
+width: turin's timing uncertainties are 2.4x to 8.9x smaller, with bulk ESS
+of 19,000-27,000 per transit time against hurin's few thousand. On a target
+with three transits and a weak per-epoch constraint, that is the difference
+between 256 chains seeded at each transit's own likelihood peak and a handful
+started at the linear ephemeris.
+
+turin's own diagnostic flagged the right epoch unprompted:
+
+    WARNING: 1 epoch(s) have a rival timing mode within 10 log-units
+      epoch -1: seed -127.0 min, rival gap 3.7
+
+Two notes on reading that table. The O-C values for epochs -1 and +1 are
+identical by construction, not by coincidence: a least-squares line through
+three equally spaced points forces `r(-1) = r(+1) = -r(0)/2`, so a
+three-transit O-C diagram carries exactly one degree of freedom. And the
+whole fit took 29 seconds per sampling round.
+
 ## Verification
 
 `tests/test_model.py` pins all of it:

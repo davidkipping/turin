@@ -265,22 +265,14 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                 transform, lp, results, verdict, outdir, caps, *, log,
                 state_holder, cfg):
     """Write every product for this mode. Called after each sampling round."""
-    import anvil
-
     target = prepared.target
     names = list(layout.names)
     phys = _sampling.physical_draws(transform, results)
-    chain = results.get_chain()
 
-    try:
-        ess_tail = np.asarray(anvil.diagnostics.ess(chain, method="tail")
-                              if hasattr(anvil.diagnostics, "ess")
-                              else [None] * len(names), dtype=float)
-    except Exception:
-        ess_tail = None
-
+    # anvil reports rank-normalized bulk ESS only (no tail ESS), so hurin's
+    # Tail_ESS column is written empty rather than filled with a placeholder.
     summary = _outputs.summarize(phys, names, rhat=verdict.rhat,
-                                 ess_bulk=verdict.ess, ess_tail=ess_tail)
+                                 ess_bulk=verdict.ess, ess_tail=None)
 
     # derived quantities, computed after sampling in float64
     b_draws = _outputs.derived_b(phys, names, layout.b_prior)
