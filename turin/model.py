@@ -195,6 +195,11 @@ class EpochGrid:
     #: exposure duration in days, for the in-kernel contact rule
     exp_time: float = 0.0
     n_gl: int = N_GL
+    #: (n_epochs*max_pts,) int32 permutation putting the flattened points in
+    #: order of time from predicted mid-transit, and its inverse; see
+    #: :func:`phase_order`. None evaluates in storage order.
+    order: mx.array | None = None
+    unorder: mx.array | None = None
 
     @property
     def n_epochs(self) -> int:
@@ -209,7 +214,16 @@ class EpochGrid:
         return self.sub_offsets.shape[0]
 
     def select(self, lo: int, hi: int) -> "EpochGrid":
-        """A view over epochs [lo, hi): the unit of likelihood chunking."""
+        """A view over epochs [lo, hi): the unit of likelihood chunking.
+
+        The point order is recomputed for the slice, since the permutation
+        indexes the flattened block. Only called while building, so the host
+        round-trip this costs never reaches a traced call.
+        """
+        order = unorder = None
+        if self.order is not None:
+            order, unorder = phase_order(np.array(self.times[lo:hi]),
+                                         np.array(self.d_arr[lo:hi]))
         return EpochGrid(
             times=self.times[lo:hi],
             n_arr=self.n_arr[lo:hi],
@@ -220,21 +234,69 @@ class EpochGrid:
             dtype=self.dtype,
             exp_time=self.exp_time,
             n_gl=self.n_gl,
+            order=order,
+            unorder=unorder,
         )
 
 
+def phase_order(times, d_arr):
+    """Permutation sorting flattened points by time from predicted mid-transit.
+
+    MetalPlanet's kernel runs one point per GPU thread, and threads execute
+    in SIMD groups of 32 that take every branch any member takes. A point in
+    transit costs ~8x one out of transit (the contact rule, the occultation
+    integrals), so storage order -- every epoch's window in turn, ~10% of it
+    in transit -- puts a transit point in most groups and makes nearly all of
+    them pay the in-transit price. Sorted, the in-transit points share a few
+    groups and the rest exit early. Compiled value+grad of the whole
+    log-density on KOI-448.02 at 512 chains: 45.8 ms in storage order,
+    17.1 ms sorted, 14.1 ms with :func:`build_grid`'s padding move as well.
+    Log-likelihoods were bit-identical; gradients agree to 2e-7 (summation
+    order).
+
+    The key is the reference ephemeris, fixed at build time, so the order is
+    static. Parameters move the true mid-times by far less than a window, and
+    order affects only speed: every point is still evaluated at its own time.
+    """
+    key = (np.asarray(times, dtype=np.float64)
+           - np.asarray(d_arr, dtype=np.float64)[:, None]).ravel()
+    order = np.argsort(key, kind="stable")
+    unorder = np.empty_like(order)
+    unorder[order] = np.arange(order.size)
+    return (mx.array(order.astype(np.int32)),
+            mx.array(unorder.astype(np.int32)))
+
+
 def build_grid(centering, sub_offsets, dtype=mx.float32, *,
-               exp_time=0.0, n_gl=N_GL):
+               exp_time=0.0, n_gl=N_GL, mask=None, sort_points=True):
     """Upload the host-side centred arrays as an :class:`EpochGrid`.
 
     ``centering`` is :func:`turin.prep.centering_constants` output;
     ``sub_offsets`` comes from :func:`turin.prep.supersample_offsets`.
     Every array is converted with an explicit ``dtype``: ``mx.array`` of a
     float64 NumPy array silently yields float32 otherwise.
+
+    ``mask`` (the epoch data's, 1 for real points) moves padded slots from
+    the epoch centre, where :func:`turin.prep.segment_epochs` parks them, to
+    a quarter period from mid-transit. The likelihood weights them by zero
+    either way, but at the centre every padded slot costs the kernel an
+    in-transit evaluation -- 8.5% of KOI-448.02's slots, as many again as its
+    real in-transit points. At quadrature they are far out of transit for any
+    geometry, so their deviation is exactly zero.
+
+    ``sort_points`` attaches :func:`phase_order`.
     """
+    times = np.array(centering["times_centered"], dtype=np.float64)
+    d_arr = np.asarray(centering["d_arr"], dtype=np.float64)
+    if mask is not None:
+        pad = np.asarray(mask) <= 0
+        times[pad] = np.broadcast_to(
+            d_arr[:, None] + 0.25 * float(centering["P_ref"]), times.shape)[pad]
+    order = unorder = None
+    if sort_points:
+        order, unorder = phase_order(times, d_arr)
     return EpochGrid(
-        times=mx.array(np.ascontiguousarray(centering["times_centered"]),
-                       dtype=dtype),
+        times=mx.array(np.ascontiguousarray(times), dtype=dtype),
         n_arr=mx.array(np.ascontiguousarray(centering["n_arr"]), dtype=dtype),
         d_arr=mx.array(np.ascontiguousarray(centering["d_arr"]), dtype=dtype),
         sub_offsets=mx.array(np.ascontiguousarray(sub_offsets), dtype=dtype),
@@ -243,6 +305,8 @@ def build_grid(centering, sub_offsets, dtype=mx.float32, *,
         dtype=dtype,
         exp_time=float(exp_time),
         n_gl=int(n_gl),
+        order=order,
+        unorder=unorder,
     )
 
 
@@ -338,13 +402,20 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
     # The tau kernel: exposure integrated in registers by the contact rule,
     # so no sub-exposure axis exists to hold. Parameters stay (n_chains, 1);
     # MetalPlanet canonicalizes that per chain itself.
+    # Points go through in phase order (see phase_order) and come back out;
+    # the two gathers cost well under a millisecond.
     u1, u2 = limb_dark_coeffs(q1, q2)
+    flat = tau.reshape(n_chains, -1)
+    if grid.order is not None:
+        flat = mx.take(flat, grid.order, axis=1)
     dev = metalplanet.flux_dev_from_tau(
-        tau.reshape(n_chains, -1), period,
+        flat, period,
         a_over_rstar(T14, period, k, b), b, k, u1, u2,
         exp_time=grid.exp_time,
         integration="contact" if grid.exp_time > 0 else "none",
         n_gl=grid.n_gl)
+    if grid.order is not None:
+        dev = mx.take(dev, grid.unorder, axis=1)
     return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
 
 

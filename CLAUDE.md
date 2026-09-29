@@ -158,6 +158,19 @@ float32 gradient noise. It is affordable because the kernel is not
 arithmetic-bound at these sizes — 25 to 60 evaluations per point all measure
 the same.
 
+**Point order is a 3x speed lever.** The kernel runs one point per GPU
+thread in SIMD groups of 32, and a group pays for any branch one member
+takes; an in-transit point costs ~8x an out-of-transit one. Storage order
+(epoch by epoch, ~10% of each window in transit) puts a transit point in
+most groups, so nearly every group paid the in-transit price.
+`model.phase_order` sorts the flattened points by time from the reference
+mid-transit, and `build_grid(mask=...)` moves padded slots, which
+`segment_epochs` parks at the epoch *centre*, to quadrature. KOI-448.02, 512
+chains, compiled value+grad: 45.8 ms before, 14.1 ms after, with bit-identical
+log-likelihoods. Any new route into the kernel should keep both. Before this,
+MetalPlanet's cost looked flat in `N_GL` because divergence swamped the
+arithmetic; it is not flat any more.
+
 Two things to keep in mind. `geometry="chord"` has no kernel path and always
 supersamples. And **finite differences are not a valid gradient reference**
 under the contact rule: it freezes its split points (exact, since moving an

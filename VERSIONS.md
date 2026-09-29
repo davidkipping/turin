@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.8 | — | 2026-09-29 | Feed MetalPlanet's kernel points in phase order and park padded slots at quadrature, removing SIMD divergence: log-density value+grad 3.3x faster on KOI-448.02 (45.8 → 14.1 ms). Values bit-identical. (MODEL_REV unchanged at 2) |
 | 0.1.7 | — | 2026-09-29 | Drop the chain-by-chain float64 workaround: MetalPlanet b3e9872 fixed the graph-path batching. Output bit-identical. (MODEL_REV unchanged at 2) |
 | 0.1.6 | — | 2026-09-29 | **MODEL_REV 1→2.** Integrate MetalPlanet's tau kernel: exposures integrated in-kernel by the contact rule, fixing a 1.5e-4 flux error (~2% of a depth) and a dF/d(period) that was ~100x wrong with the wrong sign. Use anvil's resume: extensions are true continuations and their draws pool |
 | 0.1.5 | — | 2026-09-29 | --PL defaults to auto: measure all three solves per target and choose. Add MODEL_REV likelihood-revision flagging. Private GitHub repo. (MODEL_REV unchanged at 1) |

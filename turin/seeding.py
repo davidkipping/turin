@@ -111,7 +111,8 @@ def template_sweep_taus(epoch_data, centering, design, *, tau_half,
     # epoch is offset by its own row of the grid
     grid = _model.build_grid(centering,
                              _supersample(exposure_time, num_resample),
-                             dtype=dtype, exp_time=exposure_time)
+                             dtype=dtype, exp_time=exposure_time,
+                             mask=epoch_data["mask"])
     scores = np.empty((n_epochs, n_grid), dtype=np.float64)
     col = lambda v: mx.full((n_grid, 1), float(v), dtype=dtype)
     dtau = mx.array(np.ascontiguousarray(grids.T), dtype=dtype)  # (n_grid, E)

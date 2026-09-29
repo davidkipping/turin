@@ -219,6 +219,52 @@ def test_epoch_blocking_does_not_change_the_answer(dataset, budget):
     np.testing.assert_allclose(got, ref, rtol=1e-11)
 
 
+@pytest.mark.parametrize("budget", [1 << 31, 1 << 16])
+def test_point_order_and_padding_placement_do_not_change_the_answer(
+        dataset, budget, monkeypatch):
+    """Phase-sorting the points and parking padded slots at quadrature are
+    kernel-speed measures (model.phase_order), not approximations: value and
+    gradient must match storage order with padding at the epoch centre."""
+    ed, cen, orders = dataset
+    assert (ed["mask"] == 0).any(), "fixture must exercise padding"
+    layout = params.lineph_layout(EPH)
+    kw = dict(num_resample=7, exposure_time=29.4 / 1440, n_chains_hint=64,
+              dtype=mx.float64, budget_bytes=budget)
+    v = mx.array(V_TRUE[None, :] + 1e-3 * np.random.default_rng(3)
+                 .standard_normal((4, V_TRUE.size)), dtype=mx.float64)
+    build = M.build_grid
+
+    def run():
+        with mx.stream(mx.cpu):
+            lp = likelihood.ProfiledTransitLogProb(layout, cen, ed, orders,
+                                                   **kw)
+            val, g = mx.value_and_grad(lambda x: mx.sum(lp(x)))(v)
+            return lp, np.array(lp(v)), np.array(g)
+
+    lp, val, grad = run()
+    assert all(b.grid.order is not None for b in lp.blocks)
+    pad = ed["mask"] == 0
+    tau = np.array(lp.grid.times) - np.array(lp.grid.d_arr)[:, None]
+    np.testing.assert_allclose(tau[pad], 0.25 * P_REF, rtol=1e-12)
+
+    monkeypatch.setattr(M, "build_grid", lambda *a, mask=None, **k: build(
+        *a, **{**k, "sort_points": False}))
+    lp0, val0, grad0 = run()
+    assert all(b.grid.order is None for b in lp0.blocks)
+    np.testing.assert_allclose(val, val0, rtol=1e-13)
+    np.testing.assert_allclose(grad, grad0, rtol=1e-10, atol=1e-10)
+
+
+def test_phase_order_sorts_by_time_from_mid_and_inverts():
+    times = np.array([[0.3, -0.1, 0.0], [0.2, -0.4, 0.1]])
+    d = np.array([0.05, -0.1])
+    order, unorder = M.phase_order(times, d)
+    key = (times - d[:, None]).ravel()
+    o, u = np.array(order), np.array(unorder)
+    assert np.all(np.diff(key[o]) >= 0)
+    np.testing.assert_array_equal(o[u], np.arange(key.size))
+
+
 def test_validate_precision_is_ok(lineph):
     """anvil's own float32 adjudication must pass before any production fit."""
     layout, target, transform, lp, hi = lineph
