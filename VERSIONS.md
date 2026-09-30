@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.15 | — | 2026-09-30 | Add docs/upstream/hurin_doc_prompt.md: reword hurin's user-facing "1:1 grazing odds" to P(grazing|k)=k. Documentation only; hurin's prior is correct. (MODEL_REV unchanged at 3) |
 | 0.1.14 | — | 2026-09-29 | Docs: README documents the three --bprior modes, separating the 1:1 *marginal* grazing odds from the k/(1-k) odds at fixed k; new test pins the grazing mass per k. (MODEL_REV unchanged at 3) |
 | 0.1.13 | — | 2026-09-29 | Docs: KOI-518.02 becomes the primary hurin comparison — both packages converged, turin at defaults, all parameters within 0.03σ, 11.1x less wall clock (6,037 s → 544 s) and 750-1,460x the ESS/s. (MODEL_REV unchanged at 3) |
 | 0.1.12 | — | 2026-09-29 | Docs: README gains a Performance section (measured 0.1.7 → now on two real targets); hurin-differences records why KOI-5162.01's wall time is not comparable across the supersampling → tau-kernel switch. (MODEL_REV unchanged at 3) |

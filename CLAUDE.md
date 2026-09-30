@@ -24,18 +24,30 @@ seam for them.
 circular orbits, white noise. Deferred: TTV-PL (hurin's Newton-profiled
 per-epoch times), GPs, eccentricity, the Flask web frontend.
 
-## The three external packages
+## The external packages
 
-MetalPlanet, anvil and anvil-gp are **strictly external**. Never edit
-them from this repo. Where turin needs something they lack, the workflow
-is to write a brief in `docs/upstream/` for that package's own Claude
-session; the user runs it there and reports back. Existing briefs:
+MetalPlanet, anvil and anvil-gp are **strictly external**, and so is
+**hurin** — turin is its successor, not its owner. Never edit any of them
+from this repo. Where turin needs something they lack, or spots something
+wrong in them, the workflow is to write a brief in `docs/upstream/` for
+that package's own Claude session; the user runs it there and reports back
+in a matching `*_reply.md`. Existing briefs:
 
 - `docs/upstream/anvil_prompt.md` — resumable runs (needed for
   `--extend`/auto-resume), the ChEES bounded-parameter boundary trap,
   per-chain divergence counts.
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
+- `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
+  "1:1 grazing odds" is true marginally over `k ~ U(0,1)` but reads as a
+  claim about the user's own target, where the odds are `k/(1-k)`.
+
+turin has already changed hurin twice by this route: the Kipping (2013)
+limb-darkening fix (hurin 0.1.68) and the `_MODEL_REV` guard turin then
+adopted. Porting hurin's science is how turin finds these, so expect more,
+and verify numerically before filing — I once talked myself into a
+"documentation error" in hurin's `(b, k)` prior on one careless
+measurement, and it was correct.
 
 `turin/capabilities.py` feature-detects every upstream capability and
 falls back when it is absent. All four anvil asks and the MetalPlanet one
