@@ -172,10 +172,17 @@ def bk_log_prior(beta, k, b_prior="transiting"):
         ``+log1p(k)`` makes the *joint* (b, k) density uniform over the
         transiting region rather than merely conditionally uniform, and the
         linear grazing taper ``log1p(-u)``, ``u = (b - (1-k)) / 2k``, halves
-        the grazing band. Together these give exactly 1:1 marginal prior odds
-        grazing to non-grazing and a uniform marginal ``p(k)``
-        (the band has width ``2k`` and the taper integrates to 1/2 over it,
-        contributing ``k``, against ``1-k`` non-grazing).
+        the grazing band. Together these give a uniform marginal ``p(k)``:
+        at each ``k`` the band has width ``2k`` and the taper integrates to
+        1/2 over it, so it carries mass exactly ``k`` against ``1-k``
+        non-grazing, summing to 1 for every ``k``. Untapered, ``p(k)`` would
+        go as ``1+k``.
+
+        The grazing odds are therefore ``k/(1-k)`` **at fixed k**, and 1:1
+        only *marginally*, because ``k`` and ``1-k`` each integrate to 1/2
+        over the default ``k ~ U(0, 1)``. Both are pinned by tests; keep them
+        apart when quoting, since at ``k = 0.02`` grazing is ~2% of the prior
+        mass, not half of it.
     ``nongrazing``
         ``+log1p(-k)``, the area of the ``b < 1-k`` triangle.
     ``box``

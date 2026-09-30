@@ -1,7 +1,8 @@
 """The assembled log-density: priors, epoch blocking, and the anvil contract.
 
 The prior tests check the *claims* hurin makes about its (b, k)
-parameterization -- uniform marginal in k, 1:1 grazing odds -- rather than
+parameterization -- uniform marginal in k, and grazing odds that are 1:1
+marginally while being k/(1-k) at fixed k -- rather than
 just re-deriving its algebra, since those claims are the reason the
 parameterization exists.
 """
@@ -98,6 +99,33 @@ def test_bk_prior_gives_uniform_k_and_equal_grazing_odds():
     q = [w[(k >= a) & (k < a + 0.25)].sum() for a in (0.0, 0.25, 0.5, 0.75)]
     q = np.array(q) / np.sum(q)
     assert np.all(np.abs(q - 0.25) < 0.01), f"p(k) quartiles {q}"
+
+
+@pytest.mark.parametrize("k0", [0.02, 0.05, 0.1, 0.3, 0.5])
+def test_bk_prior_grazing_mass_at_fixed_k_is_k(k0):
+    """The mechanism behind the 1:1 marginal odds, pinned per k.
+
+    The 1:1 figure holds only *marginally*, because k and 1-k each integrate
+    to 1/2 over ``k ~ U(0, 1)``. At a fixed k the grazing band carries mass
+    exactly k against 1-k non-grazing -- odds k/(1-k), i.e. ~2% grazing for a
+    k = 0.02 planet, not a coin flip. Testing it at fixed k also means the
+    integrated test above cannot pass on a coincidence of the k range.
+
+    Total mass being 1 at every k is the same statement as a uniform marginal
+    p(k), and is what the taper buys: untapered it would go as 1 + k.
+    """
+    n = 200_000
+    beta = (np.arange(n) + 0.5) / n          # midpoint quadrature in beta
+    with mx.stream(mx.cpu):
+        w = np.exp(np.array(params.bk_log_prior(
+            mx.array(beta.reshape(-1, 1), dtype=mx.float64),
+            mx.full((n, 1), k0, dtype=mx.float64), "transiting"),
+            dtype=np.float64))
+    grazing = beta * (1.0 + k0) > (1.0 - k0)
+    graz_mass = w[grazing].sum() / n
+    total = w.sum() / n
+    assert abs(graz_mass - k0) < 1e-4, f"grazing mass {graz_mass} != k {k0}"
+    assert abs(total - 1.0) < 1e-6, f"p(k) not flat: total mass {total}"
 
 
 def test_bk_prior_nongrazing_and_box():

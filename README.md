@@ -87,6 +87,54 @@ is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
 and `log10_rho` are derived in float64 after sampling and appear in every
 product.
 
+### The (b, k) prior
+
+Whether a transit exists at all depends on `b` and `k` together — the planet
+crosses the star only for `b < 1 + k` — so the two cannot be given
+independent priors without distorting both. All three modes sample
+`beta ~ U(0, 1)` and map it to `b`, differing in the bound and in the
+correction that keeps the *joint* density uniform rather than merely
+conditional:
+
+| `--bprior=` | `b =` | region | extra log-prior |
+|---|---|---|---|
+| `transiting` (default) | `beta (1 + k)` | all transiting geometries | `+log1p(k)` and a linear grazing taper |
+| `nongrazing` | `beta (1 - k)` | non-grazing only | `+log1p(-k)` |
+| `box` | `2 beta` | `b < 2`, independent of `k` | none (legacy) |
+
+- **`transiting`** is the default and the right choice for almost everything.
+  It covers grazing geometries, and its two terms do two things. `+log1p(k)`
+  makes the density uniform over the transiting region rather than merely
+  conditionally uniform in `b`. The taper then makes the marginal `p(k)`
+  **exactly** uniform: at each `k` the grazing band `1-k < b < 1+k` has width
+  `2k` and the taper integrates to 1/2 across it, so it carries prior mass
+  exactly `k` against `1-k` non-grazing, and the two sum to 1 independent of
+  `k`. Without the taper `p(k)` would go as `1+k`, favouring large planets.
+
+  Two readings of "grazing odds" follow, and it is worth keeping them apart.
+  *Marginally*, over the default `k ~ U(0, 1)`, grazing and non-grazing have
+  equal prior mass — 1:1, since `k` and `1-k` each integrate to 1/2. *At a
+  fixed `k`*, the odds are `k : (1-k)`, so for a shallow target like
+  KOI-518.02 (`k = 0.023`) only about 2% of the prior mass is grazing. That is
+  the correct geometric weighting, not a bias — a small planet genuinely has
+  little room to graze — but do not read the 1:1 figure as "grazing is a
+  coin-flip for my planet".
+- **`nongrazing`** (alias `--nongrazing`) *asserts* that the transit is not
+  grazing, restricting to `b < 1 - k`. Use it when that is a claim you want to
+  make: it matters most for systems sitting at the boundary, where it visibly
+  tightens `k`, `b` and `T14`. KOI-448.02 is the example in
+  `docs/hurin-differences.md` (`b = 0.949` against `1 - k = 0.952`).
+- **`box`** is hurin's historical prior, two independent uniforms, and is kept
+  only to reproduce old results. Avoid it for new work. With `k ~ 0.02` about
+  half its prior volume sits at `b > 1 + k`, where no transit occurs — harmless
+  to correctness, since the likelihood is negligible there, but wasted
+  sampling — and because `b`'s range no longer tracks its physical `k`-dependent
+  limit, the implied marginal `p(k)` is not uniform.
+
+The prior is a resume guard, so changing it on an existing lineage exits
+rather than pooling chains drawn under different priors. `model.impact_parameter`
+holds the coordinate map and `params.bk_log_prior` the weights.
+
 ### Choosing the profile solve
 
 The baseline coefficients can be solved three ways (`--PL`), trading exactness
@@ -114,7 +162,8 @@ verdict mean "this would distort the answer".
 --sampler=chees|ensemble     gradient-based (default) or gradient-free
 --warmup=N --samples=N --max-samples=N --leapfrog=N --seed=N
 
---bprior=transiting|nongrazing|box      (b, k) prior; --nongrazing is an alias
+--bprior=transiting|nongrazing|box      (b, k) prior, see above; --nongrazing
+                             is an alias for --bprior=nongrazing
 --TTVmax=MINUTES             declared TTV amplitude; sets the timing priors
 --PL=auto|exact|hybrid|ratio how the baseline coefficients are solved
                              (default auto: measured per target)
