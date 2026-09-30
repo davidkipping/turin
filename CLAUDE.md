@@ -208,6 +208,27 @@ data axis across epoch boundaries and so cannot hold a per-epoch solve.
   the ensemble, with widths broken down by chain before they are quoted.
 - **`dense=True` silently downgrades** to diagonal below `4*dim` chains.
 
+## Validation against hurin
+
+`docs/hurin-differences.md` is the reference, and its **KOI-518.02 section is
+the primary comparison** — cite that one. hurin 0.1.68 vs turin 0.1.12, both
+converged, identical cached input, turin at its defaults: every parameter
+within 0.03 sigma, the 27 transit times within 0.02 sigma, and 11.1x less wall
+clock (6,037 s to 544 s) with 750-1,460x the ESS per second.
+
+That target was chosen because `T14/P = 0.005` and a 513 ppm depth make both
+remaining model differences (chord vs circular, ratio vs exact profile)
+negligible, so the comparison isolates the samplers. The KOI-448.02 and
+KOI-5162.01 sections are secondary and kept for what they alone show: the
+limb-darkening difference on a grazing system (against pre-fix hurin 0.1.62),
+and hurin's documented trapped-mode failure.
+
+When re-running a hurin comparison: pass `--chains=8`, because hurin's default
+of 2 does not converge on one round and makes the comparison a straw man; run
+the two **sequentially**, since hurin saturates ~5 cores and would otherwise
+contend; and confirm both packages hold the same cached light curve (compare
+byte sizes of `../hurin/cache/<T>.pkl` and `~/.cache/turin/<T>.pkl`).
+
 ## Conventions inherited from hurin
 
 - **One patch bump per commit.** 0.1.N is commit N; update

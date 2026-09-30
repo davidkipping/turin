@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.13 | — | 2026-09-29 | Docs: KOI-518.02 becomes the primary hurin comparison — both packages converged, turin at defaults, all parameters within 0.03σ, 11.1x less wall clock (6,037 s → 544 s) and 750-1,460x the ESS/s. (MODEL_REV unchanged at 3) |
 | 0.1.12 | — | 2026-09-29 | Docs: README gains a Performance section (measured 0.1.7 → now on two real targets); hurin-differences records why KOI-5162.01's wall time is not comparable across the supersampling → tau-kernel switch. (MODEL_REV unchanged at 3) |
 | 0.1.11 | — | 2026-09-29 | Docs: restore CLAUDE.md's point-order section (accidentally removed in 0.1.9), add the end-to-end KOI-448.02 timing (549 s → 118 s, medians within 0.02σ), retire the stale "tau kernel is 2x slower" note. (MODEL_REV unchanged at 3) |
 | 0.1.10 | — | 2026-09-29 | Version bump only: the intended docs edit failed in a script and landed in 0.1.11 |

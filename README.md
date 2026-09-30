@@ -169,7 +169,28 @@ quadratic law is exactly that law's `N=2` case
 internally is an affine change of basis, not a different law. Both are pinned
 by tests.
 
-`docs/hurin-differences.md` has the measurements and the reasoning.
+### Validated against hurin on KOI-518.02
+
+The headline check, and the primary comparison in
+`docs/hurin-differences.md`: hurin 0.1.68 and turin 0.1.12 fitting the same
+cached Kepler light curve (27 transits, 513 ppm deep), both converged, turin
+at its **defaults** rather than in compatibility mode.
+
+| | agreement |
+|---|---|
+| LinEph, all 7 parameters + `b`, `log10_rho` | ≤ 0.02 sigma |
+| TTV, 5 shape parameters | ≤ 0.03 sigma |
+| 27 transit times | median 0.01 sigma, worst 0.02 sigma |
+
+Posterior widths agree to 0.98-1.11x. Nothing is shared between the two
+implementations — MLX against JAX, ChEES-HMC against NUTS, an unrolled
+Cholesky against `jnp.linalg.solve` — so this is evidence for both. The target
+is chosen precisely because the two remaining model differences are negligible
+on it (`T14/P = 0.005`, 513 ppm), which is what leaves the samplers as the
+only thing being compared; on a grazing or deep system they are *not*
+negligible, and `docs/hurin-differences.md` measures that case too.
+
+`docs/hurin-differences.md` has all the measurements and the reasoning.
 
 ## Accuracy
 
@@ -204,6 +225,21 @@ same machine, same anvil, same command, same seed:
 
 Posterior medians agree to 0.02 sigma across the two, and the KOI-5162.01
 transit times to 0.05 sigma against the 0.1.0 run in `docs/`.
+
+Against **hurin** on KOI-518.02 (27 transits, LinEph + TTV, both packages
+converged in one round, same machine, sequential):
+
+| | hurin 0.1.68, 8 NUTS chains | turin 0.1.12, 512 ChEES chains |
+|---|---|---|
+| wall clock | 6,037 s | **544 s** (11.1x) |
+| min bulk ESS, LinEph / TTV | 453 / 1,519 | **79,145 / 70,942** |
+| ESS per second | 0.22 / 0.38 | **324 / 285** (1,460x / 750x) |
+| peak memory | 4.8 GB | 17.3 GB |
+
+The ESS gain is much larger than the wall-clock gain, which is the point:
+hundreds of chains is what the GPU buys, and it yields two to three orders of
+magnitude more independent draws per second. The cost is memory — 512 chains
+peaked at 17.3 GB here, so a 16 GB machine needs `--chains` lowered.
 
 Almost all of what is left is MetalPlanet's kernel; turin's own profile solve,
 residual and priors are 0.7 ms of the 9.1. Two things got it there, and both
