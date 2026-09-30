@@ -118,7 +118,7 @@ def _koi_to_kic(info, progress=None):
 
     Returns "KIC {kepid}" string, or None if not found.
     """
-    from hurin.ephemeris import _tap_get
+    from .ephemeris import _tap_get
 
     m = re.match(r"KOI-(\d+)", info["name"])
     if not m:
