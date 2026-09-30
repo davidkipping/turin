@@ -30,7 +30,7 @@ from . import seeding as _seeding
 
 PARAM_LABELS = {
     "dP": "$P$ (d)", "dtau0": r"$\tau_0$", "k": "$k = R_p/R_\\star$",
-    "beta": r"$b / b_{\max}$", "T14": "$T_{14}$ (d)", "q1": "$q_1$",
+    "b": "$b$", "T14": "$T_{14}$ (d)", "q1": "$q_1$",
     "q2": "$q_2$",
 }
 
@@ -358,10 +358,16 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
 
     # ---- figures
     try:
+        # show the impact parameter b itself, not the sampled coordinate
+        # beta = b / b_max(k), which is a prior device, not a physical quantity
+        n_c = min(len(names), 7)
+        c_names = ["b" if n == "beta" else n for n in names[:n_c]]
+        c_draws = phys[:, :n_c].copy()
+        if "beta" in names[:n_c]:
+            c_draws[:, names.index("beta")] = b_draws
         _plots.corner_plot(
             _outputs.product_path(outdir, target, mode, "corner", "pdf"),
-            phys[:, :min(len(names), 7)],
-            [_label(n) for n in names[:min(len(names), 7)]],
+            c_draws, [_label(n) for n in c_names],
             title=f"{target} {mode}", log=log)
     except Exception as exc:
         log(f"    corner plot skipped: {exc}")

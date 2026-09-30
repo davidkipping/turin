@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.18 | — | 2026-09-30 | Corner plots show the impact parameter `b` rather than the sampled coordinate `beta = b / b_max(k)`, which is a prior device, not a physical quantity. Summary and chains still carry both. (MODEL_REV unchanged at 3) |
 | 0.1.17 | — | 2026-09-30 | Fix the KOI->KIC MAST fallback, which still imported `_tap_get` from hurin (a porting leftover) and crashed any KOI MAST cannot resolve by name when hurin is not installed; use turin's own `data.ephemeris._tap_get`. Found on the first run on a new machine (KOI-5162.01). (MODEL_REV unchanged at 3) |
 | 0.1.16 | — | 2026-09-30 | Record hurin's reply: the grazing-odds rewording landed in hurin 0.1.69, docs only, nothing diverges. Verify turin does not carry hurin's pre-0.1.68 LD bug (it uses the corrected Kipping map). (MODEL_REV unchanged at 3) |
 | 0.1.15 | — | 2026-09-30 | Add docs/upstream/hurin_doc_prompt.md: reword hurin's user-facing "1:1 grazing odds" to P(grazing|k)=k. Documentation only; hurin's prior is correct. (MODEL_REV unchanged at 3) |
