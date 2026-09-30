@@ -41,13 +41,22 @@ in a matching `*_reply.md`. Existing briefs:
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
   "1:1 grazing odds" is true marginally over `k ~ U(0,1)` but reads as a
   claim about the user's own target, where the odds are `k/(1-k)`.
+  **Landed in hurin 0.1.69** (`50c566a`); see `hurin_reply.md`. hurin
+  re-verified the claim against its own `_sample_b_k` before changing
+  anything, adopted the wording, and recorded the `k_max = 1` dependency
+  beside its `k` prior. Nothing diverges, so
+  `docs/hurin-differences.md` needs no entry.
 
-turin has already changed hurin twice by this route: the Kipping (2013)
-limb-darkening fix (hurin 0.1.68) and the `_MODEL_REV` guard turin then
-adopted. Porting hurin's science is how turin finds these, so expect more,
-and verify numerically before filing — I once talked myself into a
-"documentation error" in hurin's `(b, k)` prior on one careless
-measurement, and it was correct.
+turin has now changed hurin three times by this route: the Kipping (2013)
+limb-darkening fix (hurin 0.1.68), the `_MODEL_REV` guard turin then
+adopted itself, and this wording. Porting hurin's science is how turin
+finds these, so expect more — and **verify numerically before filing**. I
+once talked myself into a "documentation error" in hurin's `(b, k)` prior
+on a single careless measurement (I had drawn `k ~ U(0, 0.3)`, where
+`E[k]/E[1-k] = 0.18`, and read that as a broken 1:1 claim); hurin was
+correct, and the brief said so explicitly. A brief that overstates its
+case wastes an upstream session's time and spends credibility that the
+next real bug needs.
 
 `turin/capabilities.py` feature-detects every upstream capability and
 falls back when it is absent. All four anvil asks and the MetalPlanet one

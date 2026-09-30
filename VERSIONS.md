@@ -8,6 +8,7 @@ here.
 
 | Version | Commit | Date | Change |
 |---------|--------|------|--------|
+| 0.1.16 | — | 2026-09-30 | Record hurin's reply: the grazing-odds rewording landed in hurin 0.1.69, docs only, nothing diverges. Verify turin does not carry hurin's pre-0.1.68 LD bug (it uses the corrected Kipping map). (MODEL_REV unchanged at 3) |
 | 0.1.15 | — | 2026-09-30 | Add docs/upstream/hurin_doc_prompt.md: reword hurin's user-facing "1:1 grazing odds" to P(grazing|k)=k. Documentation only; hurin's prior is correct. (MODEL_REV unchanged at 3) |
 | 0.1.14 | — | 2026-09-29 | Docs: README documents the three --bprior modes, separating the 1:1 *marginal* grazing odds from the k/(1-k) odds at fixed k; new test pins the grazing mass per k. (MODEL_REV unchanged at 3) |
 | 0.1.13 | — | 2026-09-29 | Docs: KOI-518.02 becomes the primary hurin comparison — both packages converged, turin at defaults, all parameters within 0.03σ, 11.1x less wall clock (6,037 s → 544 s) and 750-1,460x the ESS/s. (MODEL_REV unchanged at 3) |

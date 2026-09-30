@@ -21,6 +21,11 @@ measurements for the limb-darkening case are kept below because they explain
 hurin results published before 0.1.68 — including the KOI-448.02 comparison in
 this document, which was run against hurin 0.1.62.
 
+Current hurin is **0.1.69**, which changed documentation only (the wording of
+its grazing-odds description, at turin's request — see
+`upstream/hurin_doc_prompt.md`). The KOI-518.02 benchmark below was run
+against 0.1.68 and is unaffected: no hurin number changed between the two.
+
 ## The primary comparison: KOI-518.02
 
 **Read this section first.** It is the only fully matched head-to-head — both
