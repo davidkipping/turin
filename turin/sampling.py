@@ -324,7 +324,7 @@ class Continuation:
 
 
 def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
-               resume_state=None):
+               resume_state=None, move=None, segment=100):
     """Sample, assess, and extend until converged or out of budget.
 
     ``on_round(results, verdict, round_index)`` is called after every round, so
@@ -342,6 +342,13 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     Without ``resume`` the only option is to start again from the previous
     final positions *with* warmup. That is a different Markov chain, so the
     segments cannot be pooled and only the latest round is reported.
+
+    ``move``, if given, is a :class:`turin.gibbs.GridGibbs` applied every
+    ``segment`` draws: each round is drawn as several resumed segments with a
+    sweep between them (and one before a cross-process resume). ChEES
+    alternated with an exact move is still one Markov chain, so the segments
+    pool exactly as before. It needs ``resume``; without it the move is
+    skipped and the log says so.
     """
     import anvil
 
@@ -353,50 +360,82 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     verdict = None
     pooled = caps.anvil_resume
 
+    if move is not None and not caps.anvil_resume:
+        log("  grid-Gibbs needs anvil resume to move chains between "
+            "segments; running without it")
+        move = None
+
+    def gibbs(rs):
+        nonlocal t_gibbs
+        tg = time.perf_counter()
+        u_new, st = move.sweep(np.array(rs.state["u"], dtype=np.float64))
+        rs = _caps.set_positions(rs, u_new, target)
+        t_gibbs += time.perf_counter() - tg
+        sweep_stats.append(st)
+        return rs
+
     for rnd in range(64):           # a bound, not an expectation
         n_samples = cfg.n_samples if rnd == 0 else min(
             cfg.n_samples * 2 ** rnd, max(1, cfg.max_samples - total))
-        kw = dict(n_samples=n_samples, thin=cfg.thin, progress=False)
+        chunks = ([n_samples] if move is None else
+                  [segment] * (n_samples // segment)
+                  + ([n_samples % segment] if n_samples % segment else []))
+        t_gibbs = 0.0
+        sweep_stats = []
+        round_segs = []
 
         t0 = time.perf_counter()
-        if rnd == 0 and resume_state is not None and caps.anvil_resume:
-            log(f"  round {rnd}: resuming {n_samples} draws/chain "
-                "with frozen adaptation")
-            # u0 is unused on a resume, but anvil checks its shape -- a free
-            # assertion that the stored state matches the requested chains
-            results = anvil.run(kernel, target, u0, resume=resume_state,
-                                n_warmup=0, **kw)
-        elif rnd == 0:
-            log(f"  round {rnd}: {cfg.n_warmup} warmup + {n_samples} "
-                f"draws/chain on {cfg.n_chains} chains")
-            results = anvil.run(kernel, target, u0, n_warmup=cfg.n_warmup,
-                                seed=cfg.seed, **kw)
-        elif caps.anvil_resume:
-            log(f"  round {rnd}: +{n_samples} draws/chain "
-                f"(continuation, adaptation frozen, "
-                f"{total} already banked)")
-            # seed=None continues the key stream instead of forking it
-            results = anvil.run(kernel, target, resume=results, n_warmup=0,
-                                **kw)
-        else:
-            log(f"  round {rnd}: +{n_samples} draws/chain — anvil has no "
-                "resume, so warmup is repeated from the last positions and "
-                "this round is a NEW chain, not a continuation")
-            results = anvil.run(kernel, target, results.final_state["u"],
-                                n_warmup=cfg.n_warmup, seed=cfg.seed + rnd,
-                                **kw)
+        for ci, chunk in enumerate(chunks):
+            kw = dict(n_samples=chunk, thin=cfg.thin, progress=False)
+            first = rnd == 0 and ci == 0
+            if first and resume_state is not None and caps.anvil_resume:
+                log(f"  round {rnd}: resuming {n_samples} draws/chain "
+                    "with frozen adaptation")
+                rs = resume_state if move is None else gibbs(resume_state)
+                # u0 is unused on a resume, but anvil checks its shape -- a
+                # free assertion that the stored state matches the chains
+                results = anvil.run(kernel, target, u0, resume=rs,
+                                    n_warmup=0, **kw)
+            elif first:
+                log(f"  round {rnd}: {cfg.n_warmup} warmup + {n_samples} "
+                    f"draws/chain on {cfg.n_chains} chains"
+                    + ("" if move is None else
+                       f", grid-Gibbs on the epoch times every {segment}"))
+                results = anvil.run(kernel, target, u0,
+                                    n_warmup=cfg.n_warmup, seed=cfg.seed, **kw)
+            elif caps.anvil_resume:
+                if ci == 0:
+                    log(f"  round {rnd}: +{n_samples} draws/chain "
+                        f"(continuation, adaptation frozen, "
+                        f"{total} already banked)")
+                rs = results if move is None else gibbs(results.resume_state())
+                # seed=None continues the key stream instead of forking it
+                results = anvil.run(kernel, target, resume=rs, n_warmup=0,
+                                    **kw)
+            else:
+                log(f"  round {rnd}: +{n_samples} draws/chain — anvil has no "
+                    "resume, so warmup is repeated from the last positions "
+                    "and this round is a NEW chain, not a continuation")
+                results = anvil.run(kernel, target, results.final_state["u"],
+                                    n_warmup=cfg.n_warmup,
+                                    seed=cfg.seed + rnd, **kw)
+            round_segs.append(results)
         el = time.perf_counter() - t0
         total += n_samples
-        segments.append(results)
+        segments.extend(round_segs)
 
         reported = (Continuation(segments) if pooled and len(segments) > 1
                     else results)
+        if len(round_segs) > 1:
+            _round_accounting(reported, round_segs)
         verdict = assess(reported, names)
         log(f"  round {rnd} took {el:.1f}s "
             f"({n_samples * cfg.n_chains / max(el, 1e-9):.0f} draws/s)"
             + (f"; pooled {verdict.n_draws} draws/chain over "
                f"{len(segments)} segments" if pooled and len(segments) > 1
                else ""))
+        if sweep_stats:
+            log(_describe_sweeps(sweep_stats, names, t_gibbs, el))
         log(verdict.describe())
         if on_round is not None:
             on_round(reported, verdict, rnd)
@@ -409,6 +448,39 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
             break
 
     return reported, verdict, total
+
+
+def _round_accounting(reported, round_segs):
+    """Divergences and acceptance over a whole round, not its last segment.
+
+    anvil reports both per segment; a round drawn as several segments would
+    otherwise describe only its final ``segment`` draws.
+    """
+    extras = dict(round_segs[-1].extras or {})
+    extras["n_divergent"] = sum(int((s.extras or {}).get("n_divergent", 0))
+                                for s in round_segs)
+    for key in ("divergent_per_chain", "n_divergent_per_chain"):
+        if all(key in (s.extras or {}) for s in round_segs):
+            extras[key] = np.sum([np.asarray(s.extras[key])
+                                  for s in round_segs], axis=0)
+    reported.extras = extras
+    reported.accept_fraction = np.mean(
+        [np.asarray(s.accept_fraction, dtype=np.float64) for s in round_segs],
+        axis=0)
+
+
+def _describe_sweeps(stats, names, t_gibbs, elapsed):
+    """One log line per round for the grid-Gibbs move."""
+    acc = np.mean([s.accept for s in stats], axis=0)
+    hop = np.mean([s.mode_change for s in stats], axis=0)
+    epochs = [n for n in names if n.startswith("dtau_")]
+    hops = [f"{epochs[i][5:]} ({hop[i]:.0%})" for i in np.argsort(-hop)
+            if hop[i] >= 0.01][:6]
+    return (f"  grid-Gibbs: {len(stats)} sweeps, {t_gibbs:.1f}s "
+            f"({t_gibbs / max(elapsed, 1e-9):.0%} of the round), MH "
+            f"acceptance {acc.min():.2f}-{acc.max():.2f}; chains changing "
+            f"timing mode per sweep: "
+            + (", ".join(f"epoch {h}" for h in hops) if hops else "none"))
 
 
 def certify(target, results, names, *, n_probe=256, target_ess=1e4, log=print):

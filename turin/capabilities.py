@@ -14,6 +14,8 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 
+import numpy as np
+
 
 def _has_param(fn, name):
     try:
@@ -50,6 +52,12 @@ class Capabilities:
     #: performance change that needs its own parity tests, so it is deliberate
     #: rather than automatic.
     metalplanet_flux_dev_from_tau: bool
+    #: ``ResumeState.with_positions(u, target)``: move chains between
+    #: segments with every kernel-specific cached quantity recomputed by
+    #: anvil. Without it turin rewrites ChEES's ``u``/``log_prob``/``grad``
+    #: itself (:func:`set_positions`), which is correct for the ChEES state
+    #: of anvil 0.1 but not a documented contract.
+    anvil_with_positions: bool = False
     anvil_version: str = ""
     metalplanet_version: str = ""
 
@@ -65,6 +73,8 @@ class Capabilities:
              "keeps chains away from one"),
             ("anvil progress callback", self.anvil_callback,
              "anvil prints its own progress"),
+            ("anvil ResumeState.with_positions", self.anvil_with_positions,
+             "grid-Gibbs rewrites the ChEES state itself"),
         ]
         out = [f"  anvil {self.anvil_version}, "
                f"MetalPlanet {self.metalplanet_version}"]
@@ -94,6 +104,8 @@ def detect():
         anvil_boundary_survivable=_boundary_survivable(),
         metalplanet_flux_dev_from_tau=hasattr(metalplanet,
                                               "flux_dev_from_tau"),
+        anvil_with_positions=hasattr(getattr(anvil, "ResumeState", None),
+                                     "with_positions"),
         anvil_version=getattr(anvil, "__version__", "unknown"),
         metalplanet_version=getattr(metalplanet, "__version__", "unknown"),
     )
@@ -128,3 +140,32 @@ def per_chain_divergences(results):
         if key in extras:
             return extras[key]
     return None
+
+
+#: The ChEES state keys :func:`set_positions` knows how to rebuild. Anything
+#: else in a resume state means anvil's state has grown, and rewriting only
+#: these would leave a stale cache, so the fallback refuses.
+_CHEES_STATE_KEYS = {"u", "log_prob", "grad"}
+
+
+def set_positions(resume_state, u, target):
+    """A resume state with the chains moved to ``u`` (``(n_chains, dim)``).
+
+    Uses anvil's ``ResumeState.with_positions`` when present. The fallback
+    rebuilds the ChEES state turin knows (positions, log-density, gradient)
+    and refuses anything else rather than resume from a stale cache.
+    """
+    import mlx.core as mx
+
+    u = mx.array(np.asarray(u, dtype=np.float32))
+    if hasattr(resume_state, "with_positions"):
+        return resume_state.with_positions(u, target)
+    if resume_state.kernel != "ChEESHMC" or \
+            set(resume_state.state) != _CHEES_STATE_KEYS:
+        raise RuntimeError(
+            f"grid-Gibbs cannot move chains of a {resume_state.kernel} run "
+            f"with state {sorted(resume_state.state)} without anvil's "
+            "ResumeState.with_positions; run with --gibbsgrid=off")
+    lp, g = target.log_prob_and_grad(u)
+    resume_state.state = dict(resume_state.state, u=u, log_prob=lp, grad=g)
+    return resume_state

@@ -150,6 +150,29 @@ ball much wider than the posterior, `ratio` looks catastrophic; judged on one
 much narrower, everything passes. Only at the posterior's own scale does the
 verdict mean "this would distort the answer".
 
+### Weak transits and grid-Gibbs
+
+A transit observed at low signal-to-noise, or with a data gap across it, has a
+timing posterior with several separated bumps, often hours apart. ChEES-HMC
+does not move chains between such bumps. Left alone, each bump is weighted by
+however many chains happen to settle there, and that transit's R-hat never
+passes however long the fit runs.
+
+So by default the TTV fit interleaves an exact Gibbs step. Every 100 draws,
+each chain redraws every transit time from its conditional posterior, given
+that chain's current shape parameters. The conditional is evaluated on a grid
+spanning the whole timing prior, so a chain can land in any bump, and a
+Metropolis-Hastings correction keeps the step exact. It is possible because,
+for fixed shape, each transit's likelihood depends on its own time alone.
+That also makes one sweep cost about one extra log-density evaluation per
+grid point however many transits there are.
+
+On KOI-4848.01 and KOI-5897.01, against exact timing marginals computed by
+brute force, this cut a weak transit's distance from the true posterior by
+5-8x (e.g. 0.162 to 0.019 in total variation). `--gibbsgrid=off` gives
+independent ChEES chains only. The setting is a resume guard, so a lineage
+cannot pool chains drawn both ways.
+
 ## Options
 
 ```
@@ -161,6 +184,8 @@ verdict mean "this would distort the answer".
 --chains=N                   sampling chains (default 512, raised to 4*dim)
 --sampler=chees|ensemble     gradient-based (default) or gradient-free
 --warmup=N --samples=N --max-samples=N --leapfrog=N --seed=N
+--gibbsgrid=on|off           TTV fits: move chains between timing modes with
+                             an exact grid-Gibbs step (default on), see below
 
 --bprior=transiting|nongrazing|box      (b, k) prior, see above; --nongrazing
                              is an alias for --bprior=nongrazing

@@ -43,6 +43,17 @@ def _label(name):
     return name
 
 
+def _gibbsgrid(mode, args):
+    """The grid-Gibbs setting in effect for this fit.
+
+    Only TTV fits have epoch times to move, and only ChEES has the state
+    turin knows how to move chains in, so everything else is "off" whatever
+    the flag says.
+    """
+    return ("on" if mode == "ttv" and args.sampler == "chees"
+            and args.gibbsgrid == "on" else "off")
+
+
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _outputs.set_run_tag(args.tag)
@@ -143,7 +154,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
             # "auto" is a request to measure, not a model choice, so it can
             # never conflict with what a previous run resolved to
             profile_mode=(None if args.profile_mode == "auto"
-                          else args.profile_mode))
+                          else args.profile_mode),
+            gibbsgrid=_gibbsgrid(mode, args))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -290,9 +302,23 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
                     log=log, state_holder=state_holder, cfg=cfg,
                     pl_mode=pl_choice.mode)
 
+    move = None
+    if _gibbsgrid(mode, args) == "on":
+        from . import gibbs as _gibbs
+
+        # its own float32 log-density, blocked for the large batches a
+        # sweep evaluates; same layout and profile mode as the sampler's
+        _, _, lp_gibbs, _ = _likelihood.build_target(
+            layout, centering, epoch_data, orders,
+            profile_mode=pl_choice.mode, fp64=False,
+            **dict(build_kw, n_chains_hint=4096))
+        move = _gibbs.GridGibbs(lp_gibbs, transform, layout,
+                                T14=prepared.eph["duration"] / 24.0,
+                                batch=4096, seed=args.seed)
+
     results, verdict, total = _sampling.run_rounds(
         target_obj, list(layout.names), u0, cfg, log=log, on_round=on_round,
-        resume_state=resume_for_anvil)
+        resume_state=resume_for_anvil, move=move)
 
     cert = _sampling.certify(target_obj, results, list(layout.names), log=log)
     if cert is not None:
@@ -414,7 +440,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         launch_command=_outputs.launch_command(), tag=args.tag,
         b_prior=layout.b_prior, profile_mode=pl_mode,
         geometry=args.geometry, sampler=args.sampler,
-        model_rev=_MODEL_REV,
+        model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
         n_durations=float(epoch_data["half_window"]
                           / (prepared.eph["duration"] / 24.0)),

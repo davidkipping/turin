@@ -36,6 +36,10 @@ in a matching `*_reply.md`. Existing briefs:
 - `docs/upstream/anvil_prompt.md` — resumable runs (needed for
   `--extend`/auto-resume), the ChEES bounded-parameter boundary trap,
   per-chain divergence counts.
+- `docs/upstream/anvil_gibbs_prompt.md` — `ResumeState.with_positions`,
+  so grid-Gibbs can move chains without turin rewriting ChEES's internal
+  `u`/`log_prob`/`grad` cache itself (the current fallback, which refuses
+  any state it does not recognise).
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
@@ -79,6 +83,7 @@ turin/
   params.py       LinEph/TTV parameter specs, b-k prior modes, derived quantities
   seeding.py      template-sweep tau seeds, batched multi-start MAP
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
+  gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   outputs.py      CSV/PDF products, resume state
   capabilities.py upstream feature detection + fallbacks
 ```
@@ -214,6 +219,33 @@ with a VJP in `z`, which falls back to the analytic fp64 path on the CPU
 stream (that fallback is turin's `log_prob_hi`). Similarly turin writes its
 own likelihood rather than using `ChunkedGaussianLogLike`, which chunks the
 data axis across epoch boundaries and so cannot hold a per-epoch solve.
+
+### Grid-Gibbs on the epoch times
+
+ChEES does not cross between separated timing modes of a weak transit, and
+the pooled draws then weight each mode by chain count, not probability. The
+TTV fit therefore interleaves `gibbs.GridGibbs` every 100 draws
+(`--gibbsgrid=on`, the default). It rests on one structural fact: **given the
+shape parameters, each epoch's likelihood term and timing prior depend on
+that epoch's time alone**. Anything that breaks that factorization (noise
+correlated across epochs, a dynamical TTV model coupling the times) breaks
+the move, and must turn it off rather than leave it running.
+
+- It is exact, not approximate: an independence proposal from the grid
+  density plus a Metropolis-Hastings correction. Grid resolution affects
+  acceptance (93-98% at 512 cells), never correctness.
+- One sweep sets every epoch to grid point g at once and reads all epochs'
+  terms from `ProfiledTransitLogProb.epoch_log_lik`: O(N) in the number of
+  transits, not O(N^2). Keep it that way for short-period targets.
+- Validated against exact marginals: by the same factorization,
+  `p(dtau_i | D) = E_shape[p(dtau_i | shape, D_i)]`, a 1-D grid per epoch
+  averaged over posterior shape draws, with no sampler involved. On
+  KOI-4848.01 and KOI-5897.01 the weak epochs' total-variation distance from
+  it fell from 0.11-0.20 to 0.02. `tests/test_gibbs.py` checks the same
+  property on synthetic two-bump data; use the reference again before
+  changing the move. It does **not** fix
+  the separate grazing/non-grazing bimodality in (k, b), which still holds
+  shape R-hat up on low-SNR targets.
 
 ### Known upstream hazards
 

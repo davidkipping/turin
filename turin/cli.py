@@ -29,6 +29,7 @@ PL_CHOICES = ("auto",) + tuple(PROFILE_MODES)
 TARGET_RE = re.compile(r"^--(KOI-\d+\.\d+|TOI-\d+\.\d+)$", re.IGNORECASE)
 MODES = ("lineph", "ttv")
 SAMPLERS = ("chees", "ensemble")
+GIBBSGRID = ("on", "off")
 
 _BOOL_FLAGS = {
     "--version": "show_version",
@@ -59,6 +60,7 @@ _VALUE_FLAGS = {
     "--outdir": "outdir",
     "--leapfrog": "max_leapfrog",
     "--seed": "seed",
+    "--gibbsgrid": "gibbsgrid",
 }
 
 USAGE = f"""turin {__version__} — GPU transit fitting for Kepler and TESS
@@ -75,6 +77,10 @@ usage: turin --KOI-448.02 [options]
   --sampler=chees|ensemble  gradient-based (default) or gradient-free
   --warmup=N --samples=N --max-samples=N
   --leapfrog=N            ChEES trajectory cap (default 128)
+  --gibbsgrid=on|off      TTV fits: redraw every transit time from its exact
+                          grid conditional between ChEES segments, so chains
+                          move between timing modes (default on). off gives
+                          independent ChEES chains only
   --seed=N
 
   --bprior=transiting|nongrazing|box   (b, k) prior (default transiting)
@@ -129,6 +135,7 @@ class Args:
     max_samples: int = 16384
     max_leapfrog: int = 128
     seed: int = 0
+    gibbsgrid: str = "on"
     modes: tuple = MODES
     cache_dir: str | None = None
     outdir: str | None = None
@@ -186,6 +193,7 @@ def parse_args(argv=None):
     _choice("sampler", args.sampler, SAMPLERS)
     _choice("PL", args.profile_mode, PL_CHOICES)
     _choice("geometry", args.geometry, GEOMETRIES)
+    _choice("gibbsgrid", args.gibbsgrid, GIBBSGRID)
     for mode in args.modes:
         _choice("modes", mode, MODES)
     if args.tag is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):

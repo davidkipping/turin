@@ -196,6 +196,27 @@ class ProfiledTransitLogProb:
             total = term if total is None else total + term
         return total + self.log_prior(p)
 
+    def epoch_log_lik(self, v):
+        """Per-epoch profiled log-likelihood terms, ``(n_chains, n_epochs)``.
+
+        The summands of :meth:`__call__` before the sum over epochs, without
+        priors or the float64 constant. Given the shape parameters each term
+        depends on its own epoch's time only, which is what lets the
+        grid-Gibbs move score every epoch from one evaluation.
+        """
+        p = self.unpack(v)
+        terms = []
+        for blk in self.blocks:
+            f_dev = _model.transit_flux_dev(
+                blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
+                k=p["k"], b=p["b"], T14=p["T14"], q1=p["q1"], q2=p["q2"],
+                period=p["period"], geometry=self.geometry)
+            c = _profile.solve_coefficients(blk.design, f_dev,
+                                            self.profile_mode)
+            resid = _profile.residual_dev(blk.design, f_dev, c)
+            terms.append(self.noise.log_prob_terms(blk.design, resid))
+        return mx.concatenate(terms, axis=-1)
+
     # -- reporting helpers ------------------------------------------------
 
     def log_prob_absolute(self, v):

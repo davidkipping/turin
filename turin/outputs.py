@@ -277,8 +277,13 @@ class ResumeState:
     anvil_state_path: str | None = None
     #: last positions in unconstrained space, the fallback restart point
     last_u: np.ndarray | None = None
+    #: whether grid-Gibbs moved the epoch times ("on"/"off"). Defaulted to
+    #: "off" because every state written before it existed was sampled
+    #: without it; LinEph records "off" since it has no epoch times.
+    gibbsgrid: str = "off"
 
-    GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max")
+    GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
+              "gibbsgrid")
 
     def check_model_rev(self, log=None):
         """Refuse to continue chains sampled under an older likelihood.
