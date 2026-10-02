@@ -42,6 +42,11 @@ in a matching `*_reply.md`. Existing briefs:
   `anvil_gibbs_reply.md`. turin's fallback (which refuses any state it does
   not recognise) stays for older installs, and a test requires the two
   paths to give bit-identical chains.
+- `docs/upstream/anvil_diagnose_prompt.md` — bound `anvil.diagnose`'s
+  memory (its `_autocov` FFT holds every chain of every parameter: ~1.3 GB
+  of MLX per parameter at 8.4 M draws, so ~140 GB at short-period dim 105)
+  and make ranking fast past MLX's 2^21-row argsort limit (~2 minutes per
+  round at dim 105). turin's per-parameter `assess` loop is the workaround.
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
