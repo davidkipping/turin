@@ -123,3 +123,48 @@ def test_grid_gibbs_refuses_a_lineph_layout():
     layout = params.lineph_layout(EPH)
     with pytest.raises(ValueError, match="TTV"):
         gibbs.GridGibbs(None, None, layout, T14=T14_T)
+
+
+def _round_loop(monkeypatch, *, fallback):
+    """Two short rounds of the real round loop with the move on."""
+    import anvil
+    from turin import sampling, seeding
+
+    if fallback:
+        monkeypatch.delattr(anvil.ResumeState, "with_positions",
+                            raising=False)
+    layout, transform, lp, n_ep, shape = _setup(0.0, 2.5e-3, decoy=0.07)
+    ed, cen, _, _ = build_dataset(0.0, yerr=2.5e-3, decoy=0.07)
+    target, transform, _, _ = likelihood.build_target(
+        layout, cen, ed, np.full(n_ep, 2), num_resample=7,
+        exposure_time=29.4 / 1440, n_chains_hint=64)
+    cfg = sampling.SamplerConfig(n_chains=64, n_warmup=60, n_samples=100,
+                                 max_samples=300, seed=3).for_mode(layout.dim)
+    v0 = np.concatenate([shape, np.zeros(n_ep)])
+    u_map = transform.from_model_np(v0[None, :])[0]
+    res = seeding.MapResult(u_best=u_map, log_prob_best=0.0,
+                            u_all=u_map[None, :], log_prob_all=np.zeros(1),
+                            n_iter=0, top_spread=0.0)
+    move = gibbs.GridGibbs(lp, transform, layout, T14=T14_T, n_grid=128,
+                           batch=4096, seed=5)
+    lines = []
+    results, verdict, total = sampling.run_rounds(
+        target, list(layout.names), res.ball(cfg.n_chains, seed=4), cfg,
+        log=lines.append, move=move, segment=50)
+    return results.get_chain(), lines
+
+
+def test_round_loop_with_anvils_with_positions_matches_the_fallback(
+        monkeypatch):
+    """anvil's ResumeState.with_positions and turin's own ChEES-state rewrite
+    must be the same move: identical draws, same seeds."""
+    import anvil
+
+    if not hasattr(anvil.ResumeState, "with_positions"):
+        pytest.skip("installed anvil predates ResumeState.with_positions")
+    chain_api, lines = _round_loop(monkeypatch, fallback=False)
+    assert any("grid-Gibbs:" in l for l in lines)
+    with monkeypatch.context() as m:
+        chain_fb, _ = _round_loop(m, fallback=True)
+    assert chain_api.shape == chain_fb.shape
+    np.testing.assert_array_equal(chain_api, chain_fb)

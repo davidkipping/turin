@@ -38,8 +38,10 @@ in a matching `*_reply.md`. Existing briefs:
   per-chain divergence counts.
 - `docs/upstream/anvil_gibbs_prompt.md` — `ResumeState.with_positions`,
   so grid-Gibbs can move chains without turin rewriting ChEES's internal
-  `u`/`log_prob`/`grad` cache itself (the current fallback, which refuses
-  any state it does not recognise).
+  `u`/`log_prob`/`grad` cache itself. **Landed in anvil `849159f`**; see
+  `anvil_gibbs_reply.md`. turin's fallback (which refuses any state it does
+  not recognise) stays for older installs, and a test requires the two
+  paths to give bit-identical chains.
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
@@ -61,6 +63,11 @@ on a single careless measurement (I had drawn `k ~ U(0, 0.3)`, where
 correct, and the brief said so explicitly. A brief that overstates its
 case wastes an upstream session's time and spends credibility that the
 next real bug needs.
+
+**Push before handing over a brief.** A brief that points at turin files
+must point at pushed ones: the upstream session reads them from GitHub or its
+own clone, not from this machine. The anvil grid-Gibbs brief went out with
+its turin commit unpushed, and anvil could not find the files it cited.
 
 `turin/capabilities.py` feature-detects every upstream capability and
 falls back when it is absent. All four anvil asks and the MetalPlanet one
