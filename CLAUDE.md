@@ -43,10 +43,12 @@ in a matching `*_reply.md`. Existing briefs:
   not recognise) stays for older installs, and a test requires the two
   paths to give bit-identical chains.
 - `docs/upstream/anvil_diagnose_prompt.md` — bound `anvil.diagnose`'s
-  memory (its `_autocov` FFT holds every chain of every parameter: ~1.3 GB
-  of MLX per parameter at 8.4 M draws, so ~140 GB at short-period dim 105)
-  and make ranking fast past MLX's 2^21-row argsort limit (~2 minutes per
-  round at dim 105). turin's per-parameter `assess` loop is the workaround.
+  memory and make ranking fast at large draw counts. **Landed in anvil
+  0.3.0**; see `anvil_diagnose_reply.md`. anvil also found that MLX's
+  multi-column argsort silently corrupts ranks past 2,095,104 rows (no turin
+  run was in the affected window). Dim 105 at the cap: ~130 s -> 12.8 s per
+  round. turin keeps its per-parameter `assess` loop: as fast as the joint
+  call on 0.3.0, a third of the MLX peak, and exact on older anvil.
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's

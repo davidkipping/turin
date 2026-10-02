@@ -218,10 +218,14 @@ def assess(results, names, *, settle_tol=0.05):
     import anvil
 
     chain = results.get_chain()
-    # one parameter at a time: R-hat and ESS are per-parameter anyway, and
-    # anvil.diagnose on the whole (draws, chains, dim) array peaks at ~1.3x
-    # the chain size per parameter in MLX memory (10.5 GB at the draw cap
-    # for dim 8). Identical numbers, 1/dim of the peak.
+    # One parameter at a time: R-hat and ESS are per-parameter anyway.
+    # Against anvil < 0.3 this is what bounds memory (its joint call peaked
+    # at ~1.3 GB of MLX per parameter at the draw cap) and what keeps the
+    # sort single-column, which MLX gets right at every size; its multi-
+    # column argsort silently corrupts ranks past 2,095,104 rows. Against
+    # anvil >= 0.3 the joint call is bounded too, but measured at the cap
+    # the loop is as fast (0.7 vs 0.8 s at dim 8, 12.8 vs 12.7 s at dim 105)
+    # with a third of the MLX peak (1.3 vs 3.6 GB), so it stays.
     rhat = np.empty(chain.shape[-1])
     ess = np.empty(chain.shape[-1])
     for i in range(chain.shape[-1]):
