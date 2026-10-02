@@ -254,6 +254,33 @@ the move, and must turn it off rather than leave it running.
   the separate grazing/non-grazing bimodality in (k, b), which still holds
   shape R-hat up on low-SNR targets.
 
+### Memory: inference on every draw, export on a bounded subsample
+
+At the 16,384-draw cap a 270 MB float32 chain used to inflate to 8.8 GB of
+process memory and a 10.5 GB MLX peak, with a 288 s export every round, and
+on a 32 GB machine that swapped. The fixes, and what must not regress:
+
+- `sampling.assess` runs `anvil.diagnose` **one parameter at a time**.
+  Identical R-hat and ESS, but the joint call held the whole MLX peak.
+  Never thin for R-hat/ESS: ChEES draws are nearly independent, so a thinned
+  chain genuinely under-reports ESS.
+- Everything downstream of the verdict (summary, products, plots,
+  `certify`, `width_breakdown`, `whitened_shape`) uses
+  `sampling.export_thin`, which caps both rows and rows x parameters, so a
+  short-period fit with 100+ epoch times stays bounded too.
+- `Continuation` caches its concatenation; `_ml_row` indexes the one winning
+  draw; `export_chains` streams the CSV in chunks (byte-identical to the
+  old writer, checked including NaN/-0/inf).
+- `mx.clear_cache()` after every round (`capabilities.clear_mlx_cache`).
+- Heavy products (chains tarball, PDFs) after round 0, then at most every
+  `pipeline.HEAVY_EVERY_S`, and always at the end.
+
+To check a change here, measure rather than reason: fill a `Continuation`
+with synthetic cap-sized draws (16,400 x 512 chains) and time
+`assess` + `_export_all` + `certify` in a subprocess, reading peak RSS and
+`mx.get_peak_memory()`. On KOI-5616.01's layout that measured peak RSS
+8.76 -> 2.84 GB, MLX 10.5 -> 1.3 GB, and 306 -> 41 s per round.
+
 ### Known upstream hazards
 
 - **ChEES can permanently freeze a chain at a bounded parameter's edge**

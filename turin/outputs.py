@@ -115,31 +115,49 @@ def export_summary(outdir, target, mode, summary, *, extra=None, log=None):
         "Parameter,Median,Std,16th,84th,R-hat,Bulk_ESS,Tail_ESS", rows, log)
 
 
-def export_chains(outdir, target, mode, columns, arrays, *, log=None):
-    """(ii) The full joint posterior, gzipped CSV inside a tarball.
+#: Rows formatted per chunk when streaming the chains CSV to disk.
+_CSV_CHUNK_ROWS = 50_000
+
+
+def export_chains(outdir, target, mode, columns, arrays, *, thin=1,
+                  n_total=None, log=None):
+    """(ii) The joint posterior, gzipped CSV inside a tarball.
 
     The version member is appended *after* the CSV: hurin's readers take
     ``getmembers()[0]`` to find the data.
+
+    ``thin`` > 1 means ``arrays`` is a systematic subsample (every
+    ``thin``-th draw of every chain) of ``n_total`` draws; the provenance
+    line says so, so a reader never mistakes it for the full set. The CSV is
+    formatted in chunks into a temporary file rather than built as one
+    string: at the draw cap that string was ~1.6 GB and took ~4 minutes.
     """
     path = product_path(outdir, target, mode, "chains", "csv.tar.gz")
     data = np.column_stack([np.asarray(a, dtype=np.float64) for a in arrays])
-    buf = io.StringIO()
-    buf.write(",".join(columns) + "\n")
-    buf.write(provenance() + "\n")
-    for row in data:
-        buf.write(",".join(f"{v:.10e}" for v in row) + "\n")
-    csv_bytes = buf.getvalue().encode()
+    note = provenance()
+    if thin > 1:
+        note += (f" | thinned 1/{thin}: {len(data)} of "
+                 f"{n_total if n_total is not None else '?'} draws")
+    member = os.path.basename(path).replace(".tar.gz", "")
+    fmt = ",".join(["%.10e"] * data.shape[1])
 
-    with tarfile.open(path, "w:gz") as tar:
-        info = tarfile.TarInfo(
-            name=os.path.basename(path).replace(".tar.gz", ""))
-        info.size = len(csv_bytes)
-        tar.addfile(info, io.BytesIO(csv_bytes))
-        ver = (f"turin {__version__} rev{MODEL_REV}\n"
-               f"{launch_command()}\n").encode()
-        vinfo = tarfile.TarInfo(name="turin_version.txt")
-        vinfo.size = len(ver)
-        tar.addfile(vinfo, io.BytesIO(ver))
+    tmp = path + ".csv.tmp"
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(",".join(columns) + "\n")
+            fh.write(note + "\n")
+            for s in range(0, len(data), _CSV_CHUNK_ROWS):
+                np.savetxt(fh, data[s:s + _CSV_CHUNK_ROWS], fmt=fmt)
+        with tarfile.open(path, "w:gz") as tar:
+            tar.add(tmp, arcname=member)
+            ver = (f"turin {__version__} rev{MODEL_REV}\n"
+                   f"{launch_command()}\n").encode()
+            vinfo = tarfile.TarInfo(name="turin_version.txt")
+            vinfo.size = len(ver)
+            tar.addfile(vinfo, io.BytesIO(ver))
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     if log:
         log(f"    wrote {os.path.basename(path)} "
             f"({os.path.getsize(path) / 1e6:.1f} MB)")

@@ -40,6 +40,14 @@ RHAT_MAX = 1.01
 ESS_MIN = 400
 ESS_MIN_TAU = 100
 
+#: Export works on a systematic subsample of the pooled draws at most this
+#: many rows (and this many values, so a high-dimensional fit gets fewer
+#: rows). Summaries, the chains product, plots and the float32 certificate
+#: are limited by effective sample size long before this; R-hat and ESS are
+#: always computed on every draw.
+EXPORT_MAX_ROWS = 1_000_000
+EXPORT_MAX_VALUES = 16_000_000
+
 #: A chain whose median log-probability is this far below the ensemble median
 #: is reported as trapped. The stretch-move finding was 1,500 log-units, so
 #: this is deliberately sensitive.
@@ -210,9 +218,16 @@ def assess(results, names, *, settle_tol=0.05):
     import anvil
 
     chain = results.get_chain()
-    diag = anvil.diagnose(chain, names=list(names))
-    rhat = np.asarray(diag.rhat, dtype=np.float64)
-    ess = np.asarray(diag.ess_bulk, dtype=np.float64)
+    # one parameter at a time: R-hat and ESS are per-parameter anyway, and
+    # anvil.diagnose on the whole (draws, chains, dim) array peaks at ~1.3x
+    # the chain size per parameter in MLX memory (10.5 GB at the draw cap
+    # for dim 8). Identical numbers, 1/dim of the peak.
+    rhat = np.empty(chain.shape[-1])
+    ess = np.empty(chain.shape[-1])
+    for i in range(chain.shape[-1]):
+        d = anvil.diagnose(chain[..., i:i + 1])
+        rhat[i] = float(np.asarray(d.rhat)[0])
+        ess[i] = float(np.asarray(d.ess_bulk)[0])
 
     ok = np.all(rhat < RHAT_MAX) and all(
         ess[i] > _ess_floor(n) for i, n in enumerate(names))
@@ -227,7 +242,8 @@ def assess(results, names, *, settle_tol=0.05):
 
     skew = exk = 0.0
     try:
-        flat = chain.reshape(-1, chain.shape[-1]).astype(np.float64)
+        t = export_thin(results)
+        flat = chain[::t].reshape(-1, chain.shape[-1]).astype(np.float64)
         s, k = anvil.whitened_shape(flat)
         skew, exk = float(np.max(np.abs(s))), float(np.max(np.abs(k)))
     except Exception:
@@ -308,15 +324,23 @@ class Continuation:
         self.n_warmup = self.segments[0].n_warmup
         self.thin = last.thin
         self._last = last
+        self._chain = None
+        self._lp = None
 
     def get_chain(self, discard=0, thin=1, flat=False):
-        chain = np.concatenate([s.get_chain() for s in self.segments], axis=0)
-        chain = chain[discard::thin]
+        # concatenated once and cached: the segments never change, and every
+        # consumer (assess, export, certify) asks for the pooled array
+        if self._chain is None:
+            self._chain = np.concatenate(
+                [s.get_chain() for s in self.segments], axis=0)
+        chain = self._chain[discard::thin]
         return chain.reshape(-1, chain.shape[-1]) if flat else chain
 
     def get_log_prob(self, discard=0, thin=1, flat=False):
-        lp = np.concatenate([s.get_log_prob() for s in self.segments], axis=0)
-        lp = lp[discard::thin]
+        if self._lp is None:
+            self._lp = np.concatenate(
+                [s.get_log_prob() for s in self.segments], axis=0)
+        lp = self._lp[discard::thin]
         return lp.reshape(-1) if flat else lp
 
     def save_state(self, path):
@@ -439,6 +463,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
         log(verdict.describe())
         if on_round is not None:
             on_round(reported, verdict, rnd)
+        _caps.clear_mlx_cache()
 
         if verdict.converged:
             break
@@ -493,7 +518,9 @@ def certify(target, results, names, *, n_probe=256, target_ess=1e4, log=print):
     import anvil
 
     try:
-        draws = results.get_chain(flat=True)
+        # the certificate is a few hundred float64 probes; a bounded,
+        # systematic subsample of the draws serves it as well as all of them
+        draws = results.get_chain(thin=export_thin(results), flat=True)
         cert = anvil.certify(target, draws, n_probe=n_probe,
                              target_ess=target_ess, names=list(names))
     except Exception as exc:
@@ -504,6 +531,18 @@ def certify(target, results, names, *, n_probe=256, target_ess=1e4, log=print):
         for line in str(cert).splitlines():
             log(f"  {line}")
     return cert
+
+
+def export_thin(results):
+    """Thinning factor that brings the pooled draws within the export budget.
+
+    Systematic (every t-th draw of every chain), so each chain stays equally
+    represented. 1 when everything fits.
+    """
+    # a view of the stored (cached, for a Continuation) array: no copy
+    n_draws, n_chains, dim = results.get_chain().shape
+    max_rows = min(EXPORT_MAX_ROWS, EXPORT_MAX_VALUES // max(1, dim + 3))
+    return max(1, -(-n_draws * n_chains // max_rows))
 
 
 def physical_draws(transform, results, *, discard=0, thin=1):
@@ -520,7 +559,7 @@ def width_breakdown(transform, results, names, health):
     reported width fourfold while every summary statistic looks fine. Quoting
     both numbers makes that visible instead of hidden.
     """
-    chain = results.get_chain()                      # (draws, chains, dim)
+    chain = results.get_chain(thin=export_thin(results))  # (draws, chains, dim)
     flat_all = chain.reshape(-1, chain.shape[-1]).astype(np.float64)
     phys_all = transform.to_physical(transform.model_np(flat_all))
 

@@ -28,6 +28,10 @@ from . import profile as _profile
 from . import sampling as _sampling
 from . import seeding as _seeding
 
+#: Minimum seconds between writes of the chains tarball and the PDFs during
+#: a run; they are always written after round 0 and at the end.
+HEAVY_EVERY_S = 1200
+
 PARAM_LABELS = {
     "dP": "$P$ (d)", "dtau0": r"$\tau_0$", "k": "$k = R_p/R_\\star$",
     "b": "$b$", "T14": "$T_{14}$ (d)", "q1": "$q_1$",
@@ -296,11 +300,26 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
     # ---- sample, exporting after every round
     state_holder = {}
 
-    def on_round(results, verdict, rnd):
+    # The chains tarball and the PDFs are the expensive products; they are
+    # written after round 0 (so a long run shows something early), then at
+    # most every HEAVY_EVERY_S, and always once the run ends. The small
+    # products and the resume state are written every round.
+    last_heavy = {"t": None, "round": None}
+    last_round = {"rnd": None}
+
+    def export(results, verdict, rnd, heavy):
         _export_all(mode, args, prepared, epoch_data, centering, orders,
                     layout, transform, lp, results, verdict, outdir, caps,
                     log=log, state_holder=state_holder, cfg=cfg,
-                    pl_mode=pl_choice.mode)
+                    pl_mode=pl_choice.mode, heavy=heavy)
+        if heavy:
+            last_heavy.update(t=time.perf_counter(), round=rnd)
+
+    def on_round(results, verdict, rnd):
+        last_round["rnd"] = rnd
+        due = (last_heavy["t"] is None
+               or time.perf_counter() - last_heavy["t"] >= HEAVY_EVERY_S)
+        export(results, verdict, rnd, heavy=due)
 
     move = None
     if _gibbsgrid(mode, args) == "on":
@@ -319,6 +338,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
     results, verdict, total = _sampling.run_rounds(
         target_obj, list(layout.names), u0, cfg, log=log, on_round=on_round,
         resume_state=resume_for_anvil, move=move)
+    if last_heavy["round"] != last_round["rnd"]:
+        export(results, verdict, last_round["rnd"], heavy=True)
 
     cert = _sampling.certify(target_obj, results, list(layout.names), log=log)
     if cert is not None:
@@ -328,64 +349,13 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
     return ml if mode == "lineph" else None
 
 
-def _ml_row(results, lp, transform):
-    """The maximum-likelihood draw, in model space, and its log-density."""
-    lpv = np.asarray(results.get_log_prob(flat=True), dtype=np.float64)
-    flat = results.get_chain(flat=True).astype(np.float64)
-    j = int(np.argmax(lpv))
-    return transform.model_np(flat[j:j + 1])[0], float(lpv[j])
-
-
-def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
-                transform, lp, results, verdict, outdir, caps, *, log,
-                state_holder, cfg, pl_mode):
-    """Write every product for this mode. Called after each sampling round."""
-    target = prepared.target
-    names = list(layout.names)
-    phys = _sampling.physical_draws(transform, results)
-
-    # anvil reports rank-normalized bulk ESS only (no tail ESS), so hurin's
-    # Tail_ESS column is written empty rather than filled with a placeholder.
-    summary = _outputs.summarize(phys, names, rhat=verdict.rhat,
-                                 ess_bulk=verdict.ess, ess_tail=None)
-
-    # derived quantities, computed after sampling in float64
-    b_draws = _outputs.derived_b(phys, names, layout.b_prior)
-    rho = _outputs.log10_rho_draws(
-        phys, names, layout.b_prior,
-        P_ref=None if mode == "lineph" else layout.P_ref)
-    derived = _outputs.summarize(
-        np.column_stack([b_draws, rho]), ["b", "log10_rho"])
-    summary.update(derived)
-
-    _outputs.export_summary(outdir, target, mode, summary, log=log)
-    _outputs.export_logrho(outdir, target, mode, rho, log=log)
-
-    cols = list(names) + ["b", "log10_rho", "loglike"]
-    arrays = [phys[:, i] for i in range(phys.shape[1])] + [
-        b_draws, rho,
-        np.asarray(results.get_log_prob(flat=True), dtype=np.float64)
-        + lp.log_const]
-    _outputs.export_chains(outdir, target, mode, cols, arrays, log=log)
-
-    # maximum-likelihood model, for the light-curve export and the plots
-    v_ml, logl_ml = _ml_row(results, lp, transform)
-    with mx.stream(mx.cpu):
-        model, coeffs = lp.full_model(
-            mx.array(v_ml[None, :].astype(np.float32)))
-        model = np.array(model, dtype=np.float64)[0]
-        baseline = np.array(_profile.baseline(lp.design, coeffs),
-                            dtype=np.float64)[0]
-    _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
-
-    state_holder["ml_params"] = {
-        n: float(v_ml[i]) for i, n in enumerate(names)
-        if n in ("k", "beta", "T14", "q1", "q2")}
-
-    # ---- figures
+def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
+                   layout, centering, epoch_data, baseline, *, log):
+    """Corner and fold PDFs, from the (subsampled) physical draws."""
     try:
         # show the impact parameter b itself, not the sampled coordinate
-        # beta = b / b_max(k), which is a prior device, not a physical quantity
+        # beta = b / b_max(k), which is a prior device, not a physical
+        # quantity
         n_c = min(len(names), 7)
         c_names = ["b" if n == "beta" else n for n in names[:n_c]]
         c_draws = phys[:, :n_c].copy()
@@ -411,18 +381,93 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     except Exception as exc:
         log(f"    fold plot skipped: {exc}")
 
+
+def _ml_row(results, lp, transform):
+    """The maximum-likelihood draw over every draw, in model space.
+
+    Indexes the one winning draw rather than flattening the whole chain to
+    float64 (540 MB at the draw cap for dim 8).
+    """
+    lpv = np.asarray(results.get_log_prob(), dtype=np.float64)  # (S, C)
+    s_i, c_i = np.unravel_index(int(np.argmax(lpv)), lpv.shape)
+    row = np.asarray(results.get_chain()[s_i, c_i], dtype=np.float64)
+    return transform.model_np(row[None, :])[0], float(lpv[s_i, c_i])
+
+
+def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
+                transform, lp, results, verdict, outdir, caps, *, log,
+                state_holder, cfg, pl_mode, heavy=True):
+    """Write this mode's products. Called after each sampling round.
+
+    Everything is computed from a bounded, systematic subsample of the pooled
+    draws (``sampling.export_thin``); R-hat and ESS in the summary come from
+    ``verdict``, which saw every draw. ``heavy=False`` skips the chains
+    tarball and the PDFs -- the expensive products -- and writes the small
+    ones and the resume state, which are what make a run interruptible.
+    """
+    target = prepared.target
+    names = list(layout.names)
+    thin = _sampling.export_thin(results)
+    phys = _sampling.physical_draws(transform, results, thin=thin)
+
+    # anvil reports rank-normalized bulk ESS only (no tail ESS), so hurin's
+    # Tail_ESS column is written empty rather than filled with a placeholder.
+    summary = _outputs.summarize(phys, names, rhat=verdict.rhat,
+                                 ess_bulk=verdict.ess, ess_tail=None)
+
+    # derived quantities, computed after sampling in float64
+    b_draws = _outputs.derived_b(phys, names, layout.b_prior)
+    rho = _outputs.log10_rho_draws(
+        phys, names, layout.b_prior,
+        P_ref=None if mode == "lineph" else layout.P_ref)
+    derived = _outputs.summarize(
+        np.column_stack([b_draws, rho]), ["b", "log10_rho"])
+    summary.update(derived)
+
+    _outputs.export_summary(outdir, target, mode, summary, log=log)
+    _outputs.export_logrho(outdir, target, mode, rho, log=log)
+
+    if heavy:
+        cols = list(names) + ["b", "log10_rho", "loglike"]
+        arrays = [phys[:, i] for i in range(phys.shape[1])] + [
+            b_draws, rho,
+            np.asarray(results.get_log_prob(thin=thin, flat=True),
+                       dtype=np.float64) + lp.log_const]
+        _outputs.export_chains(outdir, target, mode, cols, arrays, thin=thin,
+                               n_total=results.get_log_prob().size, log=log)
+
+    # maximum-likelihood model, for the light-curve export and the plots
+    v_ml, logl_ml = _ml_row(results, lp, transform)
+    with mx.stream(mx.cpu):
+        model, coeffs = lp.full_model(
+            mx.array(v_ml[None, :].astype(np.float32)))
+        model = np.array(model, dtype=np.float64)[0]
+        baseline = np.array(_profile.baseline(lp.design, coeffs),
+                            dtype=np.float64)[0]
+    _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
+
+    state_holder["ml_params"] = {
+        n: float(v_ml[i]) for i, n in enumerate(names)
+        if n in ("k", "beta", "T14", "q1", "q2")}
+
+    # ---- figures
+    if heavy:
+        _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
+                       layout, centering, epoch_data, baseline, log=log)
+
     if mode == "ttv":
         rows = _ttv_rows(phys, names, layout, centering, epoch_data, model,
                          summary)
         _outputs.export_ttv_times(outdir, target, mode, rows, log=log)
-        try:
-            _plots.oc_plot(
-                _outputs.product_path(outdir, target, mode, "oc", "pdf"),
-                [r["epoch"] for r in rows], [r["tmid"] for r in rows],
-                [r["tmid_err"] for r in rows],
-                title=f"{target} transit timing", log=log)
-        except Exception as exc:
-            log(f"    O-C plot skipped: {exc}")
+        if heavy:
+            try:
+                _plots.oc_plot(
+                    _outputs.product_path(outdir, target, mode, "oc", "pdf"),
+                    [r["epoch"] for r in rows], [r["tmid"] for r in rows],
+                    [r["tmid_err"] for r in rows],
+                    title=f"{target} transit timing", log=log)
+            except Exception as exc:
+                log(f"    O-C plot skipped: {exc}")
 
     # ---- resume state
     anvil_state_path = None

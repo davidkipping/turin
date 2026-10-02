@@ -169,3 +169,18 @@ def set_positions(resume_state, u, target):
     lp, g = target.log_prob_and_grad(u)
     resume_state.state = dict(resume_state.state, u=u, log_prob=lp, grad=g)
     return resume_state
+
+
+def clear_mlx_cache():
+    """Return MLX's cached buffers to the system between rounds.
+
+    MLX keeps freed GPU buffers for reuse, so a long fit's allocation only
+    ever grows; measured at 11-20 GB on Kepler targets that ran to the draw
+    cap. ``mx.clear_cache`` on current MLX, ``mx.metal.clear_cache`` before.
+    """
+    import mlx.core as mx
+
+    fn = getattr(mx, "clear_cache", None) or getattr(
+        getattr(mx, "metal", None), "clear_cache", None)
+    if fn is not None:
+        fn()

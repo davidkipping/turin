@@ -218,6 +218,17 @@ working. Seven products per LinEph fit, nine per TTV fit:
 
 Every product records turin's version and the exact command that made it.
 
+**Large runs are subsampled for export, not for inference.** R-hat and ESS are
+computed on every draw. Everything else in the products is computed from a
+systematic subsample of at most 10^6 rows (fewer for high-dimensional fits,
+so that rows x parameters stays under 1.6 x 10^7). That covers the summary
+percentiles, the chains and logrho files, the plots and the float32
+certificate, and every chain stays equally represented. When thinning
+applies, line 2 of the chains CSV says so, e.g.
+`... | thinned 1/9: 932,864 of 8,396,800 draws`. The chains tarball and PDFs
+are written after the first round, then at most every 20 minutes, and always
+at the end; the small products and the resume state are written every round.
+
 ## Differences from hurin
 
 Against **hurin >= 0.1.68** two differences remain, and
