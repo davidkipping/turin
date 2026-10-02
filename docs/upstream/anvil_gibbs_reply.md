@@ -36,3 +36,10 @@ The anvil session reported that it could not find `turin/turin/gibbs.py` or
 commit that added them (`57651fa`) had not been pushed when the brief was
 handed over. It worked from the brief's own description instead. **Push the
 turin commit a brief refers to before handing the brief over.**
+
+## Later: fallback removed (turin 0.1.24)
+
+turin now requires anvil >= 0.3.0 (`capabilities.require_anvil`), so
+turin's fallback and the bit-identity test against it were removed. Validated by a golden run before and after: chains,
+log-probabilities, divergences, R-hat and trapped-chain flags bit-identical;
+ESS within 1.2e-6 relative (float32 regrouping in anvil's autocovariance).

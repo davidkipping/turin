@@ -60,17 +60,14 @@ def _gibbsgrid(mode, args):
 
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
+    _caps.require_anvil()        # before anything touches the disk
     _outputs.set_run_tag(args.tag)
     target = args.target
     outdir = args.outdir or target
     os.makedirs(outdir, exist_ok=True)
 
-    caps = _caps.detect()
     log(f"turin {__version__} — {target}")
-    log(caps.summary())
-    if not caps.anvil_resume:
-        log("  note: without anvil resume, each extension repeats warmup and "
-            "is a new chain rather than a continuation")
+    log(_caps.detect().summary())
 
     if args.fresh:
         removed = _outputs.clear_products(outdir, target)
@@ -110,7 +107,7 @@ def run(args, log=print):
     for mode in args.modes:
         try:
             lineph_ml = _fit_mode(
-                mode, args, prepared, cv, outdir, caps, log=log,
+                mode, args, prepared, cv, outdir, log=log,
                 n_durations=n_durations, lineph_ml=lineph_ml) or lineph_ml
         except SystemExit:
             raise
@@ -122,7 +119,7 @@ def run(args, log=print):
     return 0
 
 
-def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
+def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
               lineph_ml=None):
     """Run one fit mode. Returns the ML shape dict for LinEph, else None."""
     target = prepared.target
@@ -249,7 +246,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
         max_leapfrog=args.max_leapfrog, seed=args.seed).for_mode(layout.dim)
 
     resume_for_anvil = None
-    if prior_state is not None and caps.anvil_resume and \
+    if prior_state is not None and \
             prior_state.anvil_state_path and \
             os.path.exists(prior_state.anvil_state_path):
         import anvil
@@ -309,7 +306,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, caps, *, log, n_durations,
 
     def export(results, verdict, rnd, heavy):
         _export_all(mode, args, prepared, epoch_data, centering, orders,
-                    layout, transform, lp, results, verdict, outdir, caps,
+                    layout, transform, lp, results, verdict, outdir,
                     log=log, state_holder=state_holder, cfg=cfg,
                     pl_mode=pl_choice.mode, heavy=heavy)
         if heavy:
@@ -395,7 +392,7 @@ def _ml_row(results, lp, transform):
 
 
 def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
-                transform, lp, results, verdict, outdir, caps, *, log,
+                transform, lp, results, verdict, outdir, *, log,
                 state_holder, cfg, pl_mode, heavy=True):
     """Write this mode's products. Called after each sampling round.
 
@@ -470,15 +467,15 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                 log(f"    O-C plot skipped: {exc}")
 
     # ---- resume state
-    anvil_state_path = None
-    if caps.anvil_state_io:
-        try:
-            anvil_state_path = _outputs.product_path(
-                outdir, target, mode, "anvilstate", "npz")
-            results.save_state(anvil_state_path)
-        except Exception as exc:
-            log(f"    anvil state not saved: {exc}")
-            anvil_state_path = None
+    # a write failure (disk full, permissions) must not kill the fit: the
+    # resume state then falls back to restarting from last_u
+    anvil_state_path = _outputs.product_path(
+        outdir, target, mode, "anvilstate", "npz")
+    try:
+        results.save_state(anvil_state_path)
+    except Exception as exc:
+        log(f"    anvil state not saved: {exc}")
+        anvil_state_path = None
 
     state = _outputs.ResumeState(
         target=target, mode=mode, turin_version=__version__,

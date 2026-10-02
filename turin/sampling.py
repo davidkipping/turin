@@ -40,6 +40,9 @@ RHAT_MAX = 1.01
 ESS_MIN = 400
 ESS_MIN_TAU = 100
 
+#: Working-set budget for ``anvil.diagnose`` (bytes); see :func:`assess`.
+DIAGNOSE_MEMORY_BUDGET = 256 * 2**20
+
 #: Export works on a systematic subsample of the pooled draws at most this
 #: many rows (and this many values, so a high-dimensional fit gets fewer
 #: rows). Summaries, the chains product, plots and the float32 certificate
@@ -145,7 +148,7 @@ def chain_health(results):
     lp = np.asarray(results.get_log_prob(), dtype=np.float64)   # (draws, chains)
     med = np.median(lp, axis=0)
     accept = np.asarray(results.accept_fraction, dtype=np.float64)
-    div = _caps.per_chain_divergences(results)
+    div = (results.extras or {}).get("divergent_per_chain")
     div = None if div is None else np.asarray(div, dtype=np.float64)
 
     bulk = float(np.median(med))
@@ -218,20 +221,14 @@ def assess(results, names, *, settle_tol=0.05):
     import anvil
 
     chain = results.get_chain()
-    # One parameter at a time: R-hat and ESS are per-parameter anyway.
-    # Against anvil < 0.3 this is what bounds memory (its joint call peaked
-    # at ~1.3 GB of MLX per parameter at the draw cap) and what keeps the
-    # sort single-column, which MLX gets right at every size; its multi-
-    # column argsort silently corrupts ranks past 2,095,104 rows. Against
-    # anvil >= 0.3 the joint call is bounded too, but measured at the cap
-    # the loop is as fast (0.7 vs 0.8 s at dim 8, 12.8 vs 12.7 s at dim 105)
-    # with a third of the MLX peak (1.3 vs 3.6 GB), so it stays.
-    rhat = np.empty(chain.shape[-1])
-    ess = np.empty(chain.shape[-1])
-    for i in range(chain.shape[-1]):
-        d = anvil.diagnose(chain[..., i:i + 1])
-        rhat[i] = float(np.asarray(d.rhat)[0])
-        ess[i] = float(np.asarray(d.ess_bulk)[0])
+    # anvil >= 0.3 accumulates the autocovariance in chunks and ranks one
+    # parameter at a time, so a small budget bounds the MLX peak whatever
+    # the dimension: measured at the draw cap, 256 MiB gives 0.55 GB and is
+    # as fast as larger budgets (0.7 s at dim 8, 13.7 s at dim 105).
+    diag = anvil.diagnose(chain, names=list(names),
+                          memory_budget=DIAGNOSE_MEMORY_BUDGET)
+    rhat = np.asarray(diag.rhat, dtype=np.float64)
+    ess = np.asarray(diag.ess_bulk, dtype=np.float64)
 
     ok = np.all(rhat < RHAT_MAX) and all(
         ess[i] > _ess_floor(n) for i, n in enumerate(names))
@@ -305,11 +302,10 @@ def check_precision(target, u0, log=print, strict=True):
 class Continuation:
     """The draws of several resumed segments, presented as one ``Results``.
 
-    Only valid when the segments really are a continuation of the same chains
-    -- i.e. anvil's ``resume`` was used, so nothing re-adapted between them.
-    Under the re-warmup fallback each round is a *different* Markov chain and
-    the segments must not be pooled; :func:`run_rounds` only builds this when
-    it resumed.
+    Valid because the segments are one Markov chain: every segment after the
+    first is an anvil ``resume`` with adaptation frozen, so nothing re-adapts
+    between them (a grid-Gibbs move between segments is an exact move of the
+    same chain, so it keeps this true).
 
     Presents the slice of ``anvil.Results`` that turin consumes. Per-segment
     accounting (acceptance, divergences) is taken from the latest segment,
@@ -367,37 +363,27 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     a round that fails the convergence gates still contributes its samples,
     so extending is cheap in both warmup and information.
 
-    Without ``resume`` the only option is to start again from the previous
-    final positions *with* warmup. That is a different Markov chain, so the
-    segments cannot be pooled and only the latest round is reported.
-
     ``move``, if given, is a :class:`turin.gibbs.GridGibbs` applied every
     ``segment`` draws: each round is drawn as several resumed segments with a
     sweep between them (and one before a cross-process resume). ChEES
     alternated with an exact move is still one Markov chain, so the segments
-    pool exactly as before. It needs ``resume``; without it the move is
-    skipped and the log says so.
+    pool exactly as before. Chains are moved with anvil's
+    ``ResumeState.with_positions``, which recomputes every cached per-chain
+    quantity at the new positions.
     """
     import anvil
 
-    caps = _caps.detect()
     kernel = make_kernel(target, cfg, log=log)
     total = 0
     segments = []
     results = None
     verdict = None
-    pooled = caps.anvil_resume
-
-    if move is not None and not caps.anvil_resume:
-        log("  grid-Gibbs needs anvil resume to move chains between "
-            "segments; running without it")
-        move = None
 
     def gibbs(rs):
         nonlocal t_gibbs
         tg = time.perf_counter()
         u_new, st = move.sweep(np.array(rs.state["u"], dtype=np.float64))
-        rs = _caps.set_positions(rs, u_new, target)
+        rs = rs.with_positions(mx.array(u_new.astype(np.float32)), target)
         t_gibbs += time.perf_counter() - tg
         sweep_stats.append(st)
         return rs
@@ -416,7 +402,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
         for ci, chunk in enumerate(chunks):
             kw = dict(n_samples=chunk, thin=cfg.thin, progress=False)
             first = rnd == 0 and ci == 0
-            if first and resume_state is not None and caps.anvil_resume:
+            if first and resume_state is not None:
                 log(f"  round {rnd}: resuming {n_samples} draws/chain "
                     "with frozen adaptation")
                 rs = resume_state if move is None else gibbs(resume_state)
@@ -431,7 +417,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                        f", grid-Gibbs on the epoch times every {segment}"))
                 results = anvil.run(kernel, target, u0,
                                     n_warmup=cfg.n_warmup, seed=cfg.seed, **kw)
-            elif caps.anvil_resume:
+            else:
                 if ci == 0:
                     log(f"  round {rnd}: +{n_samples} draws/chain "
                         f"(continuation, adaptation frozen, "
@@ -440,19 +426,12 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                 # seed=None continues the key stream instead of forking it
                 results = anvil.run(kernel, target, resume=rs, n_warmup=0,
                                     **kw)
-            else:
-                log(f"  round {rnd}: +{n_samples} draws/chain — anvil has no "
-                    "resume, so warmup is repeated from the last positions "
-                    "and this round is a NEW chain, not a continuation")
-                results = anvil.run(kernel, target, results.final_state["u"],
-                                    n_warmup=cfg.n_warmup,
-                                    seed=cfg.seed + rnd, **kw)
             round_segs.append(results)
         el = time.perf_counter() - t0
         total += n_samples
         segments.extend(round_segs)
 
-        reported = (Continuation(segments) if pooled and len(segments) > 1
+        reported = (Continuation(segments) if len(segments) > 1
                     else results)
         if len(round_segs) > 1:
             _round_accounting(reported, round_segs)
@@ -460,8 +439,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
         log(f"  round {rnd} took {el:.1f}s "
             f"({n_samples * cfg.n_chains / max(el, 1e-9):.0f} draws/s)"
             + (f"; pooled {verdict.n_draws} draws/chain over "
-               f"{len(segments)} segments" if pooled and len(segments) > 1
-               else ""))
+               f"{len(segments)} segments" if len(segments) > 1 else ""))
         if sweep_stats:
             log(_describe_sweeps(sweep_stats, names, t_gibbs, el))
         log(verdict.describe())
@@ -488,10 +466,10 @@ def _round_accounting(reported, round_segs):
     extras = dict(round_segs[-1].extras or {})
     extras["n_divergent"] = sum(int((s.extras or {}).get("n_divergent", 0))
                                 for s in round_segs)
-    for key in ("divergent_per_chain", "n_divergent_per_chain"):
-        if all(key in (s.extras or {}) for s in round_segs):
-            extras[key] = np.sum([np.asarray(s.extras[key])
-                                  for s in round_segs], axis=0)
+    if all("divergent_per_chain" in (s.extras or {}) for s in round_segs):
+        extras["divergent_per_chain"] = np.sum(
+            [np.asarray(s.extras["divergent_per_chain"]) for s in round_segs],
+            axis=0)
     reported.extras = extras
     reported.accept_fraction = np.mean(
         [np.asarray(s.accept_fraction, dtype=np.float64) for s in round_segs],

@@ -39,16 +39,15 @@ in a matching `*_reply.md`. Existing briefs:
 - `docs/upstream/anvil_gibbs_prompt.md` — `ResumeState.with_positions`,
   so grid-Gibbs can move chains without turin rewriting ChEES's internal
   `u`/`log_prob`/`grad` cache itself. **Landed in anvil `849159f`**; see
-  `anvil_gibbs_reply.md`. turin's fallback (which refuses any state it does
-  not recognise) stays for older installs, and a test requires the two
-  paths to give bit-identical chains.
+  `anvil_gibbs_reply.md`. turin's own state-rewrite fallback was removed
+  in 0.1.24, when turin started requiring anvil >= 0.3.0.
 - `docs/upstream/anvil_diagnose_prompt.md` — bound `anvil.diagnose`'s
   memory and make ranking fast at large draw counts. **Landed in anvil
   0.3.0**; see `anvil_diagnose_reply.md`. anvil also found that MLX's
   multi-column argsort silently corrupts ranks past 2,095,104 rows (no turin
   run was in the affected window). Dim 105 at the cap: ~130 s -> 12.8 s per
-  round. turin keeps its per-parameter `assess` loop: as fast as the joint
-  call on 0.3.0, a third of the MLX peak, and exact on older anvil.
+  round. turin now makes one `diagnose` call with a 256 MiB budget (0.55 GB
+  peak, as fast as its old per-parameter loop, which 0.1.24 removed).
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
@@ -76,13 +75,17 @@ must point at pushed ones: the upstream session reads them from GitHub or its
 own clone, not from this machine. The anvil grid-Gibbs brief went out with
 its turin commit unpushed, and anvil could not find the files it cited.
 
-`turin/capabilities.py` feature-detects every upstream capability and
-falls back when it is absent. All four anvil asks and the MetalPlanet one
-have since landed; the fallbacks remain because turin must keep working
-against older installs. **turin must always run against the
-packages as currently published on GitHub.** When adding a dependency on
-an upstream feature, add the detection and the fallback in the same
-change.
+**turin requires a minimum anvil instead of carrying fallbacks.** It used
+to feature-detect each anvil capability and fall back without it; every one
+of those landed upstream, and anvil < 0.3.0 also carries a silent rank
+corruption in `diagnose`, so since 0.1.24 `capabilities.require_anvil()`
+refuses anything older than `capabilities.MIN_ANVIL` (0.3.0) with the
+upgrade command, before touching the disk. **turin must always run against
+the packages as currently published on GitHub.** When turin starts relying
+on a new upstream feature, raise `MIN_ANVIL` in the same change; do not add
+detection plus a fallback. (MetalPlanet's tau-input kernel is still
+*detected*, but only reported: turin does not use it, so there is nothing to
+fall back from.)
 
 ## Architecture
 
@@ -99,7 +102,7 @@ turin/
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   outputs.py      CSV/PDF products, resume state
-  capabilities.py upstream feature detection + fallbacks
+  capabilities.py minimum-anvil gate, installed versions, MLX cache release
 ```
 
 ## Load-bearing invariants
@@ -267,10 +270,12 @@ At the 16,384-draw cap a 270 MB float32 chain used to inflate to 8.8 GB of
 process memory and a 10.5 GB MLX peak, with a 288 s export every round, and
 on a 32 GB machine that swapped. The fixes, and what must not regress:
 
-- `sampling.assess` runs `anvil.diagnose` **one parameter at a time**.
-  Identical R-hat and ESS, but the joint call held the whole MLX peak.
-  Never thin for R-hat/ESS: ChEES draws are nearly independent, so a thinned
-  chain genuinely under-reports ESS.
+- `sampling.assess` makes one `anvil.diagnose` call with
+  `memory_budget=DIAGNOSE_MEMORY_BUDGET` (256 MiB): anvil >= 0.3 chunks the
+  autocovariance and ranks per parameter, so the MLX peak is ~0.55 GB at
+  any dimension. Before 0.3 the joint call held ~1.3 GB per parameter and
+  turin looped over parameters instead. Never thin for R-hat/ESS: ChEES
+  draws are nearly independent, so a thinned chain under-reports ESS.
 - Everything downstream of the verdict (summary, products, plots,
   `certify`, `width_breakdown`, `whitened_shape`) uses
   `sampling.export_thin`, which caps both rows and rows x parameters, so a

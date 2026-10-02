@@ -37,3 +37,10 @@ turin's loop. turin therefore **keeps its per-parameter loop**: same speed,
 a third of the MLX peak, and exact against older anvil too. No detection or
 code change was needed; turin gets the speedup by installing 0.3.0. Full
 suite on 0.3.0: 185 passed, 14 skipped.
+
+## Later: fallback removed (turin 0.1.24)
+
+turin now requires anvil >= 0.3.0 (`capabilities.require_anvil`), so
+turin's per-parameter `assess` loop were removed. Validated by a golden run before and after: chains,
+log-probabilities, divergences, R-hat and trapped-chain flags bit-identical;
+ESS within 1.2e-6 relative (float32 regrouping in anvil's autocovariance).

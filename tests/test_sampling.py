@@ -93,12 +93,65 @@ def test_ess_floor_is_lower_for_timing_parameters():
 
 def test_capabilities_detect_and_summarize():
     caps = capabilities.detect()
-    assert isinstance(caps.anvil_resume, bool)
     assert isinstance(caps.metalplanet_flux_dev_from_tau, bool)
     text = caps.summary()
     assert "anvil" in text and "MetalPlanet" in text
-    # the field is deliberately unknown until a run has happened
-    assert caps.anvil_per_chain_divergences is None
+    assert "yes  anvil >= 0.3.0" in text
+
+
+@pytest.mark.parametrize("version,ok", [
+    ("0.3.0", True), ("0.3.0.dev2", True), ("0.3.1", True), ("1.0", True),
+    ("0.2.0", False), ("0.1.0.dev0", False), ("unknown", False)])
+def test_anvil_version_gate(version, ok):
+    assert capabilities.anvil_ok(version) is ok
+
+
+def test_require_anvil_names_the_upgrade_command(monkeypatch):
+    import anvil
+
+    assert capabilities.require_anvil() == anvil.__version__
+    monkeypatch.setattr(anvil, "__version__", "0.2.0")
+    with pytest.raises(SystemExit, match="pip install -U"):
+        capabilities.require_anvil()
+    assert "NO   anvil >= 0.3.0" in capabilities.detect().summary()
+
+
+def test_assess_matches_a_per_parameter_diagnose_reference():
+    """The single memory-budgeted diagnose call replaced a per-parameter
+    loop; it must give the same R-hat and ESS, including a real R-hat
+    signal and autocorrelated chains."""
+    import anvil
+
+    rng = np.random.default_rng(2)
+    S, C, D = 3000, 64, 6
+    x = np.zeros((S, C, D), np.float32)
+    e = rng.standard_normal((S, C, D)).astype(np.float32)
+    for t in range(1, S):
+        x[t] = 0.9 * x[t - 1] + e[t]
+    x[:, :8, 2] += 3.0
+
+    class R:
+        extras = {"n_divergent": 0}
+        accept_fraction = np.full(C, 0.8)
+        warmup_trace = None
+
+        def get_chain(self, discard=0, thin=1, flat=False):
+            c = x[discard::thin]
+            return c.reshape(-1, D) if flat else c
+
+        def get_log_prob(self, discard=0, thin=1, flat=False):
+            lp = -0.5 * np.sum(x[discard::thin] ** 2, axis=-1)
+            return lp.reshape(-1) if flat else lp
+
+    v = sampling.assess(R(), list("abcdef"))
+    ref = [anvil.diagnose(x[..., i:i + 1]) for i in range(D)]
+    np.testing.assert_array_equal(v.rhat, [float(r.rhat[0]) for r in ref])
+    # ESS goes through anvil's float32 GPU autocovariance, accumulated in
+    # different groupings by the joint and per-parameter calls: measured
+    # 1.2e-6 relative. ESS is reported as an integer and gated at 100/400.
+    np.testing.assert_allclose(v.ess, [float(r.ess_bulk[0]) for r in ref],
+                               rtol=1e-5)
+    assert v.worst_rhat[0] == "c" and v.worst_rhat[1] > 1.05
 
 
 def test_check_precision_passes_on_a_well_conditioned_fit():
@@ -314,8 +367,6 @@ def _drive(max_samples=120, n_samples=40, seed=3):
     return t, res, verdict, total, "\n".join(logs)
 
 
-@pytest.mark.skipif(not capabilities.detect().anvil_resume,
-                    reason="installed anvil has no resume")
 def test_extension_is_a_continuation_and_pools_its_draws():
     """With resume, later rounds continue the same chains, so they pool."""
     t, res, verdict, total, text = _drive()
@@ -330,8 +381,6 @@ def test_extension_is_a_continuation_and_pools_its_draws():
     assert res.get_chain(flat=True).shape == (total * 64, t.dim)
 
 
-@pytest.mark.skipif(not capabilities.detect().anvil_resume,
-                    reason="installed anvil has no resume")
 def test_a_pooled_continuation_still_samples_the_right_distribution():
     """Pooling is only valid if the segments really are one chain."""
     t, res, verdict, total, text = _drive()
@@ -341,8 +390,6 @@ def test_a_pooled_continuation_still_samples_the_right_distribution():
     assert not verdict.health.any_trapped
 
 
-@pytest.mark.skipif(not capabilities.detect().anvil_resume,
-                    reason="installed anvil has no resume")
 def test_continuation_delegates_state_saving_to_the_latest_segment(tmp_path):
     """Resume state must describe where the chains ARE, not where they were."""
     import anvil
@@ -356,14 +403,11 @@ def test_continuation_delegates_state_saving_to_the_latest_segment(tmp_path):
     assert again.get_chain().shape == (10, 64, t.dim)
 
 
-@pytest.mark.skipif(not capabilities.detect().anvil_resume,
-                    reason="installed anvil has no resume")
 def test_per_chain_divergences_are_now_available():
     """anvil reports the vector, so the trapped-chain check can tell the two
     failure modes apart rather than guessing."""
     _, res, _, _, _ = _drive()
-    per_chain = capabilities.per_chain_divergences(res)
-    assert per_chain is not None
+    per_chain = res.extras["divergent_per_chain"]
     assert len(per_chain) == 64
     assert int(np.sum(per_chain)) == int(res.extras["n_divergent"])
 

@@ -1,50 +1,62 @@
-"""Feature detection for the external packages, with fallbacks.
+"""The external packages turin depends on: a minimum anvil, and what it reports.
 
-MetalPlanet, anvil and anvil-gp are developed separately and turin must work
-against whatever is currently published. Anything turin would like but cannot
-rely on is detected here rather than assumed, so that a missing feature
-degrades in one known place instead of raising somewhere deep in a fit.
+MetalPlanet, anvil and anvil-gp are developed separately. turin used to
+feature-detect each anvil capability it wanted and carry a fallback for
+installs that lacked it. Every one of those has since landed upstream, and
+anvil 0.3.0 also fixed a silent rank corruption in ``diagnose`` that older
+versions carry, so turin now **requires anvil >= 0.3.0** and uses its API
+directly: resumable runs, state save/load, the survivable prior boundary,
+per-chain divergence counts, ``ResumeState.with_positions`` and the
+memory-bounded ``diagnose``. :func:`require_anvil` is the one check, and it
+names the upgrade command rather than letting an old install fail somewhere
+deep in a fit.
 
-The briefs in ``docs/upstream/`` ask for the features that are currently
-missing. When one lands, the detection here picks it up with no other change.
+When turin starts relying on a new upstream feature, raise
+:data:`MIN_ANVIL` (or add a MetalPlanet minimum the same way) in the same
+change, rather than adding detection plus a fallback.
 """
 
 from __future__ import annotations
 
-import inspect
+import re
 from dataclasses import dataclass
 
-import numpy as np
+#: The oldest anvil turin runs against. 0.3.0 is the first with everything
+#: turin uses, and the first whose ``diagnose`` ranks correctly between
+#: 2,095,104 and 2^21 rows.
+MIN_ANVIL = (0, 3, 0)
+
+UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
+                'git+https://github.com/davidkipping/anvil.git"')
 
 
-def _has_param(fn, name):
-    try:
-        return name in inspect.signature(fn).parameters
-    except (TypeError, ValueError):       # builtins, C extensions
-        return False
+def version_tuple(version):
+    """Leading numeric components of a version: '0.3.0.dev1' -> (0, 3, 0)."""
+    m = re.match(r"\s*(\d+(?:\.\d+)*)", str(version))
+    return tuple(int(p) for p in m.group(1).split(".")) if m else ()
+
+
+def anvil_ok(version):
+    return version_tuple(version) >= MIN_ANVIL
+
+
+def require_anvil():
+    """Exit with the upgrade command if the installed anvil is too old."""
+    import anvil
+
+    have = getattr(anvil, "__version__", "unknown")
+    if not anvil_ok(have):
+        need = ".".join(map(str, MIN_ANVIL))
+        raise SystemExit(
+            f"turin needs anvil >= {need}, but {have} is installed. "
+            f"Upgrade with:\n  {UPGRADE_HINT}")
+    return have
 
 
 @dataclass(frozen=True)
 class Capabilities:
-    """What the installed versions of the external packages can do."""
+    """The installed versions, and the one optional feature turin reports."""
 
-    #: ``anvil.run(..., resume=...)`` continues a run with its adapted
-    #: step size, trajectory length and preconditioner frozen. Without it an
-    #: extension has to re-run warmup, which is both slower and not a
-    #: continuation of the same Markov chain.
-    anvil_resume: bool
-    #: ``Results.save_state`` / ``anvil.load_state`` for cross-process resume.
-    anvil_state_io: bool
-    #: per-chain divergence counts in ``Results.extras``. ``None`` because it
-    #: is a property of a completed run, not of the API surface: use
-    #: :func:`per_chain_divergences` on a ``Results`` to find out.
-    anvil_per_chain_divergences: bool | None
-    #: a progress callback on ``anvil.run``.
-    anvil_callback: bool
-    #: anvil's bounded-parameter log-Jacobian stays finite at the prior edge,
-    #: so a chain that reaches one can come back. A behaviour fix with no API
-    #: surface, so it is probed by evaluating the transform directly.
-    anvil_boundary_survivable: bool
     #: MetalPlanet exposes a tau-input fused kernel with in-kernel exposure
     #: integration. **Detected but not yet used**: turin builds ``z`` itself
     #: and calls ``flux_dev_metal``, which is correct and is what every
@@ -52,123 +64,37 @@ class Capabilities:
     #: performance change that needs its own parity tests, so it is deliberate
     #: rather than automatic.
     metalplanet_flux_dev_from_tau: bool
-    #: ``ResumeState.with_positions(u, target)``: move chains between
-    #: segments with every kernel-specific cached quantity recomputed by
-    #: anvil. Without it turin rewrites ChEES's ``u``/``log_prob``/``grad``
-    #: itself (:func:`set_positions`), which is correct for the ChEES state
-    #: of anvil 0.1 but not a documented contract.
-    anvil_with_positions: bool = False
     anvil_version: str = ""
     metalplanet_version: str = ""
 
     def summary(self):
-        """One line per capability, for the run log."""
-        rows = [
-            ("anvil resume (frozen adaptation)", self.anvil_resume,
-             "extensions re-run warmup"),
-            ("anvil state save/load", self.anvil_state_io,
-             "resume state stored by turin, chains restart"),
-            ("anvil survivable prior boundary", self.anvil_boundary_survivable,
-             "a chain reaching a bound is lost; the MAP-centred init ball "
-             "keeps chains away from one"),
-            ("anvil progress callback", self.anvil_callback,
-             "anvil prints its own progress"),
-            ("anvil ResumeState.with_positions", self.anvil_with_positions,
-             "grid-Gibbs rewrites the ChEES state itself"),
-        ]
-        out = [f"  anvil {self.anvil_version}, "
-               f"MetalPlanet {self.metalplanet_version}"]
-        for name, have, fallback in rows:
-            out.append(f"  {'yes' if have else 'no ':3s}  {name}"
-                       + ("" if have else f"  ->  {fallback}"))
-        out.append("  ?    anvil per-chain divergences  ->  checked per run")
-        out.append(
+        """The run-log header: versions, and whether anvil is new enough."""
+        need = ".".join(map(str, MIN_ANVIL))
+        ok = anvil_ok(self.anvil_version)
+        return "\n".join([
+            f"  anvil {self.anvil_version}, "
+            f"MetalPlanet {self.metalplanet_version}",
+            f"  {'yes' if ok else 'NO ':3s}  anvil >= {need} (resume, state "
+            "save/load, per-chain divergences, with_positions, bounded "
+            "diagnose)" + ("" if ok else f"  ->  {UPGRADE_HINT}"),
             f"  {'yes' if self.metalplanet_flux_dev_from_tau else 'no ':3s}  "
             "MetalPlanet tau-input kernel (available but not yet used: turin "
-            "builds z itself)")
-        return "\n".join(out)
+            "builds z itself)",
+        ])
 
 
 def detect():
-    """Probe the installed packages. Cheap; safe to call more than once."""
+    """Report the installed packages. Cheap; never raises on an old anvil,
+    so ``turin --capabilities`` can say what is wrong."""
     import anvil
     import metalplanet
 
-    results_cls = getattr(anvil, "Results", None)
     return Capabilities(
-        anvil_resume=_has_param(anvil.run, "resume"),
-        anvil_state_io=(hasattr(results_cls, "save_state")
-                        and hasattr(anvil, "load_state")),
-        anvil_per_chain_divergences=None,
-        anvil_callback=_has_param(anvil.run, "callback"),
-        anvil_boundary_survivable=_boundary_survivable(),
         metalplanet_flux_dev_from_tau=hasattr(metalplanet,
                                               "flux_dev_from_tau"),
-        anvil_with_positions=hasattr(getattr(anvil, "ResumeState", None),
-                                     "with_positions"),
         anvil_version=getattr(anvil, "__version__", "unknown"),
         metalplanet_version=getattr(metalplanet, "__version__", "unknown"),
     )
-
-
-def _boundary_survivable():
-    """Does a bounded parameter's log-Jacobian stay finite deep in the tail?
-
-    The probe anvil's own reply suggests: before the fix ``mx.sigmoid(25)``
-    saturates and ``log_det_jac`` returns ``-inf``, which made the boundary
-    absorbing under ChEES.
-    """
-    try:
-        import mlx.core as mx
-        from anvil import ParamSpec, Transform
-
-        tr = Transform([ParamSpec("p", lo=0.0, hi=1.0)])
-        return bool(mx.isfinite(tr.log_det_jac(mx.array([[25.0]]))).item())
-    except Exception:
-        return False
-
-
-def per_chain_divergences(results):
-    """Per-chain divergence counts, or ``None`` if anvil does not report them.
-
-    anvil accumulates these internally as a ``(n_chains,)`` array and then
-    sums them into ``extras["n_divergent"]``; the brief in
-    ``docs/upstream/anvil_prompt.md`` asks for the vector to be kept.
-    """
-    extras = getattr(results, "extras", {}) or {}
-    for key in ("divergent_per_chain", "n_divergent_per_chain"):
-        if key in extras:
-            return extras[key]
-    return None
-
-
-#: The ChEES state keys :func:`set_positions` knows how to rebuild. Anything
-#: else in a resume state means anvil's state has grown, and rewriting only
-#: these would leave a stale cache, so the fallback refuses.
-_CHEES_STATE_KEYS = {"u", "log_prob", "grad"}
-
-
-def set_positions(resume_state, u, target):
-    """A resume state with the chains moved to ``u`` (``(n_chains, dim)``).
-
-    Uses anvil's ``ResumeState.with_positions`` when present. The fallback
-    rebuilds the ChEES state turin knows (positions, log-density, gradient)
-    and refuses anything else rather than resume from a stale cache.
-    """
-    import mlx.core as mx
-
-    u = mx.array(np.asarray(u, dtype=np.float32))
-    if hasattr(resume_state, "with_positions"):
-        return resume_state.with_positions(u, target)
-    if resume_state.kernel != "ChEESHMC" or \
-            set(resume_state.state) != _CHEES_STATE_KEYS:
-        raise RuntimeError(
-            f"grid-Gibbs cannot move chains of a {resume_state.kernel} run "
-            f"with state {sorted(resume_state.state)} without anvil's "
-            "ResumeState.with_positions; run with --gibbsgrid=off")
-    lp, g = target.log_prob_and_grad(u)
-    resume_state.state = dict(resume_state.state, u=u, log_prob=lp, grad=g)
-    return resume_state
 
 
 def clear_mlx_cache():
