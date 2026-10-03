@@ -183,7 +183,8 @@ cannot pool chains drawn both ways.
 
 --chains=N                   sampling chains (default 512, raised to 4*dim)
 --sampler=chees|ensemble     gradient-based (default) or gradient-free
---warmup=N --samples=N --max-samples=N --leapfrog=N --seed=N
+--warmup=N                   warmup iterations (default 800)
+--samples=N --max-samples=N --leapfrog=N --seed=N
 --gibbsgrid=on|off           TTV fits: move chains between timing modes with
                              an exact grid-Gibbs step (default on), see below
 

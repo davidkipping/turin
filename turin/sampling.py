@@ -65,7 +65,11 @@ class SamplerConfig:
 
     sampler: str = "chees"          # "chees" or "ensemble"
     n_chains: int = 512
-    n_warmup: int = 400
+    #: 800, not 400: on KOI-7567.01's TTV fit (seed 0) warmup 400 hit the
+    #: draw cap unconverged in 107 min of sampling, 800 converged in 67 min;
+    #: on KOI-5162.01 LinEph, whose period posterior is bimodal, it cost
+    #: +12 min (72 vs 60) with no change in rounds. 1600 was slower on both.
+    n_warmup: int = 800
     n_samples: int = 300
     max_samples: int = 16384        # per chain, summed over rounds
     max_leapfrog: int = 128

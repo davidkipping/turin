@@ -75,7 +75,8 @@ usage: turin --KOI-448.02 [options]
 
   --chains=N              sampling chains (default 512, raised to 4*dim)
   --sampler=chees|ensemble  gradient-based (default) or gradient-free
-  --warmup=N --samples=N --max-samples=N
+  --warmup=N              warmup iterations (default 800)
+  --samples=N --max-samples=N
   --leapfrog=N            ChEES trajectory cap (default 128)
   --gibbsgrid=on|off      TTV fits: redraw every transit time from its exact
                           grid conditional between ChEES segments, so chains
@@ -130,7 +131,7 @@ class Args:
     sampler: str = "chees"
     profile_mode: str = "auto"
     geometry: str = "circular"
-    warmup: int = 400
+    warmup: int = 800
     samples: int = 300
     max_samples: int = 16384
     max_leapfrog: int = 128
