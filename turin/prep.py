@@ -59,30 +59,31 @@ def extract_near_transit_data(time, flux, flux_err, period, epoch,
 #: feasible transit zone (``|t - tc| <= T14/2 + tau_shift_max``). An epoch
 #: with only a point or two in transit is kept on purpose: its timing
 #: posterior comes back close to its prior, which grid-Gibbs samples
-#: correctly, rather than the epoch silently vanishing. ``prepare_data``
-#: takes its occupied epochs (which set the recentred reference epoch) from
-#: :func:`segment_epochs` itself, so the count and the fit cannot disagree;
-#: they used to (KOI-5897.01 logged 2 occupied epochs and fitted 3).
+#: correctly, rather than the epoch silently vanishing.
 MIN_IN_TRANSIT = 1
 
 
-def window_durations(eph, ttv_max_days=0.0):
+def window_durations(eph, ttv_max_days=0.0, log=None):
     """Half-width of each epoch's data window, in transit durations.
 
     N_DURATIONS normally; wider only when a declared TTV amplitude needs it,
-    so --TTVmax <= 3.5 T14 gives the same windows as a default run.
+    so --TTVmax <= 3.5 T14 gives the same windows as a default run. Refuses a
+    TTV amplitude of half the period or more, where epochs would overlap.
     """
-    n = N_DURATIONS
-    if ttv_max_days:
-        n = max(n, ttv_max_days / (eph["duration"] / 24.0) + 1.5)
+    if not ttv_max_days:
+        return N_DURATIONS
+    period, T14 = eph["period"], eph["duration"] / 24.0
+    if ttv_max_days >= 0.5 * period:
+        raise SystemExit(
+            f"turin: --TTVmax={ttv_max_days * 1440:.0f} min is at least half "
+            f"the period ({period:.4f} d); the epochs would overlap")
+    n = max(N_DURATIONS, ttv_max_days / T14 + 1.5)
+    if log:
+        if n * T14 > 0.45 * period:
+            log(f"  warning: windows of {n:.1f} durations span more than 45% "
+                "of the period; epochs may be poorly separated")
+        log(f"  --TTVmax widened the windows to {n:.2f} durations")
     return n
-
-
-def covers_transit(t, tc, half_transit):
-    """Number of points of ``t`` in the feasible transit zone around ``tc``,
-    and whether that is enough for the epoch to be fitted."""
-    n_in = int(np.sum(np.abs(np.asarray(t) - tc) <= half_transit))
-    return n_in, n_in >= MIN_IN_TRANSIT
 
 
 def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
@@ -102,15 +103,23 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
 
     Returns a dict with ``times_padded``, ``flux_padded``, ``ferr_padded``,
     ``mask`` (all ``(n_epochs, max_pts)``), ``epoch_centers``,
-    ``half_window``, ``n_epochs`` and ``max_pts``.
+    ``half_window``, ``n_epochs``, ``max_pts`` and ``n_in_transit`` (points
+    in each kept epoch's transit zone).
     """
     dur_days = duration_hours / 24.0
     half_window = n_durations * dur_days
     transit_times = _predicted_transit_times(time, period, epoch)
+    if transit_times.size == 0:
+        raise ValueError("No epochs with sufficient data points")
 
-    # nearest predicted centre for each point
-    nearest = np.argmin(
-        np.abs(time[:, None] - transit_times[None, :]), axis=1)
+    # nearest predicted centre for each point, in closed form: the centres
+    # are epoch + n*P, so this is O(N) rather than a dense (N, n_transits)
+    # distance matrix (~1.5 GB at P ~ 0.8 d). ceil(x - 1/2) breaks an exact
+    # tie toward the earlier centre, as argmin did.
+    n_lo = round((transit_times[0] - epoch) / period)
+    nearest = np.clip(
+        np.ceil((time - epoch) / period - 0.5).astype(np.int64) - n_lo,
+        0, transit_times.size - 1)
 
     half_transit = 0.5 * dur_days + tau_shift_max
     epoch_groups = []
@@ -121,8 +130,8 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         if np.sum(mask_i) < min_pts:
             continue
         t_epoch = time[mask_i]
-        n_in, ok = covers_transit(t_epoch, tt, half_transit)
-        if not ok:
+        n_in = int(np.sum(np.abs(t_epoch - tt) <= half_transit))
+        if n_in < MIN_IN_TRANSIT:
             continue
         epoch_groups.append((t_epoch, flux[mask_i], flux_err[mask_i]))
         epoch_centers.append(tt)
@@ -236,6 +245,17 @@ def optimize_legendre_orders(time, flux, flux_err, period, epoch,
         tw, fw, ew, period, epoch, duration_hours,
         n_durations=n_durations, tau_shift_max=tau_shift_max,
     )
+    return cv_orders(epoch_data, duration_hours, max_order=max_order,
+                     n_folds=n_folds, log=log, tau_shift_max=tau_shift_max)
+
+
+def cv_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER, n_folds=10,
+              log=None, tau_shift_max=0.0):
+    """The CV of :func:`optimize_legendre_orders` on an existing
+    segmentation, so the orders line up with exactly the epochs fitted."""
+    if log is None:
+        def log(msg):
+            pass
 
     n_epochs = epoch_data["n_epochs"]
     T14_days = duration_hours / 24.0
@@ -352,9 +372,17 @@ class PreparedData:
     cadence_days: float
     exposure_time: float
     num_resample: int
-    n_occupied: int
+    #: the per-epoch segmentation every downstream step uses (CV, both fit
+    #: modes), built once against ``eph``; see :func:`segment_epochs`
+    epoch_data: dict
+    #: half-width of each epoch window, in transit durations
+    n_durations: float
     mission: str = ""
     notes: list = field(default_factory=list)
+
+    @property
+    def n_occupied(self):
+        return self.epoch_data["n_epochs"]
 
 
 def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
@@ -411,28 +439,38 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         _log(f"  Masked {int(np.sum(~keep))} points from other planets")
         time, flux, flux_err = time[keep], flux[keep], flux_err[keep]
 
-    # occupied epochs: exactly the epochs the fit will use, by running the
-    # same windowing and segmentation (minimum points per window, nearest-
-    # centre assignment and all), so the recentring and the fit agree
-    n_dur = window_durations(eph, ttv_max_days)
-    tw, fw, ew = extract_near_transit_data(
-        time, flux, flux_err, eph["period"], eph["epoch"], eph["duration"],
-        n_durations=n_dur)
-    try:
-        seg = segment_epochs(tw, fw, ew, eph["period"], eph["epoch"],
-                             eph["duration"], n_durations=n_dur,
-                             tau_shift_max=ttv_max_days)
-    except ValueError:
-        raise ValueError(f"{target}: no occupied transit epochs in the data")
-    occupied = seg["epoch_centers"]
-    _log(f"  Found {len(occupied)} occupied epochs (points in transit: "
-         f"{', '.join(map(str, seg['n_in_transit']))})")
+    # The epochs, segmented once here and carried on PreparedData: the CV
+    # and every fit mode use this same epoch_data, so the occupied count,
+    # the recentring and the fit cannot disagree. Recentring needs the
+    # occupied epochs first, so a pass against the archive epoch finds them;
+    # recentring shifts by whole periods, so the final pass keeps the same
+    # epochs and only re-anchors their centres.
+    n_dur = window_durations(eph, ttv_max_days, log=_log)
+
+    def epochs_for(ephem):
+        tw, fw, ew = extract_near_transit_data(
+            time, flux, flux_err, ephem["period"], ephem["epoch"],
+            ephem["duration"], n_durations=n_dur)
+        try:
+            return segment_epochs(tw, fw, ew, ephem["period"],
+                                  ephem["epoch"], ephem["duration"],
+                                  n_durations=n_dur,
+                                  tau_shift_max=ttv_max_days)
+        except ValueError:
+            raise ValueError(
+                f"{target}: no occupied transit epochs in the data") from None
+
+    occupied = epochs_for(eph)["epoch_centers"]
 
     # recentre on the median occupied epoch, snapped to an integer number of
     # periods from the archive epoch: this decorrelates P from tau0
     n_median = round((float(np.median(occupied)) - eph["epoch"]) / eph["period"])
     eph_fit = dict(eph)
     eph_fit["epoch"] = eph["epoch"] + n_median * eph["period"]
+    epoch_data = epochs_for(eph_fit)
+    assert epoch_data["n_epochs"] == len(occupied)
+    _log(f"  Found {epoch_data['n_epochs']} occupied epochs (points in "
+         f"transit: {', '.join(map(str, epoch_data['n_in_transit']))})")
 
     cadence_days = float(lc.get("cadence_days") or cadence)
     n_resam = recommended_resample(eph, cadence_days, flux_err) or 1
@@ -453,7 +491,8 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         cadence_days=cadence_days,
         exposure_time=cadence_days,
         num_resample=n_resam,
-        n_occupied=len(occupied),
+        epoch_data=epoch_data,
+        n_durations=n_dur,
         mission=str(lc.get("mission", "")),
         notes=notes,
     )

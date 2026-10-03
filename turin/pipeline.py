@@ -80,29 +80,10 @@ def run(args, log=print):
         target, ttv_max_days=args.ttv_max_days or 0.0,
         sc_override=args.sc_override, log=log)
 
-    # window widening for declared TTVs: identical windows to a default run
-    # for TTVmax <= 3.5 T14, wider only when the timing prior needs it
-    T14_days = prepared.eph["duration"] / 24.0
-    n_durations = _prep.window_durations(prepared.eph,
-                                         args.ttv_max_days or 0.0)
-    if args.ttv_max_days:
-        if args.ttv_max_days >= 0.5 * prepared.eph["period"]:
-            raise SystemExit(
-                f"turin: --TTVmax={args.ttv_max_min} min is at least half the "
-                f"period ({prepared.eph['period']:.4f} d); the epochs would "
-                "overlap")
-        if n_durations * T14_days > 0.45 * prepared.eph["period"]:
-            log(f"  warning: windows of {n_durations:.1f} durations span more "
-                "than 45% of the period; epochs may be poorly separated")
-        log(f"  --TTVmax widened the windows to {n_durations:.2f} durations")
-
     log(f"[{target}] Cross-validating Legendre orders...")
-    cv = _prep.optimize_legendre_orders(
-        prepared.time, prepared.flux, prepared.flux_err,
-        prepared.eph["period"], prepared.eph["epoch"],
-        prepared.eph["duration"], n_durations=n_durations,
-        tau_shift_max=args.ttv_max_days or 0.0,
-        log=lambda m: log(f"  {m}"))
+    cv = _prep.cv_orders(prepared.epoch_data, prepared.eph["duration"],
+                         tau_shift_max=args.ttv_max_days or 0.0,
+                         log=lambda m: log(f"  {m}"))
 
     lineph_ml = None
     outcome = {}             # mode -> final Verdict, or a note if skipped
@@ -110,8 +91,7 @@ def run(args, log=print):
         try:
             lineph_ml = _fit_mode(
                 mode, args, prepared, cv, outdir, log=log,
-                n_durations=n_durations, outcome=outcome,
-                lineph_ml=lineph_ml) or lineph_ml
+                outcome=outcome, lineph_ml=lineph_ml) or lineph_ml
         except SystemExit:
             raise
         except Exception as exc:
@@ -143,25 +123,13 @@ def _report_outcome(target, outcome, log):
     return EXIT_UNCONVERGED if unconverged else 0
 
 
-def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
-              outcome, lineph_ml=None):
+def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
+              lineph_ml=None):
     """Run one fit mode. Returns the ML shape dict for LinEph, else None."""
     target = prepared.target
-    tau_shift = args.ttv_max_days or 0.0
-
-    tw, fw, ew = _prep.extract_near_transit_data(
-        prepared.time, prepared.flux, prepared.flux_err,
-        prepared.eph["period"], prepared.eph["epoch"],
-        prepared.eph["duration"], n_durations=n_durations)
-    epoch_data = _prep.segment_epochs(
-        tw, fw, ew, prepared.eph["period"], prepared.eph["epoch"],
-        prepared.eph["duration"], n_durations=n_durations,
-        tau_shift_max=tau_shift)
+    epoch_data = prepared.epoch_data
     centering = _prep.centering_constants(epoch_data, prepared.eph)
-    orders = np.asarray(cv["orders"])[:epoch_data["n_epochs"]]
-    if orders.size != epoch_data["n_epochs"]:
-        # the CV ran on its own segmentation; fall back to hurin's default
-        orders = np.full(epoch_data["n_epochs"], 2)
+    orders = np.asarray(cv["orders"])
 
     n_ep = epoch_data["n_epochs"]
     log(f"[{target}] {mode}: {n_ep} epochs, "
@@ -530,8 +498,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
-        n_durations=float(epoch_data["half_window"]
-                          / (prepared.eph["duration"] / 24.0)),
+        n_durations=float(prepared.n_durations),
         legendre_orders=np.asarray(orders), exposure_time=prepared.exposure_time,
         num_resample=prepared.num_resample,
         n_samples_done=int(verdict.n_draws), done=bool(verdict.converged),

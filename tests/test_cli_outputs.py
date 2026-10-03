@@ -388,25 +388,33 @@ def test_one_rule_decides_occupied_and_fitted_epochs():
     f = np.ones_like(t)
     e = np.full_like(t, 1e-4)
 
-    n_in, ok = prep.covers_transit(t, tc2, half)
-    assert n_in == 1 and ok
-    assert prep.covers_transit(t, 100.0, half) == (0, False)  # no data there
-
     tw, fw, ew = prep.extract_near_transit_data(t, f, e, P, T0, dur_h)
     ed = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
     assert np.any(np.isclose(ed["epoch_centers"], tc2))
 
 
-def test_a_neighbour_only_search_triggers_the_kic_retry():
-    """If the name search returns only a neighbour's light curves, the
-    download must retry by the host's KIC rather than refuse outright."""
+def test_search_star_queries_by_catalogue_number(monkeypatch):
+    """The host's KIC/TIC is searched directly when the archive has it (a
+    name can miss, or pull in a neighbour); the name only when it does not.
+    A neighbour in the result is still filtered out."""
     from turin.data import lightcurve as L
 
-    neighbour_only = _FakeSearch(["kplr008423352"] * 18)
-    assert L._lacks_star(neighbour_only, 8423344)
-    assert not L._lacks_star(_FakeSearch(["kplr008423344"] * 3), 8423344)
-    assert not L._lacks_star(neighbour_only, None)      # nothing to check
-    assert not L._lacks_star(_FakeSearch([]), 8423344)  # empty: other path
+    queries = []
+
+    def fake_search(query, **kw):
+        queries.append((query, kw))
+        return _FakeSearch(["kplr008423344"] * 14 + ["kplr008423352"] * 2)
+
+    monkeypatch.setattr(L.lk, "search_lightcurve", fake_search)
+    koi = {"name": "KOI-7592.01", "type": "koi"}
+    got = L._search_star(koi, 8423344, "Kepler", author="Kepler")
+    assert queries[-1] == ("KIC 8423344", {"author": "Kepler"})
+    assert set(got.table["target_name"]) == {"kplr008423344"}
+    L._search_star({"name": "TOI-406.01", "type": "toi"}, 8423344, "TESS")
+    assert queries[-1][0] == "TIC 8423344"
+    with pytest.raises(ValueError, match="several stars"):
+        L._search_star(koi, None, "Kepler")       # name search, two stars
+    assert queries[-1][0] == "KOI-7592.01"
 
 
 def test_occupied_epochs_come_from_the_fitted_segmentation(monkeypatch):

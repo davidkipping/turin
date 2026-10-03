@@ -188,12 +188,30 @@ def _restrict_to_star(search, star, info, progress=None):
     return search
 
 
-def _lacks_star(search, star):
-    """True when the search has rows, the host star is known, and none of
-    the rows are the host's: the name resolved to a neighbour only."""
-    if search is None or len(search) == 0 or star is None:
-        return False
-    return star not in {_target_number(n) for n in search.table["target_name"]}
+def _search_star(info, star, mission, progress=None, **kwargs):
+    """MAST search for the target's own star: by KIC/TIC when known.
+
+    Searching by catalogue number returns the host's files and nothing else,
+    where a name search can miss entirely ("KOI-5162.01" does not resolve)
+    or pull in a neighbour ("KOI-7592.01" returns two stars, both at 0").
+    Measured on KOI-4848.01, KOI-448.02, TOI-406.01 and TOI-700.01, the two
+    searches return identical host files. The name is used only when the
+    archive has no catalogue number, and :func:`_restrict_to_star` still
+    guards the result.
+    """
+    label = "KIC" if info["type"] == "koi" else "TIC"
+    query = f"{label} {star}" if star is not None else info["name"]
+    if progress:
+        progress(f"Searching MAST for {info['name']} ({query})...")
+    try:
+        search = lk.search_lightcurve(query, **kwargs)
+    except TimeoutError:
+        if progress:
+            progress("MAST timed out; retrying once...")
+        search = lk.search_lightcurve(query, **kwargs)
+    if len(search) == 0:
+        raise ValueError(f"No {mission} light curves found for {info['name']}")
+    return _restrict_to_star(search, star, info, progress)
 
 
 def _mixed_target_problem(time):
@@ -216,29 +234,7 @@ def _download(info, star, author, cadence, mission, label, progress=None):
     if cadence is not None:
         kwargs["cadence"] = cadence
 
-    if progress:
-        progress(f"Searching MAST for {info['name']}...")
-
-    try:
-        search = lk.search_lightcurve(info["name"], **kwargs)
-    except TimeoutError:
-        if info.get("type") != "koi":
-            raise
-        if progress:
-            progress(f"MAST timed out on {info['name']}, retrying with KIC identifier...")
-        search = None
-
-    # KOI fallback: search by KIC if the KOI name did not resolve, timed
-    # out, or resolved only to a neighbouring star
-    if info.get("type") == "koi" and star is not None and (
-            search is None or len(search) == 0 or _lacks_star(search, star)):
-        if progress:
-            progress(f"Retrying MAST search with KIC {star}...")
-        search = lk.search_lightcurve(f"KIC {star}", **kwargs)
-
-    if search is None or len(search) == 0:
-        raise ValueError(f"No {mission.title()} light curves found for {info['name']}")
-    search = _restrict_to_star(search, star, info, progress)
+    search = _search_star(info, star, mission.title(), progress, **kwargs)
 
     total = len(search)
     lc_list = []
@@ -252,27 +248,7 @@ def _download(info, star, author, cadence, mission, label, progress=None):
 
 def _download_kepler_sc(info, star, progress=None):
     """Download Kepler data preferring SC over LC per quarter."""
-    if progress:
-        progress(f"Searching MAST for {info['name']} (all cadences)...")
-
-    try:
-        search = lk.search_lightcurve(info["name"], author="Kepler")
-    except TimeoutError:
-        if progress:
-            progress(f"MAST timed out on {info['name']}, retrying with KIC identifier...")
-        search = None
-
-    # KOI fallback: search by KIC if the KOI name did not resolve, timed
-    # out, or resolved only to a neighbouring star
-    if star is not None and (search is None or len(search) == 0
-                             or _lacks_star(search, star)):
-        if progress:
-            progress(f"Retrying MAST search with KIC {star}...")
-        search = lk.search_lightcurve(f"KIC {star}", author="Kepler")
-
-    if search is None or len(search) == 0:
-        raise ValueError(f"No Kepler light curves found for {info['name']}")
-    search = _restrict_to_star(search, star, info, progress)
+    search = _search_star(info, star, "Kepler", progress, author="Kepler")
 
     search_table = search.table
     exptimes = np.array(search_table["t_exptime"], dtype=float)
@@ -380,13 +356,7 @@ def _pick_best_per_group(exptimes, groups, group_ids, pref_order, label_name):
 
 def _download_tess(info, star, sc_override=False, progress=None):
     """Download TESS data with per-sector cadence preference."""
-    if progress:
-        progress(f"Searching MAST for {info['name']} (all cadences)...")
-
-    search = lk.search_lightcurve(info["name"], author="SPOC")
-    if len(search) == 0:
-        raise ValueError(f"No TESS light curves found for {info['name']}")
-    search = _restrict_to_star(search, star, info, progress)
+    search = _search_star(info, star, "TESS", progress, author="SPOC")
 
     search_table = search.table
     exptimes = np.array(search_table["t_exptime"], dtype=float)
