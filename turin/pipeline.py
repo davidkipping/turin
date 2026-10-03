@@ -83,14 +83,14 @@ def run(args, log=print):
     # window widening for declared TTVs: identical windows to a default run
     # for TTVmax <= 3.5 T14, wider only when the timing prior needs it
     T14_days = prepared.eph["duration"] / 24.0
-    n_durations = _prep.N_DURATIONS
+    n_durations = _prep.window_durations(prepared.eph,
+                                         args.ttv_max_days or 0.0)
     if args.ttv_max_days:
         if args.ttv_max_days >= 0.5 * prepared.eph["period"]:
             raise SystemExit(
                 f"turin: --TTVmax={args.ttv_max_min} min is at least half the "
                 f"period ({prepared.eph['period']:.4f} d); the epochs would "
                 "overlap")
-        n_durations = max(n_durations, args.ttv_max_days / T14_days + 1.5)
         if n_durations * T14_days > 0.45 * prepared.eph["period"]:
             log(f"  warning: windows of {n_durations:.1f} durations span more "
                 "than 45% of the period; epochs may be poorly separated")

@@ -395,3 +395,49 @@ def test_one_rule_decides_occupied_and_fitted_epochs():
     tw, fw, ew = prep.extract_near_transit_data(t, f, e, P, T0, dur_h)
     ed = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
     assert np.any(np.isclose(ed["epoch_centers"], tc2))
+
+
+def test_a_neighbour_only_search_triggers_the_kic_retry():
+    """If the name search returns only a neighbour's light curves, the
+    download must retry by the host's KIC rather than refuse outright."""
+    from turin.data import lightcurve as L
+
+    neighbour_only = _FakeSearch(["kplr008423352"] * 18)
+    assert L._lacks_star(neighbour_only, 8423344)
+    assert not L._lacks_star(_FakeSearch(["kplr008423344"] * 3), 8423344)
+    assert not L._lacks_star(neighbour_only, None)      # nothing to check
+    assert not L._lacks_star(_FakeSearch([]), 8423344)  # empty: other path
+
+
+def test_occupied_epochs_come_from_the_fitted_segmentation(monkeypatch):
+    """prepare_data's occupied epochs (which set the recentred epoch) must be
+    exactly the epochs segment_epochs fits, including its minimum-points and
+    nearest-centre rules. Epoch at tc=25 keeps one in-transit point but only
+    3 points in its whole window, so segment_epochs drops it; the occupied
+    count must drop it too."""
+    from turin import prep
+
+    P, T0, dur_h = 10.0, 5.0, 4.8
+    cad = 29.4 / 1440
+    t = np.arange(0.0, 45.0, cad)
+    tc = 25.0
+    near = np.where(np.abs(t - tc) <= 5.0 * dur_h / 24)[0]
+    keep = np.ones(t.size, bool)
+    keep[near] = False
+    keep[near[len(near) // 2 - 1: len(near) // 2 + 2]] = True  # 3 points
+    t = t[keep]
+    lc = {"time": t, "flux": np.ones_like(t), "flux_err": np.full(t.size, 1e-4),
+          "quality": np.zeros(t.size, int), "mission": "kepler",
+          "cadence_days": cad}
+    eph = {"period": P, "epoch": T0, "duration": dur_h, "depth": 1000.0}
+    monkeypatch.setattr(prep, "get_lightcurve", lambda *a, **k: dict(lc))
+    monkeypatch.setattr(prep, "get_ephemeris", lambda *a, **k: dict(eph))
+    monkeypatch.setattr(prep, "get_other_planet_ephemerides",
+                        lambda *a, **k: [])
+    logs = []
+    prepared = prep.prepare_data("KOI-1.01", log=logs.append)
+    tw, fw, ew = prep.extract_near_transit_data(
+        prepared.time, prepared.flux, prepared.flux_err, P, T0, dur_h)
+    fitted = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
+    assert not np.any(np.isclose(fitted["epoch_centers"], tc))
+    assert prepared.n_occupied == fitted["n_epochs"]

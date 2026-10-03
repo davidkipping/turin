@@ -188,6 +188,14 @@ def _restrict_to_star(search, star, info, progress=None):
     return search
 
 
+def _lacks_star(search, star):
+    """True when the search has rows, the host star is known, and none of
+    the rows are the host's: the name resolved to a neighbour only."""
+    if search is None or len(search) == 0 or star is None:
+        return False
+    return star not in {_target_number(n) for n in search.table["target_name"]}
+
+
 def _mixed_target_problem(time):
     """Why a stitched light curve cannot be one star's, or None.
 
@@ -220,9 +228,10 @@ def _download(info, star, author, cadence, mission, label, progress=None):
             progress(f"MAST timed out on {info['name']}, retrying with KIC identifier...")
         search = None
 
-    # KOI fallback: search by KIC if the KOI name did not resolve or timed out
-    if (search is None or len(search) == 0) and info.get("type") == "koi" \
-            and star is not None:
+    # KOI fallback: search by KIC if the KOI name did not resolve, timed
+    # out, or resolved only to a neighbouring star
+    if info.get("type") == "koi" and star is not None and (
+            search is None or len(search) == 0 or _lacks_star(search, star)):
         if progress:
             progress(f"Retrying MAST search with KIC {star}...")
         search = lk.search_lightcurve(f"KIC {star}", **kwargs)
@@ -253,8 +262,10 @@ def _download_kepler_sc(info, star, progress=None):
             progress(f"MAST timed out on {info['name']}, retrying with KIC identifier...")
         search = None
 
-    # KOI fallback: search by KIC if the KOI name did not resolve or timed out
-    if (search is None or len(search) == 0) and star is not None:
+    # KOI fallback: search by KIC if the KOI name did not resolve, timed
+    # out, or resolved only to a neighbouring star
+    if star is not None and (search is None or len(search) == 0
+                             or _lacks_star(search, star)):
         if progress:
             progress(f"Retrying MAST search with KIC {star}...")
         search = lk.search_lightcurve(f"KIC {star}", author="Kepler")

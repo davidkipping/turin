@@ -56,14 +56,26 @@ def extract_near_transit_data(time, flux, flux_err, period, epoch,
 
 
 #: An epoch is fitted when at least this many points fall inside its
-#: feasible transit zone (``|t - tc| <= T14/2 + tau_shift_max``). One rule,
-#: used both to count occupied epochs (which sets the recentred reference
-#: epoch) and to choose which epochs are fitted; the two used to differ
-#: (>1 vs >=1), so KOI-5897.01 logged 2 occupied epochs and fitted 3. An
-#: epoch with only a point or two in transit is kept on purpose: its timing
+#: feasible transit zone (``|t - tc| <= T14/2 + tau_shift_max``). An epoch
+#: with only a point or two in transit is kept on purpose: its timing
 #: posterior comes back close to its prior, which grid-Gibbs samples
-#: correctly, rather than the epoch silently vanishing.
+#: correctly, rather than the epoch silently vanishing. ``prepare_data``
+#: takes its occupied epochs (which set the recentred reference epoch) from
+#: :func:`segment_epochs` itself, so the count and the fit cannot disagree;
+#: they used to (KOI-5897.01 logged 2 occupied epochs and fitted 3).
 MIN_IN_TRANSIT = 1
+
+
+def window_durations(eph, ttv_max_days=0.0):
+    """Half-width of each epoch's data window, in transit durations.
+
+    N_DURATIONS normally; wider only when a declared TTV amplitude needs it,
+    so --TTVmax <= 3.5 T14 gives the same windows as a default run.
+    """
+    n = N_DURATIONS
+    if ttv_max_days:
+        n = max(n, ttv_max_days / (eph["duration"] / 24.0) + 1.5)
+    return n
 
 
 def covers_transit(t, tc, half_transit):
@@ -103,15 +115,18 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     half_transit = 0.5 * dur_days + tau_shift_max
     epoch_groups = []
     epoch_centers = []
+    n_in_transit = []
     for i, tt in enumerate(transit_times):
         mask_i = nearest == i
         if np.sum(mask_i) < min_pts:
             continue
         t_epoch = time[mask_i]
-        if not covers_transit(t_epoch, tt, half_transit)[1]:
+        n_in, ok = covers_transit(t_epoch, tt, half_transit)
+        if not ok:
             continue
         epoch_groups.append((t_epoch, flux[mask_i], flux_err[mask_i]))
         epoch_centers.append(tt)
+        n_in_transit.append(n_in)
 
     n_epochs = len(epoch_groups)
     if n_epochs == 0:
@@ -142,6 +157,7 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         "half_window": half_window,
         "n_epochs": n_epochs,
         "max_pts": max_pts,
+        "n_in_transit": np.array(n_in_transit, dtype=int),
     }
 
 
@@ -395,20 +411,22 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         _log(f"  Masked {int(np.sum(~keep))} points from other planets")
         time, flux, flux_err = time[keep], flux[keep], flux_err[keep]
 
-    # occupied epochs: the same rule segment_epochs uses to choose what is
-    # fitted, so the recentring and the fit agree on which epochs exist
-    half_dur_target = (eph["duration"] / 24.0) / 2.0 + ttv_max_days
-    occupied, counts = [], []
-    for tt in _predicted_transit_times(time, eph["period"], eph["epoch"]):
-        n_in, ok = covers_transit(time, tt, half_dur_target)
-        if ok:
-            occupied.append(tt)
-            counts.append(n_in)
-    occupied = np.array(occupied)
-    if len(occupied) == 0:
+    # occupied epochs: exactly the epochs the fit will use, by running the
+    # same windowing and segmentation (minimum points per window, nearest-
+    # centre assignment and all), so the recentring and the fit agree
+    n_dur = window_durations(eph, ttv_max_days)
+    tw, fw, ew = extract_near_transit_data(
+        time, flux, flux_err, eph["period"], eph["epoch"], eph["duration"],
+        n_durations=n_dur)
+    try:
+        seg = segment_epochs(tw, fw, ew, eph["period"], eph["epoch"],
+                             eph["duration"], n_durations=n_dur,
+                             tau_shift_max=ttv_max_days)
+    except ValueError:
         raise ValueError(f"{target}: no occupied transit epochs in the data")
-    _log(f"  Found {len(occupied)} occupied epochs "
-         f"(points in transit: {', '.join(map(str, counts))})")
+    occupied = seg["epoch_centers"]
+    _log(f"  Found {len(occupied)} occupied epochs (points in transit: "
+         f"{', '.join(map(str, seg['n_in_transit']))})")
 
     # recentre on the median occupied epoch, snapped to an integer number of
     # periods from the archive epoch: this decorrelates P from tau0

@@ -235,6 +235,26 @@ turin is float32 on the GPU for the same reason, at MetalPlanet's measured
 `validate_precision`, `certify` and all reporting. So turin is no worse in
 its hot loop and strictly better where it matters for adjudication.
 
+## 4. Data selection: occupied epochs and the star downloaded (turin >= 0.1.26)
+
+Two data-handling differences, neither in the model:
+
+- **Occupied epochs.** hurin counts an epoch as occupied with more than one
+  point in its transit zone, and fits epochs chosen by a separate test
+  (at least one point, at least 4 in the window, nearest-centre
+  assignment); the two can disagree, which matters because the occupied
+  list sets the recentred reference epoch. turin takes its occupied epochs
+  from the fitting segmentation itself (0.1.27), so they always agree.
+  For almost every target the epochs, and so the comparison, are
+  identical; they differ only when an epoch has exactly one point in
+  transit or too few points in its window. KOI-518.02 is unaffected.
+- **One star.** turin restricts MAST results to the host's KIC/TIC
+  (0.1.26). hurin downloads every row of the name search, which for
+  KOI-7592.01 includes a neighbouring star; see
+  `docs/upstream/hurin_lightcurve_prompt.md`. Targets whose search returns
+  one star, which includes every comparison target in this document, are
+  unaffected.
+
 ## Secondary comparison: KOI-448.02, where the model differences bite
 
 Kept for what KOI-518.02 cannot show. This target is **grazing**, so the

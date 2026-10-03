@@ -7,7 +7,7 @@ The version here is the runtime source of truth (the install is editable);
 keep it in sync with pyproject.toml and add a VERSIONS.md row per commit.
 """
 
-__version__ = "0.1.26"
+__version__ = "0.1.27"
 
 #: Revision of the *likelihood itself*, as distinct from the package version.
 #:
@@ -22,4 +22,4 @@ __version__ = "0.1.26"
 #: MODEL_REV catches the model changing underneath an unchanged command line.
 #: Following hurin, which added the same mechanism in 0.1.68 after a
 #: limb-darkening fix silently altered its likelihood.
-MODEL_REV = 4
+MODEL_REV = 5
