@@ -50,9 +50,21 @@ def launch_command():
     return " ".join([os.path.basename(sys.argv[0])] + sys.argv[1:])
 
 
+_RUN_STATUS = ""
+
+
+def set_run_status(status):
+    """A note appended to every provenance line: '' once a fit has converged,
+    'in progress: ...' between rounds, 'UNCONVERGED: ...' at the draw cap."""
+    global _RUN_STATUS
+    _RUN_STATUS = status or ""
+
+
 def provenance():
-    """The stamp on line 2 of every CSV: version, model revision, command."""
-    return f"# turin {__version__} rev{MODEL_REV} | {launch_command()}"
+    """The stamp on line 2 of every CSV: version, model revision, command,
+    and the fit's status when it has not converged."""
+    stamp = f"# turin {__version__} rev{MODEL_REV} | {launch_command()}"
+    return stamp + (f" | {_RUN_STATUS}" if _RUN_STATUS else "")
 
 
 def product_path(outdir, target, mode, name, ext):

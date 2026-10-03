@@ -67,6 +67,11 @@ def fake_target(monkeypatch):
     return lc
 
 
+#: A run that finished: converged (0) or stopped unconverged at the draw cap
+#: (EXIT_UNCONVERGED). The tiny fits here are not meant to converge.
+FINISHED = (0, pipeline.EXIT_UNCONVERGED)
+
+
 def _args(tmp_path, **over):
     base = dict(target="KOI-1.01", modes=("lineph",), chains=32, warmup=60,
                 samples=40, max_samples=40, outdir=str(tmp_path), seed=0)
@@ -78,7 +83,7 @@ def _args(tmp_path, **over):
 
 def test_lineph_pipeline_writes_every_product(tmp_path, fake_target):
     logs = []
-    assert pipeline.run(_args(tmp_path), log=logs.append) == 0
+    assert pipeline.run(_args(tmp_path), log=logs.append) in FINISHED
     out = os.path.join(str(tmp_path))
     names = sorted(os.listdir(out))
 
@@ -110,7 +115,7 @@ def test_lineph_pipeline_writes_every_product(tmp_path, fake_target):
 def test_recovered_parameters_are_in_the_right_region(tmp_path, fake_target):
     """A cheap fit, but it must still land near the injected truth."""
     assert pipeline.run(_args(tmp_path, chains=64, warmup=150, samples=100,
-                              max_samples=100), log=lambda m: None) == 0
+                              max_samples=100), log=lambda m: None) in FINISHED
     arr = np.genfromtxt(os.path.join(str(tmp_path),
                                      "KOI-1.01_lineph_summary.csv"),
                         delimiter=",", names=True, dtype=None, encoding="utf-8")
@@ -124,7 +129,7 @@ def test_recovered_parameters_are_in_the_right_region(tmp_path, fake_target):
 
 def test_ttv_pipeline_writes_the_two_extra_products(tmp_path, fake_target):
     assert pipeline.run(_args(tmp_path, modes=("ttv",)),
-                        log=lambda m: None) == 0
+                        log=lambda m: None) in FINISHED
     names = sorted(os.listdir(str(tmp_path)))
     assert any(n.endswith("_ttv_times.csv") for n in names), names
     assert any(n.endswith("_ttv_oc.pdf") for n in names), names
@@ -204,7 +209,7 @@ def test_pl_probe_runs_by_default_and_records_its_choice(tmp_path, fake_target):
     logs = []
     args = _args(tmp_path)
     assert args.profile_mode == "auto"
-    assert pipeline.run(args, log=logs.append) == 0
+    assert pipeline.run(args, log=logs.append) in FINISHED
     text = "\n".join(logs)
     assert "PL probe" in text and "chose" in text
     for mode in profile.PROFILE_MODES:
@@ -261,6 +266,40 @@ def test_hurin_parity_mode_runs(tmp_path, fake_target):
     """The parity configuration must be a working configuration, not just flags."""
     assert pipeline.run(
         _args(tmp_path, geometry="chord", profile_mode="ratio"),
-        log=lambda m: None) == 0
+        log=lambda m: None) in FINISHED
     state = outputs.load_resume(str(tmp_path), "KOI-1.01", "lineph")
     assert (state.geometry, state.profile_mode) == ("chord", "ratio")
+
+
+def test_an_unconverged_run_exits_3_and_stamps_its_products(tmp_path,
+                                                            fake_target):
+    """40 draws/chain cannot meet the gates: the run must still finish,
+    write every product, exit EXIT_UNCONVERGED, and say so on line 2."""
+    logs = []
+    code = pipeline.run(_args(tmp_path), log=logs.append)
+    assert code == pipeline.EXIT_UNCONVERGED
+    assert any("NOT CONVERGED" in l for l in logs)
+    for name in ("summary", "logrho", "lcdata"):
+        with open(os.path.join(str(tmp_path),
+                               f"KOI-1.01_lineph_{name}.csv")) as fh:
+            line2 = fh.read().splitlines()[1]
+        assert line2.startswith("# turin") and "UNCONVERGED" in line2
+    # still readable by hurin-style analysis scripts
+    arr = np.genfromtxt(os.path.join(str(tmp_path),
+                                     "KOI-1.01_lineph_summary.csv"),
+                        delimiter=",", names=True, dtype=None, encoding="utf-8")
+    assert "dP" in [str(r["Parameter"]) for r in np.atleast_1d(arr)]
+
+
+def test_report_outcome_maps_verdicts_to_exit_codes():
+    class V:
+        def __init__(self, ok):
+            self.converged, self.n_draws = ok, 300
+            self.worst_rhat = ("k", 1.02)
+
+    log = []
+    assert pipeline._report_outcome("T", {"lineph": V(True)}, log.append) == 0
+    assert pipeline._report_outcome(
+        "T", {"lineph": V(True), "ttv": V(False)}, log.append) == 3
+    assert pipeline._report_outcome(
+        "T", {"lineph": "converged earlier"}, log.append) == 0

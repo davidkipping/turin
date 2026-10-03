@@ -106,6 +106,10 @@ usage: turin --KOI-448.02 [options]
   --capabilities          report what the installed anvil/MetalPlanet can do
   --version --help
 
+Exit codes: 0 every fit converged; 3 finished, but a fit stopped at the
+draw cap unconverged (its products say so on line 2); anything else is an
+error.
+
 Against hurin >= 0.1.68 the orbit model is the only model difference:
 --geometry=chord --PL=ratio reproduces hurin. See docs/hurin-differences.md.
 """

@@ -55,6 +55,24 @@ def extract_near_transit_data(time, flux, flux_err, period, epoch,
     return time[keep], flux[keep], flux_err[keep]
 
 
+#: An epoch is fitted when at least this many points fall inside its
+#: feasible transit zone (``|t - tc| <= T14/2 + tau_shift_max``). One rule,
+#: used both to count occupied epochs (which sets the recentred reference
+#: epoch) and to choose which epochs are fitted; the two used to differ
+#: (>1 vs >=1), so KOI-5897.01 logged 2 occupied epochs and fitted 3. An
+#: epoch with only a point or two in transit is kept on purpose: its timing
+#: posterior comes back close to its prior, which grid-Gibbs samples
+#: correctly, rather than the epoch silently vanishing.
+MIN_IN_TRANSIT = 1
+
+
+def covers_transit(t, tc, half_transit):
+    """Number of points of ``t`` in the feasible transit zone around ``tc``,
+    and whether that is enough for the epoch to be fitted."""
+    n_in = int(np.sum(np.abs(np.asarray(t) - tc) <= half_transit))
+    return n_in, n_in >= MIN_IN_TRANSIT
+
+
 def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
                    n_durations=N_DURATIONS, min_pts=4, tau_shift_max=0.0):
     """Segment windowed data into per-epoch padded 2D arrays.
@@ -90,7 +108,7 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         if np.sum(mask_i) < min_pts:
             continue
         t_epoch = time[mask_i]
-        if np.sum(np.abs(t_epoch - tt) <= half_transit) == 0:
+        if not covers_transit(t_epoch, tt, half_transit)[1]:
             continue
         epoch_groups.append((t_epoch, flux[mask_i], flux_err[mask_i]))
         epoch_centers.append(tt)
@@ -377,15 +395,20 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         _log(f"  Masked {int(np.sum(~keep))} points from other planets")
         time, flux, flux_err = time[keep], flux[keep], flux_err[keep]
 
-    # occupied epochs: more than one point inside the feasible transit zone
+    # occupied epochs: the same rule segment_epochs uses to choose what is
+    # fitted, so the recentring and the fit agree on which epochs exist
     half_dur_target = (eph["duration"] / 24.0) / 2.0 + ttv_max_days
-    occupied = np.array([
-        tt for tt in _predicted_transit_times(time, eph["period"], eph["epoch"])
-        if int(np.sum(np.abs(time - tt) <= half_dur_target)) > 1
-    ])
+    occupied, counts = [], []
+    for tt in _predicted_transit_times(time, eph["period"], eph["epoch"]):
+        n_in, ok = covers_transit(time, tt, half_dur_target)
+        if ok:
+            occupied.append(tt)
+            counts.append(n_in)
+    occupied = np.array(occupied)
     if len(occupied) == 0:
         raise ValueError(f"{target}: no occupied transit epochs in the data")
-    _log(f"  Found {len(occupied)} occupied epochs")
+    _log(f"  Found {len(occupied)} occupied epochs "
+         f"(points in transit: {', '.join(map(str, counts))})")
 
     # recentre on the median occupied epoch, snapped to an integer number of
     # periods from the archive epoch: this decorrelates P from tau0

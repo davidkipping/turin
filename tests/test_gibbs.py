@@ -144,3 +144,34 @@ def test_round_loop_moves_chains_through_with_positions():
     assert isinstance(results, sampling.Continuation)
     assert results.get_chain().shape == (total, 64, layout.dim)
     assert np.all(np.isfinite(results.get_log_prob()))
+
+
+def test_epoch_snr_matches_the_injected_transit():
+    """Per-epoch SNR = sqrt(2 dlnL) against a k->0 null that still fits its
+    own baseline. On synthetic data with a curved baseline it must match the
+    noise-free transit's sqrt(sum((F-1)/sigma)^2), epoch by epoch. (The old
+    null, a flat 1.0 with no baseline, credited baseline structure to the
+    transit.)"""
+    from turin import model as M, pipeline
+
+    yerr = 2.5e-3
+    layout, transform, lp, n_ep, shape = _setup(0.0, yerr)
+    ed, cen, _, _ = build_dataset(0.0, yerr=yerr)
+    v_true = np.concatenate([shape, np.zeros(n_ep)])
+    snr = pipeline._epoch_snr(lp, layout, v_true)
+
+    grid = M.build_grid(cen, prep.supersample_offsets(29.4 / 1440, 7),
+                        dtype=mx.float64, exp_time=29.4 / 1440)
+    col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
+    with mx.stream(mx.cpu):
+        mid = M.mid_times_ttv(grid, mx.zeros((1, n_ep), dtype=mx.float64))
+        f = np.array(M.transit_flux(grid, mid=mid, k=col(K_T), b=col(B_T),
+                                    T14=col(T14_T), q1=col(0.30),
+                                    q2=col(0.225), period=col(P_REF)),
+                     dtype=np.float64)[0]
+    mask = np.asarray(ed["mask"]) > 0
+    expected = np.sqrt(np.sum(np.where(mask, (f - 1.0) / yerr, 0.0) ** 2,
+                              axis=1))
+    assert expected.min() > 8                      # a real detection per epoch
+    # noise moves 2 dlnL by ~2 expected-SNR, i.e. SNR by ~1
+    np.testing.assert_allclose(snr, expected, atol=3.0)

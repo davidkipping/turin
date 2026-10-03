@@ -50,6 +50,10 @@ in a matching `*_reply.md`. Existing briefs:
   peak, as fast as its old per-parameter loop, which 0.1.24 removed).
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration.
+- `docs/upstream/hurin_lightcurve_prompt.md` — hurin downloads every row of
+  a MAST name search, which can include a neighbouring star (KOI-7592.01:
+  two KIC targets, both at 0"), and stitches them. turin 0.1.26 restricts to
+  the archive KIC/TIC and refuses repeated timestamps.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
   "1:1 grazing odds" is true marginally over `k ~ U(0,1)` but reads as a
   claim about the user's own target, where the odds are `k/(1-k)`.

@@ -61,6 +61,7 @@ def _gibbsgrid(mode, args):
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
+    _outputs.set_run_status("")
     _outputs.set_run_tag(args.tag)
     target = args.target
     outdir = args.outdir or target
@@ -104,11 +105,13 @@ def run(args, log=print):
         log=lambda m: log(f"  {m}"))
 
     lineph_ml = None
+    outcome = {}             # mode -> final Verdict, or a note if skipped
     for mode in args.modes:
         try:
             lineph_ml = _fit_mode(
                 mode, args, prepared, cv, outdir, log=log,
-                n_durations=n_durations, lineph_ml=lineph_ml) or lineph_ml
+                n_durations=n_durations, outcome=outcome,
+                lineph_ml=lineph_ml) or lineph_ml
         except SystemExit:
             raise
         except Exception as exc:
@@ -116,11 +119,32 @@ def run(args, log=print):
             raise
 
     log(f"[{target}] done in {time.perf_counter() - t_start:.1f}s")
-    return 0
+    return _report_outcome(target, outcome, log)
+
+
+#: Exit code for a run that finished but left a fit unconverged at the draw
+#: cap; its products are complete and stamped UNCONVERGED on line 2.
+EXIT_UNCONVERGED = 3
+
+
+def _report_outcome(target, outcome, log):
+    """One verdict line per fit; the process exit code."""
+    unconverged = []
+    for mode, v in outcome.items():
+        if isinstance(v, str):
+            log(f"[{target}] {mode}: {v}")
+        elif v.converged:
+            log(f"[{target}] {mode}: converged at {v.n_draws} draws/chain")
+        else:
+            unconverged.append(mode)
+            log(f"[{target}] {mode}: NOT CONVERGED at {v.n_draws} draws/chain"
+                f" (worst R-hat {v.worst_rhat[1]:.4f}, {v.worst_rhat[0]}); "
+                "products are written and stamped UNCONVERGED")
+    return EXIT_UNCONVERGED if unconverged else 0
 
 
 def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
-              lineph_ml=None):
+              outcome, lineph_ml=None):
     """Run one fit mode. Returns the ML shape dict for LinEph, else None."""
     target = prepared.target
     tau_shift = args.ttv_max_days or 0.0
@@ -162,6 +186,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
             log(f"  {mode} already converged "
                 f"({prior_state.n_samples_done} draws/chain); skipping. "
                 "Use --extend1/--extend2 to add more, or --fresh to redo.")
+            outcome[mode] = "converged earlier"
             return prior_state.ml_params or None
         log(f"  resuming from {prior_state.n_samples_done} draws/chain")
 
@@ -230,13 +255,26 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
             profile_mode=provisional, geometry=args.geometry)
         weak = np.where(rival_gap < _seeding.RIVAL_GAP_WARN)[0]
         if weak.size:
-            log(f"  WARNING: {weak.size} epoch(s) have a rival timing mode "
-                f"within {_seeding.RIVAL_GAP_WARN:.0f} log-units of the seed; "
-                "those transit times are shape-sensitive")
+            log(f"  note: {weak.size} epoch(s) have a competing timing mode "
+                "more than one T14 from the seed"
+                + ("; grid-Gibbs samples across them"
+                   if _gibbsgrid(mode, args) == "on" else
+                   "; with --gibbsgrid=off their times are shape-sensitive"))
             for i in weak[:6]:
-                log(f"    epoch {int(centering['n_arr'][i]):+d}: "
-                    f"seed {seeds[i] * 1440:+.1f} min, "
-                    f"rival gap {rival_gap[i]:.1f}")
+                head = (f"    epoch {int(centering['n_arr'][i]):+d}: "
+                        f"seed {seeds[i] * 1440:+.1f} min, ")
+                if rival_gap[i] >= 0:
+                    log(head + f"best rival {rival_gap[i]:.1f} log-units "
+                        "below it")
+                else:
+                    # the seeder takes the interior peak nearest the
+                    # prediction among those within TIE_LOGL of the best,
+                    # so a higher score elsewhere is either such a peak or
+                    # a window edge / slope it does not treat as a transit
+                    log(head + f"a point more than one T14 away scores "
+                        f"{-rival_gap[i]:.1f} log-units higher (a near-tie "
+                        "peak further from the prediction, or a window "
+                        "edge)")
 
     v0 = _seeding.initial_model_vector(layout, prepared.eph, shape=shape0,
                                        dtau=seeds)
@@ -299,24 +337,34 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
 
     # The chains tarball and the PDFs are the expensive products; they are
     # written after round 0 (so a long run shows something early), then at
-    # most every HEAVY_EVERY_S, and always once the run ends. The small
+    # most every HEAVY_EVERY_S, and always on the final round. The small
     # products and the resume state are written every round.
-    last_heavy = {"t": None, "round": None}
-    last_round = {"rnd": None}
+    last_heavy = {"t": None}
 
-    def export(results, verdict, rnd, heavy):
+    def on_round(results, verdict, rnd):
+        # the round loop stops on convergence or at the draw cap, so either
+        # makes this the final round: always written in full, with the
+        # outcome stamped on every product
+        final = verdict.converged or verdict.n_draws >= cfg.max_samples
+        if verdict.converged:
+            _outputs.set_run_status("")
+        elif final:
+            _outputs.set_run_status(
+                f"UNCONVERGED: worst R-hat {verdict.worst_rhat[1]:.4f} "
+                f"({verdict.worst_rhat[0]}) at the {cfg.max_samples} "
+                "draws/chain cap")
+        else:
+            _outputs.set_run_status(
+                f"in progress: round {rnd}, not yet converged")
+        heavy = (final or last_heavy["t"] is None
+                 or time.perf_counter() - last_heavy["t"] >= HEAVY_EVERY_S)
         _export_all(mode, args, prepared, epoch_data, centering, orders,
                     layout, transform, lp, results, verdict, outdir,
                     log=log, state_holder=state_holder, cfg=cfg,
                     pl_mode=pl_choice.mode, heavy=heavy)
         if heavy:
-            last_heavy.update(t=time.perf_counter(), round=rnd)
-
-    def on_round(results, verdict, rnd):
-        last_round["rnd"] = rnd
-        due = (last_heavy["t"] is None
-               or time.perf_counter() - last_heavy["t"] >= HEAVY_EVERY_S)
-        export(results, verdict, rnd, heavy=due)
+            last_heavy["t"] = time.perf_counter()
+        outcome[mode] = verdict
 
     move = None
     if _gibbsgrid(mode, args) == "on":
@@ -335,8 +383,6 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, n_durations,
     results, verdict, total = _sampling.run_rounds(
         target_obj, list(layout.names), u0, cfg, log=log, on_round=on_round,
         resume_state=resume_for_anvil, move=move)
-    if last_heavy["round"] != last_round["rnd"]:
-        export(results, verdict, last_round["rnd"], heavy=True)
 
     cert = _sampling.certify(target_obj, results, list(layout.names), log=log)
     if cert is not None:
@@ -454,7 +500,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
 
     if mode == "ttv":
         rows = _ttv_rows(phys, names, layout, centering, epoch_data, model,
-                         summary)
+                         summary, lp=lp, v_ml=v_ml)
         _outputs.export_ttv_times(outdir, target, mode, rows, log=log)
         if heavy:
             try:
@@ -515,7 +561,25 @@ def _mid_times_absolute(mode, v_ml, layout, centering):
     return centers + (v_ml[5:] + d_arr)
 
 
-def _ttv_rows(phys, names, layout, centering, epoch_data, model, summary):
+def _epoch_snr(lp, layout, v_ml):
+    """Per-epoch detection SNR at the ML parameters: sqrt(2 dlnL).
+
+    dlnL is each epoch's profiled log-likelihood with the transit minus the
+    same with k -> 0, so the null still has its own Legendre baseline fitted.
+    (The old null was a flat 1.0 with no baseline, which credited the
+    baseline's fit to the transit: 92 for one epoch of KOI-5616.01, whose
+    catalogue SNR over all transits is 7.8.)
+    """
+    v = np.vstack([v_ml, v_ml]).astype(np.float64)
+    v[1, layout.index("k")] = 1e-9
+    with mx.stream(mx.cpu):
+        L = np.array(lp.epoch_log_lik(mx.array(v.astype(np.float32))),
+                     dtype=np.float64)
+    return np.sqrt(np.maximum(2.0 * (L[0] - L[1]), 0.0))
+
+
+def _ttv_rows(phys, names, layout, centering, epoch_data, model, summary, *,
+              lp, v_ml):
     """Per-epoch timing rows for the TTV export, with fit diagnostics."""
     n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
     P_fit, tau0_fit, _ = _outputs.fit_linear_ephemeris(
@@ -526,6 +590,7 @@ def _ttv_rows(phys, names, layout, centering, epoch_data, model, summary):
     e = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
     m = np.asarray(model, dtype=np.float64)
 
+    snrs = _epoch_snr(lp, layout, v_ml)
     rows = []
     for i, n in enumerate(n_arr):
         key = f"dtau_{int(n)}"
@@ -533,9 +598,7 @@ def _ttv_rows(phys, names, layout, centering, epoch_data, model, summary):
         err = summary[key]["std"]
         sel = mask[i]
         chi2 = float(np.sum(((y[i][sel] - m[i][sel]) / e[i][sel]) ** 2))
-        # detection SNR against a no-transit null on the same points
-        chi2_null = float(np.sum(((y[i][sel] - 1.0) / e[i][sel]) ** 2))
-        snr = float(np.sqrt(max(chi2_null - chi2, 0.0)))
+        snr = float(snrs[i])
         oc = (tmid - (tau0_fit + P_fit * n)) * 1440.0
         rows.append(dict(epoch=int(n), tmid=tmid, tmid_err=err, ttv_min=oc,
                          ttv_err_min=err * 1440.0, snr=snr,

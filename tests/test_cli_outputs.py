@@ -327,3 +327,71 @@ def test_provenance_records_the_model_revision():
     from turin import MODEL_REV
 
     assert f"rev{MODEL_REV}" in outputs.provenance()
+
+
+class _FakeSearch:
+    """The slice of lightkurve's SearchResult that _restrict_to_star uses."""
+
+    def __init__(self, names):
+        self.table = {"target_name": list(names)}
+
+    def __getitem__(self, idx):
+        return _FakeSearch([self.table["target_name"][i] for i in idx])
+
+    def __len__(self):
+        return len(self.table["target_name"])
+
+
+def test_restrict_to_star_drops_a_neighbouring_star():
+    """KOI-7592.01's real search: its host plus a neighbour, both at 0".
+    Downloading every row stitched the two stars together."""
+    from turin.data import lightcurve as L
+
+    names = ["kplr008423352"] * 18 + ["kplr008423344"] * 14
+    info = {"name": "KOI-7592.01", "type": "koi"}
+    kept = L._restrict_to_star(_FakeSearch(names), 8423344, info)
+    assert set(kept.table["target_name"]) == {"kplr008423344"}
+    assert len(kept) == 14
+    with pytest.raises(ValueError, match="several stars"):
+        L._restrict_to_star(_FakeSearch(names), None, info)
+    with pytest.raises(ValueError, match="not for"):
+        L._restrict_to_star(_FakeSearch(names), 1234567, info)
+    # one star and no number: nothing to choose between
+    assert len(L._restrict_to_star(_FakeSearch(names[:18]), None, info)) == 18
+    # TESS target names are bare TIC numbers
+    assert L._target_number("261136679") == 261136679
+    assert L._target_number("kplr008423344") == 8423344
+
+
+def test_mixed_target_check_flags_repeated_timestamps():
+    from turin.data import lightcurve as L
+
+    one = np.arange(0.0, 30.0, 0.0204)
+    assert L._mixed_target_problem(one) is None
+    two = np.concatenate([one, one[::3]])           # a second star, same epochs
+    assert "repeated timestamps" in L._mixed_target_problem(two)
+
+
+def test_one_rule_decides_occupied_and_fitted_epochs():
+    """An epoch with a single point in its transit zone is both counted as
+    occupied and fitted. The two used to disagree (>1 vs >=1), so a target
+    could log 2 occupied epochs and fit 3 (KOI-5897.01)."""
+    from turin import prep
+
+    P, T0, dur_h = 10.0, 5.0, 4.8
+    cad = 29.4 / 1440
+    t = np.arange(0.0, 40.0, cad)
+    # epoch 2 (tc = 25): remove every in-transit cadence but one
+    tc2, half = 25.0, 0.5 * dur_h / 24
+    in2 = np.where(np.abs(t - tc2) <= half)[0]
+    t = np.delete(t, in2[1:])
+    f = np.ones_like(t)
+    e = np.full_like(t, 1e-4)
+
+    n_in, ok = prep.covers_transit(t, tc2, half)
+    assert n_in == 1 and ok
+    assert prep.covers_transit(t, 100.0, half) == (0, False)  # no data there
+
+    tw, fw, ew = prep.extract_near_transit_data(t, f, e, P, T0, dur_h)
+    ed = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
+    assert np.any(np.isclose(ed["epoch_centers"], tc2))

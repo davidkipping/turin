@@ -94,17 +94,25 @@ def get_lightcurve(target, progress=None, sc_override=False):
         if progress:
             progress("Loading from cache...")
         with open(cache_file, "rb") as f:
-            return pickle.load(f)
+            cached = pickle.load(f)
+        problem = _mixed_target_problem(cached["time"])
+        if problem is None:
+            return cached
+        # a cache written before the one-star filter existed
+        if progress:
+            progress(f"Cached light curve is invalid ({problem}); "
+                     "downloading again")
 
+    star = _catalog_id(info, progress=progress)
     if info["type"] == "koi":
         if sc_override:
-            result = _download_kepler_sc(info, progress=progress)
+            result = _download_kepler_sc(info, star, progress=progress)
         else:
-            result = _download(info, author="Kepler", cadence="long",
+            result = _download(info, star, author="Kepler", cadence="long",
                                mission="kepler", label="quarter",
                                progress=progress)
     else:
-        result = _download_tess(info, sc_override=sc_override,
+        result = _download_tess(info, star, sc_override=sc_override,
                                 progress=progress)
 
     with open(cache_file, "wb") as f:
@@ -113,34 +121,88 @@ def get_lightcurve(target, progress=None, sc_override=False):
     return result
 
 
-def _koi_to_kic(info, progress=None):
-    """Look up the KIC ID for a KOI from the NASA Exoplanet Archive.
+def _catalog_id(info, progress=None):
+    """The host star's catalogue number: KIC for a KOI, TIC for a TOI.
 
-    Returns "KIC {kepid}" string, or None if not found.
+    Looked up in the NASA Exoplanet Archive, which is where the target's
+    ephemeris comes from too. Returns an int, or None if the archive has no
+    entry (the download then refuses to guess between stars).
     """
-    from .ephemeris import _tap_get
+    from .ephemeris import _tap_get, _toi_to_archive_number
 
-    m = re.match(r"KOI-(\d+)", info["name"])
-    if not m:
-        return None
-    koi_num = int(m.group(1))
-    archive_name = f"K{koi_num:05d}.01"
-    query = f"select kepid from cumulative where kepoi_name='{archive_name}'"
+    if info["type"] == "koi":
+        # every planet in a KOI system shares its host's kepid
+        query = ("select kepid from cumulative where "
+                 f"kepoi_name='K{info['number']:05d}.01'")
+        label = "KIC"
+    else:
+        query = ("select tid from toi where "
+                 f"toi={_toi_to_archive_number(info['name'])}")
+        label = "TIC"
     try:
-        resp = _tap_get(query)
-        lines = resp.text.strip().split("\n")
-        if len(lines) >= 2:
-            kepid = lines[1].strip()
-            if kepid:
-                if progress:
-                    progress(f"Resolved {info['name']} to KIC {kepid}")
-                return f"KIC {kepid}"
+        lines = _tap_get(query).text.strip().split("\n")
+        value = lines[1].strip() if len(lines) >= 2 else ""
+        star = int(float(value)) if value else None
     except Exception:
-        pass
+        star = None
+    if progress and star is not None:
+        progress(f"Host star: {label} {star}")
+    return star
+
+
+def _target_number(target_name):
+    """MAST's target_name as a catalogue number: 'kplr008423344' -> 8423344."""
+    digits = re.sub(r"\D", "", str(target_name)).lstrip("0")
+    return int(digits) if digits else None
+
+
+def _restrict_to_star(search, star, info, progress=None):
+    """Keep only the search rows for the target's own star.
+
+    A name search can return a neighbouring star's light curves as well, all
+    at distance 0: "KOI-7592.01" returns KIC 8423344 (the KOI, 14 quarters)
+    and KIC 8423352 (18 quarters). Downloading every row stitches two stars
+    together. Rows are therefore matched to the archive's catalogue number,
+    and a search spanning several stars with no number to match refuses
+    rather than guessing.
+    """
+    names = [str(x) for x in search.table["target_name"]]
+    numbers = [_target_number(n) for n in names]
+    distinct = sorted(set(numbers) - {None})
+    if star is not None:
+        keep = np.where(np.array(numbers, dtype=object) == star)[0]
+        if keep.size == 0:
+            raise ValueError(
+                f"MAST returned light curves for {distinct} but not for "
+                f"{info['name']}'s host star {star}")
+        if len(distinct) > 1 and progress:
+            others = [n for n in distinct if n != star]
+            progress(f"Dropped {len(names) - keep.size} light curve(s) of "
+                     f"neighbouring star(s) {others}")
+        return search[keep]
+    if len(distinct) > 1:
+        raise ValueError(
+            f"MAST returned light curves for several stars {distinct} and "
+            f"the archive has no catalogue number for {info['name']} to "
+            "choose between them")
+    return search
+
+
+def _mixed_target_problem(time):
+    """Why a stitched light curve cannot be one star's, or None.
+
+    One star's cadences never repeat a timestamp; two stars observed in the
+    same quarters do, all over.
+    """
+    t = np.asarray(time, dtype=np.float64)
+    t = t[np.isfinite(t)]
+    n_dup = int(t.size - np.unique(np.round(t, 6)).size)
+    if n_dup:
+        return f"{n_dup} repeated timestamps, so more than one star"
     return None
 
 
-def _download(info, author, cadence, mission, label, progress=None):
+def _download(info, star, author, cadence, mission, label, progress=None):
     """Download light curve one quarter/sector at a time."""
     kwargs = {"author": author}
     if cadence is not None:
@@ -158,16 +220,16 @@ def _download(info, author, cadence, mission, label, progress=None):
             progress(f"MAST timed out on {info['name']}, retrying with KIC identifier...")
         search = None
 
-    # KOI fallback: try KIC identifier if KOI name not resolved or timed out
-    if (search is None or len(search) == 0) and info.get("type") == "koi":
-        kic_name = _koi_to_kic(info, progress=progress)
-        if kic_name:
-            if progress:
-                progress(f"Retrying MAST search with {kic_name}...")
-            search = lk.search_lightcurve(kic_name, **kwargs)
+    # KOI fallback: search by KIC if the KOI name did not resolve or timed out
+    if (search is None or len(search) == 0) and info.get("type") == "koi" \
+            and star is not None:
+        if progress:
+            progress(f"Retrying MAST search with KIC {star}...")
+        search = lk.search_lightcurve(f"KIC {star}", **kwargs)
 
     if search is None or len(search) == 0:
         raise ValueError(f"No {mission.title()} light curves found for {info['name']}")
+    search = _restrict_to_star(search, star, info, progress)
 
     total = len(search)
     lc_list = []
@@ -179,7 +241,7 @@ def _download(info, author, cadence, mission, label, progress=None):
     return _stitch_and_pack(lc_list, mission, progress)
 
 
-def _download_kepler_sc(info, progress=None):
+def _download_kepler_sc(info, star, progress=None):
     """Download Kepler data preferring SC over LC per quarter."""
     if progress:
         progress(f"Searching MAST for {info['name']} (all cadences)...")
@@ -191,16 +253,15 @@ def _download_kepler_sc(info, progress=None):
             progress(f"MAST timed out on {info['name']}, retrying with KIC identifier...")
         search = None
 
-    # KOI fallback: try KIC identifier if KOI name not resolved or timed out
-    if search is None or len(search) == 0:
-        kic_name = _koi_to_kic(info, progress=progress)
-        if kic_name:
-            if progress:
-                progress(f"Retrying MAST search with {kic_name}...")
-            search = lk.search_lightcurve(kic_name, author="Kepler")
+    # KOI fallback: search by KIC if the KOI name did not resolve or timed out
+    if (search is None or len(search) == 0) and star is not None:
+        if progress:
+            progress(f"Retrying MAST search with KIC {star}...")
+        search = lk.search_lightcurve(f"KIC {star}", author="Kepler")
 
     if search is None or len(search) == 0:
         raise ValueError(f"No Kepler light curves found for {info['name']}")
+    search = _restrict_to_star(search, star, info, progress)
 
     search_table = search.table
     exptimes = np.array(search_table["t_exptime"], dtype=float)
@@ -306,7 +367,7 @@ def _pick_best_per_group(exptimes, groups, group_ids, pref_order, label_name):
     return selected_indices, cad_labels
 
 
-def _download_tess(info, sc_override=False, progress=None):
+def _download_tess(info, star, sc_override=False, progress=None):
     """Download TESS data with per-sector cadence preference."""
     if progress:
         progress(f"Searching MAST for {info['name']} (all cadences)...")
@@ -314,6 +375,7 @@ def _download_tess(info, sc_override=False, progress=None):
     search = lk.search_lightcurve(info["name"], author="SPOC")
     if len(search) == 0:
         raise ValueError(f"No TESS light curves found for {info['name']}")
+    search = _restrict_to_star(search, star, info, progress)
 
     search_table = search.table
     exptimes = np.array(search_table["t_exptime"], dtype=float)
@@ -359,6 +421,9 @@ def _stitch_and_pack(lc_list, mission, progress=None):
     lc = lc_collection.stitch()
 
     time = np.array(lc.time.value, dtype=np.float64)
+    problem = _mixed_target_problem(time)
+    if problem is not None:
+        raise ValueError(f"stitched light curve is not one star's: {problem}")
     cadence_days = float(np.median(np.diff(time))) if len(time) > 1 else 0.0
 
     return {

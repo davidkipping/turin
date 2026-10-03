@@ -214,10 +214,22 @@ working. Seven products per LinEph fit, nine per TTV fit:
 <T>_<mode>_corner.pdf         corner plot with 1/1.5/2-sigma contours
 <T>_<mode>_resume.pkl         resume state
 <T>_ttv_times.csv             epoch, tmid, tmid_err, O-C, SNR, npts, chi2
+                              (SNR: sqrt(2 dlnL) per transit against a
+                              no-transit fit with its own baseline)
 <T>_ttv_oc.pdf                O-C against a refitted linear ephemeris
 ```
 
-Every product records turin's version and the exact command that made it.
+Every product records turin's version and the exact command that made it, on
+line 2 of each CSV. While a run is going that line also says `in progress:
+round N`, and a fit that stops at the draw cap unconverged is stamped
+`UNCONVERGED: worst R-hat ... at the 16384 draws/chain cap`. The exit code says
+the same thing for scripts: 0 when every fit converged, 3 when the run
+finished but a fit did not, anything else for an error.
+
+turin downloads only the target's own star: a MAST name search can also return
+a neighbouring star's light curves (KOI-7592.01 returns two stars), so the
+results are matched to the host's KIC or TIC from the Exoplanet Archive, and a
+stitched light curve that still repeats timestamps is refused.
 
 **Large runs are subsampled for export, not for inference.** R-hat and ESS are
 computed on every draw. Everything else in the products is computed from a
