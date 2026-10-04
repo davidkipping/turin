@@ -35,12 +35,26 @@ from . import model as _model
 from . import params as _params
 from . import profile as _profile
 
-#: Rough bytes per (chain, point, sub-exposure) the forward pass and the fused
-#: kernel's backward grids need together. MetalPlanet documents ~12 B/pt
-#: forward and ~32 B/pt transient for the analytic VJP's seven grids; this is
-#: deliberately pessimistic so the default block size is safe.
+#: Rough bytes per (chain, point, sub-exposure) for the forward pass and the
+#: fused kernel's backward grids together, used only to size epoch blocks.
+#:
+#: It was set from MetalPlanet's documented ~12 B/pt forward and ~32 B/pt
+#: transient and described here as "deliberately pessimistic". It is not:
+#: a fresh-process MLX probe of one compiled value+grad at 512 chains
+#: measured **121 B per (chain, point)** on the default path, so 48 is about
+#: 2.5x optimistic. Nothing has broken because the 2 GiB budget below is
+#: generous enough that real targets take one block anyway (at 223 points per
+#: epoch it only splits past ~390 epochs), but do not read this as a safety
+#: margin -- there is none. Raise it, rather than trusting it, before relying
+#: on blocking to fit a large target.
 BYTES_PER_POINT = 48
-#: Default ceiling for the transient cost of one epoch block.
+#: Budget used to pick the block size. **Not a ceiling on peak memory.**
+#: Inside one compiled value+grad the whole graph is live at once, so every
+#: block's backward intermediates coexist and splitting buys much less than
+#: the arithmetic suggests: measured, forcing 3 blocks moved the peak from
+#: 0.174 to 0.153 GB on the default path and 0.390 to 0.320 GB on a 3-wide
+#: variant. Blocking bounds the size of any one kernel launch; it does not
+#: bound the peak.
 DEFAULT_BLOCK_BUDGET_BYTES = 1 << 31   # 2 GiB
 
 
@@ -66,6 +80,10 @@ def epoch_block_size(n_chains, n_epochs, max_pts, n_sub,
 
     Returns at least 1, so a single pathological epoch still runs (and fails
     loudly on allocation rather than silently producing nothing).
+
+    See :data:`BYTES_PER_POINT` and :data:`DEFAULT_BLOCK_BUDGET_BYTES`: the
+    constant is measured to be ~2.5x optimistic, and the budget sizes a
+    launch rather than capping peak memory.
     """
     per_epoch = max(1, n_chains * max_pts * max(1, n_sub)
                     * BYTES_PER_POINT * itemsize // 4)

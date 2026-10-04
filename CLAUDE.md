@@ -336,6 +336,23 @@ on a 32 GB machine that swapped. The fixes, and what must not regress:
 - Heavy products (chains tarball, PDFs) after round 0, then at most every
   `pipeline.HEAVY_EVERY_S`, and always at the end.
 
+**Epoch blocking is not one of these fixes, and should not be counted as
+one.** Two measured facts, from SquishierPlanet's probe of a compiled
+value+grad at 512 chains (`docs/upstream/` in that repo):
+
+- `likelihood.BYTES_PER_POINT = 48` calls itself pessimistic and is not:
+  the default path measured **121 B per (chain, point)** at peak, so the
+  constant is ~2.5x optimistic. It has never bitten because the 2 GiB
+  budget leaves real targets on one block regardless -- at 223 points per
+  epoch it first splits past ~390 epochs.
+- Splitting barely moves the peak anyway. Inside one compiled value+grad the
+  whole graph is live, so every block's backward intermediates coexist:
+  forcing 3 blocks measured 0.174 -> 0.153 GB. Blocking bounds the size of a
+  single kernel launch, not the peak.
+
+So a per-evaluation memory problem is not solved by lowering the block
+budget. The levers that did work are the ones listed above.
+
 To check a change here, measure rather than reason: fill a `Continuation`
 with synthetic cap-sized draws (16,400 x 512 chains) and time
 `assess` + `_export_all` + `certify` in a subprocess, reading peak RSS and
