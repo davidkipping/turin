@@ -99,6 +99,26 @@ def test_capabilities_detect_and_summarize():
     assert "yes  anvil >= 0.3.0" in text
 
 
+def test_capability_summary_does_not_claim_the_tau_kernel_is_unused():
+    """It said "available but not yet used" from 0.1.6 to 0.1.28, after turin
+    had made the kernel its primary route -- user-visible wrong output from
+    --capabilities. The present-branch text must describe it as used, and the
+    missing-branch text must point at MetalPlanet rather than anvil."""
+    import dataclasses
+
+    caps = capabilities.detect()
+    assert caps.metalplanet_flux_dev_from_tau, "kernel absent in this env"
+    assert M.HAS_TAU_KERNEL is caps.metalplanet_flux_dev_from_tau
+    line = [ln for ln in caps.summary().splitlines() if "tau-input" in ln][0]
+    assert "not yet used" not in line and "used for geometry=circular" in line
+
+    missing = dataclasses.replace(caps, metalplanet_flux_dev_from_tau=False)
+    gone = [ln for ln in missing.summary().splitlines()
+            if "tau-input" in ln][0]
+    assert "MISSING" in gone and "MetalPlanet.git" in gone
+    assert "anvil.git" not in gone, "points at the wrong package"
+
+
 @pytest.mark.parametrize("version,ok", [
     ("0.3.0", True), ("0.3.0.dev2", True), ("0.3.1", True), ("1.0", True),
     ("0.2.0", False), ("0.1.0.dev0", False), ("unknown", False)])

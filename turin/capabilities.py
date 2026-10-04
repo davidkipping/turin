@@ -28,6 +28,11 @@ MIN_ANVIL = (0, 3, 0)
 
 UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
                 'git+https://github.com/davidkipping/anvil.git"')
+#: The same, for MetalPlanet. Separate constant on purpose: pointing a
+#: missing-MetalPlanet message at the anvil command sends the reader to the
+#: wrong package.
+MP_UPGRADE_HINT = ('pip install -U "metalplanet @ '
+                   'git+https://github.com/davidkipping/MetalPlanet.git"')
 
 
 def version_tuple(version):
@@ -58,11 +63,14 @@ class Capabilities:
     """The installed versions, and the one optional feature turin reports."""
 
     #: MetalPlanet exposes a tau-input fused kernel with in-kernel exposure
-    #: integration. **Detected but not yet used**: turin builds ``z`` itself
-    #: and calls ``flux_dev_metal``, which is correct and is what every
-    #: accuracy figure in the tests was measured against. Switching over is a
-    #: performance change that needs its own parity tests, so it is deliberate
-    #: rather than automatic.
+    #: integration. **Used as the primary route** since 0.1.6, for the default
+    #: ``geometry="circular"``; ``model.HAS_TAU_KERNEL`` is the same test.
+    #: Without it turin falls back to building ``z`` itself and supersampling
+    #: in MLX (``model._expanded_flux_dev``), which is the only route for
+    #: ``geometry="chord"`` and is *less accurate*: supersampling costs ~2% of
+    #: a transit depth and gets ``dF/d(period)`` ~100x wrong with the wrong
+    #: sign. So this line reports whether exposures are integrated correctly,
+    #: not an unused extra.
     metalplanet_flux_dev_from_tau: bool
     anvil_version: str = ""
     metalplanet_version: str = ""
@@ -78,8 +86,11 @@ class Capabilities:
             "save/load, per-chain divergences, with_positions, bounded "
             "diagnose)" + ("" if ok else f"  ->  {UPGRADE_HINT}"),
             f"  {'yes' if self.metalplanet_flux_dev_from_tau else 'no ':3s}  "
-            "MetalPlanet tau-input kernel (available but not yet used: turin "
-            "builds z itself)",
+            "MetalPlanet tau-input kernel"
+            + (" (in-kernel contact-rule exposure integration; used for "
+               "geometry=circular)" if self.metalplanet_flux_dev_from_tau else
+               " MISSING: exposures would be supersampled, ~2% of a depth and "
+               "dF/dP ~100x wrong  ->  " + MP_UPGRADE_HINT),
         ])
 
 

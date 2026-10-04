@@ -49,7 +49,10 @@ in a matching `*_reply.md`. Existing briefs:
   round. turin now makes one `diagnose` call with a 256 MiB budget (0.55 GB
   peak, as fast as its old per-parameter loop, which 0.1.24 removed).
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
-  kernel with in-kernel exposure integration.
+  kernel with in-kernel exposure integration. **Landed**; turin uses it.
+  MetalPlanet 0.7.0 later added `ld_basis=True` for a different downstream
+  package, which turin deliberately does not use — see "MetalPlanet's
+  `ld_basis=True`" below before reaching for it.
 - `docs/upstream/hurin_lightcurve_prompt.md` — hurin downloads every row of
   a MAST name search, which can include a neighbouring star (KOI-7592.01:
   two KIC targets, both at 0"), and stitches them. turin 0.1.26 restricts to
@@ -87,9 +90,10 @@ refuses anything older than `capabilities.MIN_ANVIL` (0.3.0) with the
 upgrade command, before touching the disk. **turin must always run against
 the packages as currently published on GitHub.** When turin starts relying
 on a new upstream feature, raise `MIN_ANVIL` in the same change; do not add
-detection plus a fallback. (MetalPlanet's tau-input kernel is still
-*detected*, but only reported: turin does not use it, so there is nothing to
-fall back from.)
+detection plus a fallback. There is no `MIN_METALPLANET`, deliberately:
+turin uses only `flux_dev_from_tau` and `flux_dev_metal`, whose behaviour
+has been stable since 0.6.1, and a floor with no feature behind it is noise.
+Add one in the same change as the first call that needs it.
 
 ## Architecture
 
@@ -227,6 +231,41 @@ under the contact rule: it freezes its split points (exact, since moving an
 interior split of a continuous integrand cancels), so an FD that recomputes
 them measures the quadrature's parameter sensitivity instead — and an FD
 straddling a contact is wrong at any step size.
+
+### MetalPlanet's `ld_basis=True`, and why turin does not use it
+
+MetalPlanet 0.7.0 (`2a9aba0`) added `flux_dev_from_tau(..., ld_basis=True)`,
+which returns `(n, m, 3)` instead of `(n, m)`: `B[..., j]` is the
+exposure-integrated unnormalised deficit for intensity `mu^j`, and any
+quadratic law is recovered as
+
+    (B @ c) / (N @ c),   c = (1-u1-u2, u1+2u2, -u2),  N = (pi, 2pi/3, pi/2)
+
+verified here at 3.5e-18 in float64. **turin does not use it, and should
+not adopt it as an optimization.** It was requested by a different
+downstream package whose target calls the kernel three times per
+log-density, once per vertex law, and its win is against *that*: 3.1x
+faster than three calls, but 0.95x forward / 0.97x value+grad against
+**one**. turin samples `q1, q2`, so it makes exactly one call and is
+already on the cheaper path. Taking the basis would triple the dominant
+intermediate -- including the `(n, m, 3)` backward cotangent -- directly
+against the memory work in "Memory: inference on every draw" above.
+
+It is, however, the enabling primitive for one real future direction:
+**profiling the limb darkening** as a nuisance block, the way the Legendre
+baseline already is. Two things to settle before anyone tries it. The
+deficit is *projective*-linear in `c`, `(B @ c)/(N @ c)`, not a linear
+least-squares block, so it is not a second Cholesky solve. And profiling
+`q1, q2` out discards the Kipping (2013) uniform prior that turin
+deliberately samples under, so it changes the posterior rather than just
+the cost -- a science decision needing the same brute-force marginal
+validation grid-Gibbs got, not a speed patch.
+
+Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
+`model.N_GL`; turin passes it explicitly, so that default is inert here.
+`u1`/`u2` became optional keywords in the same release but stayed
+positional, so turin's existing call is unaffected, and 0.7.0's default
+outputs and gradients are bitwise-equal to 0.6.1's.
 
 ### Why turin does not use MetalPlanet's sampler-facing API
 
