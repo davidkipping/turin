@@ -59,10 +59,28 @@ in a matching `*_reply.md`. Existing briefs:
   the archive KIC/TIC and refuses repeated timestamps. **Landed in hurin
   0.1.70** (`88d15ac`): finding confirmed, all four asks taken.
 
-**Every brief above has landed, so nothing is outstanding upstream.** Do not
-open a new one without being asked to: write the finding down here or in
-`docs/`, and let the user decide whether it goes upstream. A brief commits
-someone else's session to work.
+**Inbound: a proposal turin has accepted but not built.**
+SquishierPlanet's `docs/upstream/turin_collapsed_ld_prompt.md` proposes an
+opt-in `--ld=collapsed`, which **marginalises** the quadratic limb
+darkening out of the log-density instead of sampling `q1, q2`, dropping two
+sampled dimensions at the same accuracy. turin's questions and their answers
+are in that repo's `turin_collapsed_ld_reply.md` and
+`turin_collapsed_ld_answers.md`. Agreed and not yet implemented; the shape
+is: default `--ld=sampled` stays bit-identical, `ld` joins
+`ResumeState.GUARDS`, a first `MIN_METALPLANET` (>= 0.7.0) gated on the new
+mode, `--PL` forced to `exact` (the omega gradient comes from the envelope
+theorem, which needs `c` to be the flux-space chi-squared's exact
+minimiser, so `ratio` would be *wrong*, not merely untested), LinEph first,
+and acceptance on KOI-448.02 as well as KOI-518.02 because a grazing
+target puts the weights at a triangle vertex. Call it marginalised
+(collapsed) LD, never "collapsed Gibbs": the Gibbs part is only the
+post-hoc draws that fill the `q1`/`q2` product columns, and a true Gibbs
+omega-mode was measured and rejected at 5x slower.
+
+**Every brief turin has sent has landed, so nothing is outstanding
+upstream.** Do not open a new one without being asked to: write the finding
+down here or in `docs/`, and let the user decide whether it goes upstream. A
+brief commits someone else's session to work.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
   "1:1 grazing odds" is true marginally over `k ~ U(0,1)` but reads as a
   claim about the user's own target, where the odds are `k/(1-k)`.
@@ -93,7 +111,13 @@ to feature-detect each anvil capability and fall back without it; every one
 of those landed upstream, and anvil < 0.3.0 also carries a silent rank
 corruption in `diagnose`, so since 0.1.24 `capabilities.require_anvil()`
 refuses anything older than `capabilities.MIN_ANVIL` (0.3.0) with the
-upgrade command, before touching the disk. **turin must always run against
+upgrade command, before touching the disk. **anvil 0.4.0 is current and is
+what turin is tested against, but `MIN_ANVIL` stays 0.3.0**: 0.4.0's fix is
+for a target mutated between `run` calls, and turin's target holds only
+static tensors — grid-Gibbs moves positions, not the target. The first
+turin change that *does* mutate the target between segments must raise
+`MIN_ANVIL` to 0.4.0 in the same commit, because that failure is silent and
+passes every convergence check (see `capabilities.MIN_ANVIL`). **turin must always run against
 the packages as currently published on GitHub.** When turin starts relying
 on a new upstream feature, raise `MIN_ANVIL` in the same change; do not add
 detection plus a fallback. There is no `MIN_METALPLANET`, deliberately:

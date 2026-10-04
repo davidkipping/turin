@@ -24,6 +24,21 @@ from dataclasses import dataclass
 #: The oldest anvil turin runs against. 0.3.0 is the first with everything
 #: turin uses, and the first whose ``diagnose`` ranks correctly between
 #: 2,095,104 and 2^21 rows.
+#:
+#: **Not raised to 0.4.0, deliberately.** anvil 0.4.0 fixes a silent
+#: correctness bug -- ``mx.compile`` froze whatever a kernel's traced graph
+#: read from the *target*, so a target mutated between ``run`` calls kept
+#: being sampled as it was at the first trace, giving a healthy-looking run
+#: of the old posterior. turin cannot hit it: its target holds only static
+#: tensors, and grid-Gibbs moves *positions* through
+#: ``ResumeState.with_positions`` without touching the target, which anvil
+#: documents as bit-identical. Per the rule below, the minimum rises with
+#: the first call that needs it.
+#:
+#: **The first change that mutates the target between segments must raise
+#: this to (0, 4, 0)** -- a Gibbs block held on the target, a tempering
+#: beta, a swapped dataset, a retrained surrogate. The failure is silent and
+#: survives every convergence check, so it will not be caught downstream.
 MIN_ANVIL = (0, 3, 0)
 
 UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
