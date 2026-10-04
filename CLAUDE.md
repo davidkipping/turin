@@ -56,7 +56,13 @@ in a matching `*_reply.md`. Existing briefs:
 - `docs/upstream/hurin_lightcurve_prompt.md` — hurin downloads every row of
   a MAST name search, which can include a neighbouring star (KOI-7592.01:
   two KIC targets, both at 0"), and stitches them. turin 0.1.26 restricts to
-  the archive KIC/TIC and refuses repeated timestamps.
+  the archive KIC/TIC and refuses repeated timestamps. **Landed in hurin
+  0.1.70** (`88d15ac`): finding confirmed, all four asks taken.
+
+**Every brief above has landed, so nothing is outstanding upstream.** Do not
+open a new one without being asked to: write the finding down here or in
+`docs/`, and let the user decide whether it goes upstream. A brief commits
+someone else's session to work.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
   "1:1 grazing odds" is true marginally over `k ~ U(0,1)` but reads as a
   claim about the user's own target, where the odds are `k/(1-k)`.
