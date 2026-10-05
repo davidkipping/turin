@@ -306,15 +306,30 @@ both precisions, both LD laws). That ordering is the thing to re-check on
 any future bump: inserted positionally before `u1`, turin would have passed
 limb darkening as an eccentricity term, silently.
 
-One thing turin relies on without testing it. 0.8.1 fixed **NaN gradients
-on grazing transits, circular included** (`0 * inf` where the contact clip
-collapses the inner pair). No turin result was affected, because only the
-differentiable *frontend* graph saw it -- `flux_dev_from_tau` detaches its
-contacts, and that is turin's entry point. But turin's grazing targets
-(KOI-448.02 sits at `b = 0.949` against `1 - k = 0.952`) depend on that
-detachment for finite gradients, and
-`test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry` passes
-either way, so it would not catch the protection being withdrawn.
+0.8.1 fixed **NaN gradients on grazing transits, circular included**
+(`0 * inf` where the contact clip collapses the inner pair). No turin
+result was affected, because only the differentiable *frontend* graph saw
+it -- `flux_dev_from_tau` detaches its contacts, and that is turin's entry
+point. turin's grazing targets depend on that detachment, so **0.1.34 pins
+it**: `test_grazing_gradient_matches_a_finite_differenced_reference` checks
+`d/dk` and `d/db` through the contact rule on both sides of `b = 1 - k`,
+against MetalPlanet's frontend at `n_gl=16` central-differenced in float64
+(an *independent* reference -- see the FD warning above). It also asserts
+the gradients are finite and non-zero, which is what would break if the
+detachment were withdrawn.
+`test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry` does
+not cover this: it runs at `exp_time=0`, so it never builds a contact.
+
+Two things that test measured, worth keeping in mind. **Grazing is the easy
+regime** (~1e-9 relative at `n_gl=16`); the hard one is just *inside* the
+edge, where the inner pair survives as two narrow sub-intervals -- 1.9e-6
+at `n_gl=16` and 5.7e-5 at the production `N_GL`. KOI-448.02's posterior
+(`k = 0.060`, `b = 0.932`, against `1 - k = 0.940`) sits exactly there.
+And the FD warning is live, not theoretical: finite-differencing turin's
+*own* contact path disagrees with its autodiff by 1.5e-5 at `N_GL = 5`
+wherever the inner pair exists, and agrees to 1e-9 once it has collapsed.
+That is the quadrature's split points moving, which is why the reference
+has to be independent.
 
 ### Why turin does not use MetalPlanet's sampler-facing API
 
