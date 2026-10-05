@@ -18,6 +18,7 @@ Four checks, in decreasing order of authority:
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 import subprocess
@@ -94,14 +95,14 @@ def test_fp32_circular_matches_to_metalplanet_fp32_floor():
     assert np.abs(got - ref).max() < 5e-7
 
 
-def metalplanet_contact(n_gl, exp_time):
+def metalplanet_contact(n_gl, exp_time, k=K, b=B):
     """MetalPlanet's frontend with the same contact rule turin now uses."""
     with mx.stream(mx.cpu):
         aRs = float(M.a_over_rstar(*[mx.array([[v]], dtype=mx.float64)
-                                     for v in (T14, P_REF, K, B)])[0, 0])
+                                     for v in (T14, P_REF, k, b)])[0, 0])
     pars = TransitParams()
-    pars.t0, pars.per, pars.rp, pars.a = 0.0, P_REF, K, aRs
-    pars.inc = math.degrees(math.acos(B / aRs))
+    pars.t0, pars.per, pars.rp, pars.a = 0.0, P_REF, k, aRs
+    pars.inc = math.degrees(math.acos(b / aRs))
     pars.ecc, pars.w = 0.0, 90.0
     pars.u, pars.limb_dark = [float(U1), float(U2)], "quadratic"
     return TransitModel(pars, TIMES, dtype=mx.float64, exp_time=exp_time,
@@ -395,8 +396,32 @@ def test_period_gradient_is_exactly_the_epoch_number_times_tau0(
     assert abs(ratio - n_epoch_number) / n_epoch_number < tol
 
 
+GRAZING_EXP = 29.4 / 1440
+
+
+@functools.lru_cache(maxsize=None)
+def _grazing_reference_gradient(k, b):
+    """(d/dk, d/db) of sum(f^2), central-differenced on MetalPlanet's frontend.
+
+    The frontend is the same contact rule turin uses (so this is *not* an
+    independent implementation of the contact geometry), differenced with
+    its split points free to move. At ``n_gl=32`` that estimate is converged:
+    against ``n_gl=128`` it agrees to <=1.3e-7, and since the exact integral
+    does not depend on where it is split, the converged moving-split FD is
+    the true derivative. Cached per (k, b): both ``n_gl`` parametrizations
+    of the test share it.
+    """
+    def ref(k_, b_):
+        f = metalplanet_contact(32, GRAZING_EXP, k=k_, b=b_)
+        return float(np.sum(np.asarray(f, dtype=np.float64) ** 2))
+
+    h = 1e-6
+    return np.array([(ref(k + h, b) - ref(k - h, b)) / (2 * h),
+                     (ref(k, b + h) - ref(k, b - h)) / (2 * h)])
+
+
 @pytest.mark.parametrize("k,b", [
-    (0.0604, 0.9322),   # KOI-448.02's own posterior: just inside 1-k = 0.9396
+    (0.0604, 0.9322),   # KOI-448.02, turin-defaults mean: inside 1-k = 0.9396
     (0.30, 0.68),       # just inside 1-k = 0.70; the inner pair nearly gone
     (0.30, 0.72),       # grazing: the inner pair collapsed
     (0.30, 1.10),       # deeply grazing, b > 1
@@ -406,52 +431,37 @@ def test_period_gradient_is_exactly_the_epoch_number_times_tau0(
 def test_grazing_gradient_matches_a_finite_differenced_reference(k, b, n_gl, tol):
     """d/dk and d/db through the contact rule, at and past the grazing edge.
 
-    Why this is not the forbidden FD. The module docstring warns that
-    finite-differencing *turin's own* contact-rule path measures the
-    quadrature's parameter sensitivity, because the rule freezes its split
-    points. The reference here is independent: MetalPlanet's verified
-    frontend at ``n_gl=16``, central-differenced in float64. turin's
-    autodiff is compared against that, never against itself.
+    What this pins, precisely:
 
-    Why this geometry. ``flux_dev_from_tau`` detaches its contact times, and
-    that detachment is the only reason turin escaped the NaN gradients
-    MetalPlanet fixed in 0.8.1 ("grazing transits ... the clip collapses the
-    inner pair, sqrt and arcsin sit at an infinite derivative, and the
-    clip's zero cotangent makes 0 * inf = NaN"). That bug lived in the
-    differentiable frontend graph, not turin's entry point -- but turin
-    relies on the detachment rather than verifying it, and
-    ``test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry``
-    runs with ``exp_time=0``, so it never builds a contact at all. This test
-    does, on both sides of ``b = 1 - k``.
+    1. **Finite, non-zero gradients through the collapsed-pair branch.** When
+       ``b >= 1 - k`` the contact clip collapses the inner pair and ``sqrt``
+       / ``arcsin`` sit at an infinite derivative; MetalPlanet 0.8.1 guards
+       that with a ``stop_gradient`` in ``exposure.contact_offsets``, which
+       ``flux_dev_from_tau`` and the frontend share. Remove that guard and
+       the three collapsed-pair cases here go NaN (measured). The
+       pre-existing awkward-geometry test runs at ``exp_time=0`` and never
+       builds a contact, so it cannot see this.
+    2. **Gradient accuracy against a converged reference**, on both sides
+       of the edge. The tolerances are set from turin's own convergence: the
+       frozen-split error falls ~8x per doubling of ``n_gl`` (near the edge,
+       d/db: 6.5e-5 at 5, 1.2e-5 at 9, 2.3e-6 at 16, 3.0e-7 at 32), so
+       ``5e-4`` at the production ``N_GL`` and ``1e-5`` at 16 leave ~8x and
+       ~4x margin. Grazing itself is the *easy* regime (~1e-9): the hard one
+       is just inside the edge, where the inner pair survives as two narrow
+       sub-intervals. KOI-448.02's turin-defaults posterior straddles it.
 
-    Measured: the *grazing* cases are the easy ones (~1e-9 relative at
-    ``n_gl=16``). The hardest is just *inside* the edge, where the inner
-    pair survives as two narrow sub-intervals -- 1.9e-6 at ``n_gl=16``,
-    5.7e-5 at the production ``N_GL``. KOI-448.02's posterior sits there,
-    which is why both sides are parametrized.
+    What this does **not** pin, and should not: ``flux_dev_from_tau``'s own
+    detachment of the split points (``metal.py``). That is MetalPlanet's
+    internal choice, and it is invisible to an accuracy test by
+    construction -- splits that move track the kink, so a moving-split
+    gradient agrees with the truth *better* at finite ``n_gl`` than the
+    frozen one does. A reviewer confirmed removing it passes every case.
     """
     n_gl = M.N_GL if n_gl is None else n_gl
-    exp = 29.4 / 1440
+    fd = _grazing_reference_gradient(k, b)
+    assert np.all(np.abs(fd) > 1e-6), (k, b, fd)      # reference is non-degenerate
 
-    def reference(k_, b_):
-        with mx.stream(mx.cpu):
-            aRs = float(M.a_over_rstar(*[mx.array([[v]], dtype=mx.float64)
-                                         for v in (T14, P_REF, k_, b_)])[0, 0])
-        pars = TransitParams()
-        pars.t0 = 0.0
-        pars.per, pars.rp, pars.a = P_REF, k_, aRs
-        pars.inc = math.degrees(math.acos(b_ / aRs))
-        pars.ecc, pars.w = 0.0, 90.0
-        pars.u, pars.limb_dark = [float(U1), float(U2)], "quadratic"
-        f = TransitModel(pars, TIMES, dtype=mx.float64, exp_time=exp,
-                         integration="contact", n_gl=16).light_curve(pars)
-        return float(np.sum(np.asarray(f, dtype=np.float64) ** 2))
-
-    h = 1e-6
-    fd = np.array([(reference(k + h, b) - reference(k - h, b)) / (2 * h),
-                   (reference(k, b + h) - reference(k, b - h)) / (2 * h)])
-
-    grid = one_epoch_grid(exp_time=exp, n_gl=n_gl, dtype=mx.float64)
+    grid = one_epoch_grid(exp_time=GRAZING_EXP, n_gl=n_gl, dtype=mx.float64)
 
     def scalar(v):
         col = lambda i: v[i].reshape(1, 1)
@@ -465,9 +475,8 @@ def test_grazing_gradient_matches_a_finite_differenced_reference(k, b, n_gl, tol
         g = np.array(mx.grad(scalar)(mx.array(v0, dtype=mx.float64)),
                      dtype=np.float64)
 
-    # the detachment this relies on would show up here first
     assert np.all(np.isfinite(g)), (k, b, n_gl, g)
-    assert np.all(np.abs(g[:2]) > 1e-6), (k, b, g)   # not silently zeroed
+    assert np.all(np.abs(g[:2]) > 1e-6), (k, b, g)    # not silently zeroed
     rel = np.abs(g[:2] - fd) / np.abs(fd)
     assert np.all(rel < tol), (k, b, n_gl, rel, g[:2], fd)
 

@@ -308,28 +308,46 @@ limb darkening as an eccentricity term, silently.
 
 0.8.1 fixed **NaN gradients on grazing transits, circular included**
 (`0 * inf` where the contact clip collapses the inner pair). No turin
-result was affected, because only the differentiable *frontend* graph saw
-it -- `flux_dev_from_tau` detaches its contacts, and that is turin's entry
-point. turin's grazing targets depend on that detachment, so **0.1.34 pins
-it**: `test_grazing_gradient_matches_a_finite_differenced_reference` checks
-`d/dk` and `d/db` through the contact rule on both sides of `b = 1 - k`,
-against MetalPlanet's frontend at `n_gl=16` central-differenced in float64
-(an *independent* reference -- see the FD warning above). It also asserts
-the gradients are finite and non-zero, which is what would break if the
-detachment were withdrawn.
-`test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry` does
-not cover this: it runs at `exp_time=0`, so it never builds a contact.
+result was affected: the guard is a `stop_gradient` in
+`exposure.contact_offsets`, shared by the frontend and `flux_dev_from_tau`,
+and only the frontend's differentiable graph had reached the bad branch.
+**0.1.35 pins that guard** --
+`test_grazing_gradient_matches_a_finite_differenced_reference` asserts
+finite, non-zero `d/dk` and `d/db` through the contact rule on both sides
+of `b = 1 - k`; remove the guard and its three collapsed-pair cases go NaN
+(measured in review). The older
+`test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry` runs
+at `exp_time=0` and never builds a contact, so it cannot see this.
 
-Two things that test measured, worth keeping in mind. **Grazing is the easy
-regime** (~1e-9 relative at `n_gl=16`); the hard one is just *inside* the
-edge, where the inner pair survives as two narrow sub-intervals -- 1.9e-6
-at `n_gl=16` and 5.7e-5 at the production `N_GL`. KOI-448.02's posterior
-(`k = 0.060`, `b = 0.932`, against `1 - k = 0.940`) sits exactly there.
-And the FD warning is live, not theoretical: finite-differencing turin's
-*own* contact path disagrees with its autodiff by 1.5e-5 at `N_GL = 5`
-wherever the inner pair exists, and agrees to 1e-9 once it has collapsed.
-That is the quadrature's split points moving, which is why the reference
-has to be independent.
+The same test checks gradient *accuracy* against MetalPlanet's frontend at
+`n_gl=32`, central-differenced in float64. Be precise about what that
+reference is: it is the **same contact rule**, differenced with its split
+points free to move -- not an independent geometry -- so a bug in the
+shared contact location would be invisible to it. It is nonetheless the
+true derivative: it is converged (`n_gl` 16 to 128 agree to <=1.3e-7), and
+the exact integral does not depend on where it is split. Measured against
+it, turin's frozen-split gradient error falls ~8x per doubling of turin's
+own `n_gl` (near the edge, `d/db`: 6.5e-5 at 5, 1.2e-5 at 9, 2.3e-6 at 16,
+3.0e-7 at 32), which is what the tolerances are set from. **Grazing is the
+easy regime** (~1e-9); the hard one is just *inside* the edge, where the
+inner pair survives as two narrow sub-intervals. KOI-448.02's turin-defaults
+fit (0.1.12: `k = 0.060 +/- 0.007`, `b = 0.932 +/- 0.090`, so `1 - k =
+0.940`) has its mean just inside and its posterior straddling the edge by
+about a sigma; the hurin-compat fit of the same target is the one at
+`b = 0.949` against `0.952`.
+
+Two corrections recorded here because the 0.1.35 commit got them wrong.
+First, that test does **not** pin `flux_dev_from_tau`'s detachment of the
+split points (`metal.py`), and no accuracy test can: splits that move
+track the kink, so a moving-split gradient agrees with the truth *better*
+at finite `n_gl` than the frozen one -- review measured that removing the
+detachment passes every case. That detachment is MetalPlanet's internal
+choice and turin should not pin it. Second, the 1.9e-6 "hard regime" figure
+was turin's own finite-`n_gl` error, not the reference's. The FD warning
+above is about *turin's* path: finite-differencing it recomputes the splits
+and so measures a different quantity from its autodiff (1.5e-5 apart at
+`N_GL = 5` wherever the inner pair exists) -- which is why the reference
+is the frontend and not turin.
 
 ### Why turin does not use MetalPlanet's sampler-facing API
 
