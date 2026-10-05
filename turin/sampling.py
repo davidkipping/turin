@@ -352,7 +352,7 @@ class Continuation:
 
 
 def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
-               resume_state=None, move=None, segment=100):
+               resume_state=None, move=None):
     """Sample, assess, and extend until converged or out of budget.
 
     ``on_round(results, verdict, round_index)`` is called after every round, so
@@ -368,7 +368,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     so extending is cheap in both warmup and information.
 
     ``move``, if given, is a :class:`turin.gibbs.GridGibbs` applied every
-    ``segment`` draws: each round is drawn as several resumed segments with a
+    ``move.segment`` draws: each round is drawn as several resumed segments with a
     sweep between them (and one before a cross-process resume). ChEES
     alternated with an exact move is still one Markov chain, so the segments
     pool exactly as before. Chains are moved with anvil's
@@ -395,9 +395,10 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     for rnd in range(64):           # a bound, not an expectation
         n_samples = cfg.n_samples if rnd == 0 else min(
             cfg.n_samples * 2 ** rnd, max(1, cfg.max_samples - total))
+        seg = None if move is None else move.segment
         chunks = ([n_samples] if move is None else
-                  [segment] * (n_samples // segment)
-                  + ([n_samples % segment] if n_samples % segment else []))
+                  [seg] * (n_samples // seg)
+                  + ([n_samples % seg] if n_samples % seg else []))
         t_gibbs = 0.0
         sweep_stats = []
         round_segs = []
@@ -418,7 +419,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                 log(f"  round {rnd}: {cfg.n_warmup} warmup + {n_samples} "
                     f"draws/chain on {cfg.n_chains} chains"
                     + ("" if move is None else
-                       f", grid-Gibbs on the epoch times every {segment}"))
+                       f", grid-Gibbs on the epoch times every {seg}"))
                 results = anvil.run(kernel, target, u0,
                                     n_warmup=cfg.n_warmup, seed=cfg.seed, **kw)
             else:
@@ -465,7 +466,7 @@ def _round_accounting(reported, round_segs):
     """Divergences and acceptance over a whole round, not its last segment.
 
     anvil reports both per segment; a round drawn as several segments would
-    otherwise describe only its final ``segment`` draws.
+    otherwise describe only its final segment's draws.
     """
     extras = dict(round_segs[-1].extras or {})
     extras["n_divergent"] = sum(int((s.extras or {}).get("n_divergent", 0))

@@ -333,13 +333,20 @@ data axis across epoch boundaries and so cannot hold a per-epoch solve.
 
 ChEES does not cross between separated timing modes of a weak transit, and
 the pooled draws then weight each mode by chain count, not probability. The
-TTV fit therefore interleaves `gibbs.GridGibbs` every 100 draws
+TTV fit therefore interleaves `gibbs.GridGibbs` every `gibbs.SEGMENT` = 25 draws
 (`--gibbsgrid=on`, the default). It rests on one structural fact: **given the
 shape parameters, each epoch's likelihood term and timing prior depend on
 that epoch's time alone**. Anything that breaks that factorization (noise
 correlated across epochs, a dynamical TTV model coupling the times) breaks
 the move, and must turn it off rather than leave it running.
 
+- The interval is 25 draws (`gibbs.SEGMENT`, read by the round loop from
+  the move). Measured against 100 on three Kepler targets: the two with a
+  second timing mode (KOI-7776.01, KOI-5162.01) went from unconverged at
+  the cap (162 / 88 min) to converged at 9,300 draws (105 / 58 min); the
+  control with none (KOI-5228.01) cost +10% and its worst timing distance
+  from the exact marginal fell 0.032 -> 0.011. Sweeps are ~15% of a round
+  at 25. One seed per target.
 - It is exact, not approximate: an independence proposal from the grid
   density plus a Metropolis-Hastings correction. Grid resolution affects
   acceptance (93-98% at 512 cells), never correctness.

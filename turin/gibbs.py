@@ -37,8 +37,14 @@ from . import params as _params
 #: Grid cells per epoch. The MH correction makes any resolution exact; this
 #: one gave 93-97% acceptance on Kepler long-cadence targets.
 N_GRID = 512
-#: Draws per chain between Gibbs sweeps.
-SEGMENT = 100
+#: Draws per chain between Gibbs sweeps. 25, not 100: on the Kepler targets
+#: where a transit has two timing modes (KOI-7776.01, KOI-5162.01), sweeping
+#: every 100 left both unconverged at the 16,384-draw cap (162 / 88 min of
+#: TTV sampling); every 25 converged both at 9,300 draws (105 / 58 min). On a
+#: target with no mode switching (KOI-5228.01) it cost +10% time and still
+#: improved the timing posteriors (worst distance from the exact marginal
+#: 0.032 -> 0.011), because exact redraws also mix within a mode.
+SEGMENT = 25
 
 
 @dataclass
@@ -58,10 +64,12 @@ class GridGibbs:
     """
 
     def __init__(self, lp, transform, layout, *, T14, n_grid=N_GRID,
-                 batch=4096, seed=0):
+                 segment=SEGMENT, batch=4096, seed=0):
         if layout.mode != "ttv":
             raise ValueError("grid-Gibbs applies to the TTV fit only")
         self.lp, self.transform, self.layout = lp, transform, layout
+        #: draws per chain between sweeps; the round loop reads it
+        self.segment = int(segment)
         self.n_ep = layout.n_epochs
         self.T14 = float(T14)
         self.batch = int(batch)

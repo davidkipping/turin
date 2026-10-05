@@ -158,7 +158,7 @@ does not move chains between such bumps. Left alone, each bump is weighted by
 however many chains happen to settle there, and that transit's R-hat never
 passes however long the fit runs.
 
-So by default the TTV fit interleaves an exact Gibbs step. Every 100 draws,
+So by default the TTV fit interleaves an exact Gibbs step. Every 25 draws,
 each chain redraws every transit time from its conditional posterior, given
 that chain's current shape parameters. The conditional is evaluated on a grid
 spanning the whole timing prior, so a chain can land in any bump, and a
@@ -169,8 +169,13 @@ grid point however many transits there are.
 
 On KOI-4848.01 and KOI-5897.01, against exact timing marginals computed by
 brute force, this cut a weak transit's distance from the true posterior by
-5-8x (e.g. 0.162 to 0.019 in total variation). `--gibbsgrid=off` gives
-independent ChEES chains only. The setting is a resume guard, so a lineage
+5-8x (e.g. 0.162 to 0.019 in total variation).
+
+The sweep runs every 25 draws rather than every 100. On KOI-7776.01 and
+KOI-5162.01, whose weakest transit has two timing modes, sweeping every 100
+left both unconverged at the draw cap, while every 25 converged both about
+35% sooner. On a target with no second mode it costs ~10% and still sharpens
+the timing posteriors. `--gibbsgrid=off` gives independent ChEES chains only. The setting is a resume guard, so a lineage
 cannot pool chains drawn both ways.
 
 ## Options

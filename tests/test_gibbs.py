@@ -135,13 +135,17 @@ def test_round_loop_moves_chains_through_with_positions():
                             u_all=u_map[None, :], log_prob_all=np.zeros(1),
                             n_iter=0, top_spread=0.0)
     move = gibbs.GridGibbs(lp, transform, layout, T14=T14_T, n_grid=128,
-                           batch=4096, seed=5)
+                           segment=50, batch=4096, seed=5)
     lines = []
     results, verdict, total = sampling.run_rounds(
         target, list(layout.names), res.ball(cfg.n_chains, seed=4), cfg,
-        log=lines.append, move=move, segment=50)
+        log=lines.append, move=move)
     assert any("grid-Gibbs:" in l for l in lines)
+    assert any("every 50" in l for l in lines)
     assert isinstance(results, sampling.Continuation)
+    # the round loop takes its interval from the move: no segment is longer
+    assert max(s.get_chain().shape[0] for s in results.segments) == 50
+    assert gibbs.GridGibbs.__init__.__kwdefaults__["segment"] == gibbs.SEGMENT
     assert results.get_chain().shape == (total, 64, layout.dim)
     assert np.all(np.isfinite(results.get_log_prob()))
 
