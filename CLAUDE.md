@@ -297,6 +297,25 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
+**Verified against MetalPlanet 0.9.7** (`957eb3a`), turin 0.1.33, 216 tests
+green. 0.8.0 put eccentric orbits on `flux_dev_from_tau` as the
+*keyword-only* `secosw=`/`sesinw=`, so turin's positional
+`(tau, period, a, b, r, u1, u2)` call is untouched; omitted, they change
+nothing, and 0.8.1 states circular output stays bit-identical (40 arrays,
+both precisions, both LD laws). That ordering is the thing to re-check on
+any future bump: inserted positionally before `u1`, turin would have passed
+limb darkening as an eccentricity term, silently.
+
+One thing turin relies on without testing it. 0.8.1 fixed **NaN gradients
+on grazing transits, circular included** (`0 * inf` where the contact clip
+collapses the inner pair). No turin result was affected, because only the
+differentiable *frontend* graph saw it -- `flux_dev_from_tau` detaches its
+contacts, and that is turin's entry point. But turin's grazing targets
+(KOI-448.02 sits at `b = 0.949` against `1 - k = 0.952`) depend on that
+detachment for finite gradients, and
+`test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry` passes
+either way, so it would not catch the protection being withdrawn.
+
 ### Why turin does not use MetalPlanet's sampler-facing API
 
 `metalplanet.anvil.make_quad_transit_flux` and `make_transit_target` bake
