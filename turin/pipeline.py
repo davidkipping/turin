@@ -611,8 +611,10 @@ def _ttv_rows(phys, names, layout, centering, epoch_data, model, summary, *,
               lp, v_ml):
     """Per-epoch timing rows for the TTV export, with fit diagnostics."""
     n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
+    keys = [f"dtau_{int(n)}" for n in n_arr]
     P_fit, tau0_fit, _ = _outputs.fit_linear_ephemeris(
-        n_arr, [summary[f"dtau_{int(n)}"]["median"] for n in n_arr])
+        n_arr, [summary[k]["median"] for k in keys],
+        [summary[k]["std"] for k in keys])
 
     mask = np.asarray(epoch_data["mask"]) > 0
     y = np.asarray(epoch_data["flux_padded"], dtype=np.float64)

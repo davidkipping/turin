@@ -263,15 +263,45 @@ def test_clear_products_respects_the_tag(tmp_path):
                                        "KOI-1.01_lineph_summary.r2.csv"))
 
 
-def test_fit_linear_ephemeris_is_robust_to_an_outlier():
+def test_fit_linear_ephemeris_weights_by_timing_error():
+    """A time from a chain stuck in the wrong mode carries a large error and
+    so barely moves the line; a well-measured TTV is not discarded but
+    shows up in chi2 (the old MAD clip threw out real TTVs)."""
     epochs = np.arange(12.0)
     P, tau0 = 9.3456, 120.5
     times = tau0 + P * epochs
-    times[7] += 0.5                       # one badly wrong measurement
-    P_fit, tau0_fit, keep = outputs.fit_linear_ephemeris(epochs, times)
-    np.testing.assert_allclose(P_fit, P, atol=1e-6)
-    np.testing.assert_allclose(tau0_fit, tau0, atol=1e-5)
-    assert not keep[7]
+    err = np.full(12, 1e-3)
+
+    wrong = times.copy()
+    wrong[7] += 0.5                      # badly wrong, but known to be poor
+    poor = err.copy()
+    poor[7] = 1.0
+    P_fit, tau0_fit, chi2 = outputs.fit_linear_ephemeris(epochs, wrong, poor)
+    np.testing.assert_allclose(P_fit, P, atol=1e-5)
+    np.testing.assert_allclose(tau0_fit, tau0, atol=1e-4)
+    assert chi2 < 1.0
+
+    ttv = times.copy()
+    ttv[7] += 0.03                       # a real, well-measured TTV: 30 sigma
+    _, _, chi2 = outputs.fit_linear_ephemeris(epochs, ttv, err)
+    assert chi2 > 500.0
+
+    # no errors: equal weights, an ordinary straight-line fit
+    P_u, tau0_u, _ = outputs.fit_linear_ephemeris(epochs, times)
+    np.testing.assert_allclose([P_u, tau0_u], [P, tau0], atol=1e-8)
+
+
+def test_fit_linear_ephemeris_on_koi_2686():
+    """The measured KOI-2686.01 times: all seven contribute (no clipping),
+    and the timings are decisively non-linear."""
+    n = np.array([-3, -2, -1, 0, 1, 2, 3], dtype=float)
+    oc = np.array([17.6, -49.5, 10.0, 13.9, 20.5, 19.2, -31.7]) / 1440.0
+    err = np.array([2.5, 2.3, 2.6, 3.0, 3.2, 2.5, 2.7]) / 1440.0
+    times = 1000.0 + 211.03 * n + oc
+    P, tau0, chi2 = outputs.fit_linear_ephemeris(n, times, err)
+    assert 700 < chi2 < 820            # 761 for 5 dof
+    resid = (times - (tau0 + P * n)) * 1440.0
+    assert resid[1] < -40              # epoch -2 is a TTV, not a reject
 
 
 def test_summarize_percentiles_and_diagnostics():

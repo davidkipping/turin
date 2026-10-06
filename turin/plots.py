@@ -125,26 +125,28 @@ def oc_plot(path, epochs, tmid, tmid_err, *, title="", colour="#e67e22",
             log=None):
     """Observed-minus-calculated diagram against a refitted linear ephemeris.
 
-    The reference is a robust fit to the measured times, not the archive
-    ephemeris: against the archive the diagram shows the archive's error.
+    The reference is an error-weighted fit to the measured times, not the
+    archive ephemeris (against which the diagram shows the archive's
+    error); its chi-squared is shown as a measure of how non-linear the
+    timings are.
     """
     import matplotlib.pyplot as plt
 
     epochs = np.asarray(epochs, dtype=np.float64)
     tmid = np.asarray(tmid, dtype=np.float64)
     err = np.asarray(tmid_err, dtype=np.float64)
-    P, tau0, kept = _outputs.fit_linear_ephemeris(epochs, tmid)
+    P, tau0, chi2 = _outputs.fit_linear_ephemeris(epochs, tmid, err)
     oc_min = (tmid - (tau0 + P * epochs)) * 24.0 * 60.0
 
     fig, ax = plt.subplots(figsize=(7.0, 4.0))
     ax.axhline(0.0, color="0.6", lw=0.8, zorder=1)
-    ax.errorbar(epochs[kept], oc_min[kept], yerr=err[kept] * 1440.0, fmt="o",
-                ms=4, color=colour, lw=1.0, capsize=0, zorder=3)
-    if (~kept).any():
-        ax.errorbar(epochs[~kept], oc_min[~kept], yerr=err[~kept] * 1440.0,
-                    fmt="o", ms=4, mfc="none", color="0.5", lw=1.0,
-                    capsize=0, zorder=2, label="clipped from the fit")
-        ax.legend(loc="best", fontsize=8, frameon=False)
+    ax.errorbar(epochs, oc_min, yerr=err * 1440.0, fmt="o", ms=4,
+                color=colour, lw=1.0, capsize=0, zorder=3)
+    dof = epochs.size - 2
+    if dof > 0 and np.isfinite(chi2):
+        ax.text(0.02, 0.96, f"linear ephemeris: chi2 = {chi2:.1f} "
+                f"for {dof} dof", transform=ax.transAxes, fontsize=8,
+                va="top", color="0.3")
     ax.set_xlabel("epoch")
     ax.set_ylabel("O - C (minutes)")
     ax.set_title(title or f"P = {P:.6f} d, tau0 = {tau0:.5f}", fontsize=10)

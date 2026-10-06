@@ -274,7 +274,9 @@ working. Seven products per LinEph fit, nine per TTV fit:
 <T>_ttv_times.csv             epoch, tmid, tmid_err, O-C, SNR, npts, chi2
                               (SNR: sqrt(2 dlnL) per transit against a
                               no-transit fit with its own baseline)
-<T>_ttv_oc.pdf                O-C against a refitted linear ephemeris
+<T>_ttv_oc.pdf                O-C against a linear ephemeris fitted to the
+                              measured times, weighted by their errors; its
+                              chi2 measures how non-linear the timings are
 ```
 
 Every product records turin's version and the exact command that made it, on

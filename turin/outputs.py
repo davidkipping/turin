@@ -245,27 +245,37 @@ def log10_rho_draws(draws, names, b_prior, *, P_ref=None):
         derived_b(draws, names, b_prior))
 
 
-def fit_linear_ephemeris(epochs, times, *, n_iter=3, clip=5.0):
-    """Robust linear fit to measured transit times, for the O-C reference.
+def fit_linear_ephemeris(epochs, times, errors=None):
+    """Linear ephemeris through measured transit times, for the O-C reference.
 
-    Iterative MAD clipping, as hurin does: the reference should be the times
-    themselves, not the archive ephemeris, or the diagram shows the archive's
-    error rather than the planet's.
+    Least squares weighted by each time's uncertainty, with no clipping.
+    hurin clipped at 5x the MAD-scaled scatter so that one chain trapped in
+    the wrong timing mode could not tilt the line. The weights do that job
+    directly, since a poorly constrained time carries a large error and so
+    little weight, whereas the clip ignored the errors and threw out real
+    TTVs: on KOI-2686.01 it discarded the best-measured transit (-50 min,
+    +/-2.3 min), and the clip-refit loop never settled, alternating between
+    clipping and keeping it until the iteration limit.
+
+    Returns ``(P, tau0, chi2)``. ``chi2`` is the weighted sum of squared
+    residuals, with ``len(times) - 2`` degrees of freedom: how far the times
+    are from linear, given their errors. Without ``errors`` the weights are
+    equal and ``chi2`` is in units of the times squared.
     """
-    epochs = np.asarray(epochs, dtype=np.float64)
-    times = np.asarray(times, dtype=np.float64)
-    keep = np.ones(times.size, dtype=bool)
-    P = tau0 = np.nan
-    for _ in range(n_iter):
-        if keep.sum() < 3:
-            break
-        P, tau0 = np.polyfit(epochs[keep], times[keep], 1)
-        resid = times - (tau0 + P * epochs)
-        mad = np.median(np.abs(resid[keep] - np.median(resid[keep])))
-        if not np.isfinite(mad) or mad <= 0:
-            break
-        keep = np.abs(resid) < clip * 1.4826 * mad
-    return float(P), float(tau0), keep
+    n = np.asarray(epochs, dtype=np.float64)
+    t = np.asarray(times, dtype=np.float64)
+    if errors is None:
+        w = np.ones_like(t)
+    else:
+        e = np.asarray(errors, dtype=np.float64)
+        w = np.where(np.isfinite(e) & (e > 0), 1.0 / np.maximum(e, 1e-300) ** 2,
+                     0.0)
+    if np.count_nonzero(w) < 2:
+        return float("nan"), float("nan"), float("nan")
+    A = np.column_stack([np.ones_like(n), n])
+    tau0, P = np.linalg.solve(A.T @ (A * w[:, None]), A.T @ (w * t))
+    chi2 = float(np.sum(w * (t - (tau0 + P * n)) ** 2))
+    return float(P), float(tau0), chi2
 
 
 # -- resume state ------------------------------------------------------

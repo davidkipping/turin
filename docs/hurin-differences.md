@@ -255,6 +255,21 @@ Two data-handling differences, neither in the model:
   one star, which includes every comparison target in this document, are
   unaffected.
 
+## 5. The O-C reference line (turin >= 0.1.42)
+
+Display only: no posterior is affected. Both packages draw O-C against a
+linear ephemeris refitted to the measured transit times. hurin's
+`_fit_linear_ephemeris` clips times beyond 5x the MAD-scaled scatter,
+ignoring their errors, and refits up to three times. turin now fits by
+least squares weighted by each time's posterior uncertainty, with no
+clipping, and reports the fit's chi-squared. The clip treated real TTVs as
+outliers: on KOI-2686.01 (seven transits, errors ~2.5 min) it flagged the
+best-measured one, -50 min, and the clip-refit loop alternated between
+clipping and keeping it until the iteration limit, in hurin as in turin's
+port. Where the timings are consistent with a straight line the two
+references agree; where one time is genuinely poor, its large error gives it
+little weight, which is what the clip was for.
+
 ## Secondary comparison: KOI-448.02, where the model differences bite
 
 Kept for what KOI-518.02 cannot show. This target is **grazing**, so the
