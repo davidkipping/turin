@@ -112,9 +112,10 @@ of those landed upstream, and anvil < 0.3.0 also carries a silent rank
 corruption in `diagnose`, so since 0.1.24 `capabilities.require_anvil()`
 refuses anything older than `capabilities.MIN_ANVIL` (0.3.0) with the
 upgrade command, before touching the disk. **anvil 0.4.2 is current and is
-what turin runs against, but `MIN_ANVIL` stays 0.3.0** (full suite last
-run at 0.4.0, 216 passed; 0.4.2's API was audited call-by-call unchanged,
-and the re-run is pending a free GPU): 0.4.0's fix is
+what turin runs against, but `MIN_ANVIL` stays 0.3.0** (0.4.2's API was
+audited call-by-call unchanged, and the full suite passes at 0.4.2 with
+MetalPlanet 0.9.7: 212 passed, 14 skipped where no hurin clone sits beside
+turin for the parity tests, 2026-10-05): 0.4.0's fix is
 for a target mutated between `run` calls, and turin's target holds only
 static tensors — grid-Gibbs moves positions, not the target. 0.4.1 and
 0.4.2 are review follow-ups to that fix (`Kernel.retrace(target)` is now
