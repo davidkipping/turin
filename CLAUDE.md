@@ -64,11 +64,9 @@ in a matching `*_reply.md`. Existing briefs:
 SquishierPlanet proposed it (`docs/upstream/turin_collapsed_ld_prompt.md`
 in that repo, with turin's questions and their answers beside it) and
 supplied a validated reference implementation; turin 0.1.39-0.1.41 built it
-as `turin/ldmarg.py` (see "Collapsed limb darkening" below). Real-target
-acceptance against the default -- KOI-518.02, and KOI-448.02, where the
-grazing geometry piles the limb darkening against a triangle vertex -- is
-**pending a free GPU**; until it lands the mode is validated on synthetic
-data only, and README says so.
+as `turin/ldmarg.py` (see "Collapsed limb darkening" below), and 0.1.43
+passed real-target acceptance against the default on KOI-518.02 and
+KOI-448.02 (`docs/bench/collapsed_ld_acceptance.md`).
 
 **Every brief turin has sent has landed, so nothing is outstanding
 upstream.** Do not open a new one without being asked to: write the finding
@@ -321,10 +319,18 @@ Load-bearing details:
   draws, not sampler output); the chains `loglike` column is the sampler's
   stored target exactly as in sampled mode (so the ML row is its argmax);
   the ML-row light curve uses the conditional mode at the best theta.
-- For quadratic LD it is break-even on ESS/s (157 vs 162) at ~2.2x memory,
-  which is why it is opt-in. Its turin-specific value is reliability:
-  `q1, q2` are the bounded parameters most prone to pinning ChEES chains at
-  a wall (KOI-448.02: 0.96, 0.93).
+- Real-target acceptance (0.1.43; LinEph, 512 chains, same seed, to
+  convergence): every parameter within 0.011 sigma and 2.5% width of the
+  default, KS at the self-resample level, zero `q` draws on the box edge
+  (KOI-448.02: `x*` on a triangle edge for 54% of draws, 460,800 draws).
+  **Cost: break-even on KOI-518.02 (164.0 vs 163.7 ESS/s), 28% slower on
+  KOI-448.02 (39.5 vs 54.5).** That is why it stays opt-in.
+- **A claim that did not survive measurement, recorded so it is not
+  repeated:** turin's docs argued collapsed mode would help on wall-hugging
+  limb darkening, since `q1, q2` are bounded and ChEES can freeze a chain at
+  an edge. On KOI-448.02 (`q1, q2` = 0.96, 0.93) the sampled run had no
+  trapped chains, and collapsed was slower. Its value is the dimension
+  reduction itself, which matters for laws with more coefficients.
 
 Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 `model.N_GL`; turin passes it explicitly, so that default is inert here.

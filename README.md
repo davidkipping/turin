@@ -174,14 +174,24 @@ sample instead of integrating over it is the obvious shortcut and it is wrong:
 measured, it biased `k`, `b` and `T14` by up to 0.38σ and inflated `k`'s width
 by 46% on KOI-518.02.
 
-Why it is opt-in rather than the default: for the two-coefficient quadratic
-law it is a wash on speed (ESS per second 157 against 162 on KOI-518.02) and
-costs about 2.2x the memory per log-density evaluation. What it buys is two
-fewer sampled dimensions — and those two are the bounded parameters most
-prone to pinning ChEES chains at a wall, since poorly constrained limb
-darkening piles against the edge of the box (KOI-448.02's `q1, q2` sit at
-0.96 and 0.93). Its value grows with the number of limb-darkening
-coefficients.
+Why it is opt-in rather than the default: it gives the same answer at no
+gain in speed for the two-coefficient quadratic law, and costs about 2.2x the
+memory per log-density evaluation. Measured against the default on two real
+targets (LinEph, 512 chains, same seed, run to convergence):
+
+| target | ESS per second, sampled | collapsed | rounds (both) |
+|---|---|---|---|
+| KOI-518.02 | 163.7 | 164.0 | 1 |
+| KOI-448.02 (near-grazing) | 54.5 | **39.5** | 2 |
+
+On KOI-518.02 it is break-even; on KOI-448.02 it is 28% slower. We had
+expected the opposite there: `q1, q2` sit against the edge of the box
+(0.96, 0.93), and taking them out of ChEES looked like it should help. It did
+not -- the sampled run had no trapped chains, so there was nothing to fix,
+and collapsed mode's dearer evaluations set the cost. Its value is the
+dimension reduction itself, which grows with the number of limb-darkening
+coefficients (the case that motivated it); for the quadratic law, use it when
+you want the limb darkening out of the sampled vector, not for speed.
 
 Restrictions, each refused up front with the reason:
 
@@ -197,9 +207,14 @@ conditional draws, not sampler output. The ML-row light curve (lcdata, fold
 plot) uses the conditional mode of `q1, q2` at the best draw. A lineage is
 either sampled or collapsed, never both: `ld` is a resume guard.
 
-Real-target acceptance against the default (KOI-518.02 and the grazing
-KOI-448.02) is pending; until then treat it as validated on synthetic data
-only.
+**Validated against the default on real data.** On KOI-518.02 and
+KOI-448.02 every parameter, `q1` and `q2` included, agrees within 0.011σ in
+median and 2.5% in width, with two-sample KS distances at the level of two
+halves of the default's own chains. KOI-448.02 is the sharp case -- its
+limb-darkening expansion point lies on the edge of the triangle for 54% of
+draws -- and none of its 460,800 `q1, q2` draws lands on the edge of the box.
+The default mode's products are byte-identical to those before the feature
+existed (KOI-518.02, 153,600 draws). Details: `docs/bench/collapsed_ld_acceptance.md`.
 
 ### Weak transits and grid-Gibbs
 
