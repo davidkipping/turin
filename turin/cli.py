@@ -85,7 +85,7 @@ usage: turin --KOI-448.02 [options]
                           grid conditional between ChEES segments, so chains
                           move between timing modes (default on). off gives
                           independent ChEES chains only
-  --seed=N
+  --seed=N                random seed, a non-negative integer (default 0)
 
   --bprior=transiting|nongrazing|box   (b, k) prior (default transiting)
   --nongrazing            alias for --bprior=nongrazing
@@ -250,10 +250,12 @@ def collapsed_ld_problem(args):
 def _assign(args, field_name, flag, raw):
     ints = {"chains", "warmup", "samples", "max_samples", "max_leapfrog",
             "seed"}
+    # every integer flag must be positive except --seed, whose default is 0
+    least = 0 if field_name == "seed" else 1
     try:
         if field_name in ints:
             value = int(raw)
-            if value <= 0:
+            if value < least:
                 raise ValueError
         elif field_name == "ttv_max_min":
             value = float(raw)
@@ -270,7 +272,7 @@ def _assign(args, field_name, flag, raw):
             if not value:
                 raise ValueError
     except ValueError:
-        _fail(f"{flag} needs a positive "
+        _fail(f"{flag} needs a {'non-negative' if least == 0 else 'positive'} "
               f"{'integer' if field_name in ints else 'value'}, got {raw!r}")
     setattr(args, field_name, value)
 

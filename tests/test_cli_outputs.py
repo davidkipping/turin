@@ -75,6 +75,8 @@ def test_modes_subset():
     (["--KOI-1.01", "--chains=0"], "positive"),
     (["--KOI-1.01", "--chains=abc"], "positive"),
     (["--KOI-1.01", "--TTVmax=-5"], "positive"),
+    (["--KOI-1.01", "--seed=-1"], "non-negative integer"),
+    (["--KOI-1.01", "--seed=abc"], "non-negative integer"),
     (["--KOI-1.01", "--tag=bad tag"], "tag"),
     (["--KOI-1.01", "--KOI-2.01"], "more than one target"),
     (["KOI-1.01"], "unrecognized"),
@@ -91,6 +93,14 @@ def test_modes_subset():
 def test_bad_arguments_are_rejected(argv, pattern):
     with pytest.raises(SystemExit, match=pattern):
         cli.parse_args(argv)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 12345])
+def test_seed_accepts_zero_its_own_default(seed):
+    # --seed=0 was refused as "needs a positive integer", so the default seed
+    # could not be named explicitly (0.1.45)
+    assert cli.parse_args(["--KOI-1.01", f"--seed={seed}"]).seed == seed
+    assert cli.parse_args(["--KOI-1.01"]).seed == 0
 
 
 @pytest.mark.parametrize("pl", ["auto", "exact"])
