@@ -64,9 +64,10 @@ in a matching `*_reply.md`. Existing briefs:
 SquishierPlanet proposed it (`docs/upstream/turin_collapsed_ld_prompt.md`
 in that repo, with turin's questions and their answers beside it) and
 supplied a validated reference implementation; turin 0.1.39-0.1.41 built it
-as `turin/ldmarg.py` (see "Collapsed limb darkening" below), and 0.1.43
-passed real-target acceptance against the default on KOI-518.02 and
-KOI-448.02 (`docs/bench/collapsed_ld_acceptance.md`).
+as `turin/ldmarg.py` (see "Collapsed limb darkening" below). Real-target
+acceptance against the default on KOI-518.02 and KOI-448.02 was recorded in
+0.1.43 and its analysis corrected in 0.1.44 after code review
+(`docs/bench/collapsed_ld_acceptance.md`).
 
 **Every brief turin has sent has landed, so nothing is outstanding
 upstream.** Do not open a new one without being asked to: write the finding
@@ -319,12 +320,27 @@ Load-bearing details:
   draws, not sampler output); the chains `loglike` column is the sampler's
   stored target exactly as in sampled mode (so the ML row is its argmax);
   the ML-row light curve uses the conditional mode at the best theta.
-- Real-target acceptance (0.1.43; LinEph, 512 chains, same seed, to
-  convergence): every parameter within 0.011 sigma and 2.5% width of the
-  default, KS at the self-resample level, zero `q` draws on the box edge
-  (KOI-448.02: `x*` on a triangle edge for 54% of draws, 460,800 draws).
-  **Cost: break-even on KOI-518.02 (164.0 vs 163.7 ESS/s), 28% slower on
-  KOI-448.02 (39.5 vs 54.5).** That is why it stays opt-in.
+- Real-target acceptance (`docs/bench/collapsed_ld_acceptance.md`;
+  LinEph, 512 chains, to convergence): every parameter within 0.011 sigma
+  and 2.5% width of the default; KS judged against a null of each run's own
+  chains split in half (not random rows -- draws are autocorrelated); zero
+  `q` draws on the box edge (KOI-448.02: `x*` on a triangle edge for 54% of
+  draws). One pairing failed that null (KOI-518.02 `q1`, seed 0); a second
+  seed of both modes showed two opposite run-level fluctuations, not a mode
+  difference. KOI-448.02 ran `--nongrazing`, so grazing is covered by
+  synthetic tests only (`test_model` / `test_ldmarg` grazing cases).
+  **Cost, minimum ESS over the shared five parameters per end-to-end wall
+  second: break-even on KOI-518.02 (156.5 vs 157.4), 1.41x the time per
+  effective sample on KOI-448.02 (37.6 vs 53.1).** That is why it stays
+  opt-in.
+- **How not to judge a two-sampler comparison, learned here.** Random-row
+  halves of one run are not a null for two runs (within-chain
+  autocorrelation); split by chain. Even that can be optimistic, since
+  ChEES shares adaptation across a run's chains, so a surprising single
+  result gets a second seed of *both* modes before it is called a bias or
+  a pass. And cost must use end-to-end wall time and the same parameter set
+  in both modes: collapsed mode's post-hoc `q` draws happen outside the
+  sampling rounds, and its summary has no ESS for `q1, q2`.
 - **A claim that did not survive measurement, recorded so it is not
   repeated:** turin's docs argued collapsed mode would help on wall-hugging
   limb darkening, since `q1, q2` are bounded and ChEES can freeze a chain at

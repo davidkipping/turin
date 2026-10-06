@@ -177,14 +177,17 @@ by 46% on KOI-518.02.
 Why it is opt-in rather than the default: it gives the same answer at no
 gain in speed for the two-coefficient quadratic law, and costs about 2.2x the
 memory per log-density evaluation. Measured against the default on two real
-targets (LinEph, 512 chains, same seed, run to convergence):
+targets (LinEph, 512 chains, same seed, run to convergence; ESS/s is the
+minimum bulk ESS over the five parameters both modes sample, over end-to-end
+wall time, so collapsed mode's post-hoc draws are counted):
 
-| target | ESS per second, sampled | collapsed | rounds (both) |
+| target | ESS per second, sampled | collapsed | collapsed time per ESS |
 |---|---|---|---|
-| KOI-518.02 | 163.7 | 164.0 | 1 |
-| KOI-448.02 (near-grazing) | 54.5 | **39.5** | 2 |
+| KOI-518.02 | 157.4 | 156.5 | 1.01x |
+| KOI-448.02 (`--nongrazing`) | 53.1 | **37.6** | **1.41x** |
 
-On KOI-518.02 it is break-even; on KOI-448.02 it is 28% slower. We had
+On KOI-518.02 it is break-even; on KOI-448.02 it takes 1.41x the wall time
+per effective sample. We had
 expected the opposite there: `q1, q2` sit against the edge of the box
 (0.96, 0.93), and taking them out of ChEES looked like it should help. It did
 not -- the sampled run had no trapped chains, so there was nothing to fix,
@@ -207,14 +210,18 @@ conditional draws, not sampler output. The ML-row light curve (lcdata, fold
 plot) uses the conditional mode of `q1, q2` at the best draw. A lineage is
 either sampled or collapsed, never both: `ld` is a resume guard.
 
-**Validated against the default on real data.** On KOI-518.02 and
-KOI-448.02 every parameter, `q1` and `q2` included, agrees within 0.011σ in
-median and 2.5% in width, with two-sample KS distances at the level of two
-halves of the default's own chains. KOI-448.02 is the sharp case -- its
-limb-darkening expansion point lies on the edge of the triangle for 54% of
-draws -- and none of its 460,800 `q1, q2` draws lands on the edge of the box.
-The default mode's products are byte-identical to those before the feature
-existed (KOI-518.02, 153,600 draws). Details: `docs/bench/collapsed_ld_acceptance.md`.
+**Validated against the default on real data**, KOI-518.02 and KOI-448.02,
+every parameter including `q1, q2`: medians within 0.011σ, widths within
+2.5%, and two-sample KS distances judged against a null built from each
+run's own chains split in half. One pairing failed that null (KOI-518.02
+`q1`, seed 0), and a second seed of both modes showed it was two run-level
+fluctuations in opposite directions, not a difference between the modes.
+KOI-448.02 is the hard case for the limb darkening -- its expansion point
+lies on the edge of the triangle for 54% of draws -- and none of its 460,800
+`q1, q2` draws lands on the edge of the box. That run used `--nongrazing`,
+so grazing geometries are covered by synthetic tests only. The default
+mode's chains are byte-identical to those from before the feature existed
+(KOI-518.02, 153,600 draws). Details: `docs/bench/collapsed_ld_acceptance.md`.
 
 ### Weak transits and grid-Gibbs
 

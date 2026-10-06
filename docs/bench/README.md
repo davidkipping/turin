@@ -1,4 +1,14 @@
-# KOI-518.02 hurin/turin benchmark artefacts
+# Benchmark and acceptance artefacts
+
+Two records live here.
+
+- `collapsed_ld_acceptance.md` and `collapsed_ld_compare.py`: `--ld=collapsed`
+  against the default on KOI-518.02 and KOI-448.02 (see that file; the
+  chains tarballs are not kept, being hundreds of MB, so the script reruns
+  only against freshly made runs).
+- Everything below: the hurin/turin comparison on KOI-518.02.
+
+## KOI-518.02 hurin/turin benchmark artefacts
 
 The summaries behind the primary comparison in `../hurin-differences.md`,
 kept so the numbers quoted there can be checked without re-running two fits.

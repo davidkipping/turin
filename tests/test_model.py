@@ -494,8 +494,13 @@ def _three_epoch_grid(dtype, exp_time=29.4 / 1440):
                         dtype=dtype, exp_time=exp_time)
 
 
+@pytest.mark.parametrize("k,b", [
+    (0.11, 0.42),     # full transit
+    (0.11, 0.95),     # grazing: b > 1 - k = 0.89, the inner contacts gone
+    (0.30, 1.15),     # deeply grazing, b > 1
+])
 @pytest.mark.parametrize("dtype,tol", [(mx.float64, 4e-11), (mx.float32, 2e-6)])
-def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol):
+def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol, k, b):
     """``vertex_flux_devs`` (one ld_basis launch, phase-ordered) against
     two independent references.
 
@@ -506,6 +511,10 @@ def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol):
     the ``(0, 0)`` vertex (measured 2.8e-9 off, which is the clamp, not a
     bug). Then the convex combination at a general law against turin's own
     ``transit_flux_dev``, through the q route where no clamp is active.
+
+    Grazing geometries are included because ``--ld=collapsed``'s real-target
+    acceptance ran KOI-448.02 under ``--nongrazing``, so nothing else in
+    turin exercises the ld_basis route with the inner contacts collapsed.
     """
     stream = mx.cpu if dtype == mx.float64 else mx.gpu
     grid = _three_epoch_grid(dtype)
@@ -513,7 +522,7 @@ def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol):
         np.array(grid.order), np.arange(grid.order.size))
     col = lambda v: mx.array([[float(v)]], dtype=dtype)
     mid = mx.array(np.array([[0.002, -0.001, 0.0005]]), dtype=dtype)
-    geo = dict(k=col(0.11), b=col(0.42), T14=col(T14), period=col(P_REF))
+    geo = dict(k=col(k), b=col(b), T14=col(T14), period=col(P_REF))
     with mx.stream(stream):
         verts = [np.array(f, dtype=np.float64)
                  for f in M.vertex_flux_devs(grid, mid=mid, **geo)]

@@ -46,7 +46,11 @@ CASES = {
     "moderate": dict(),
     "weak": dict(yerr=1e-3),                  # x* on the x2 = 0 edge
     "corner": dict(q1=1.0, q2=0.0),           # conditional against q1=1, q2=0
+    "grazing": dict(b=0.95),                  # b > 1 - k = 0.92: no inner contacts
 }
+#: the parameter vector each case is evaluated at (its own truth)
+CASE_THETA = {name: THETA.copy() for name in CASES}
+CASE_THETA["grazing"][3] = 0.95 / 1.08      # beta = b / (1 + k)
 
 
 def _dataset(k=0.08, b=0.35, q1=0.30, q2=0.225, yerr=4e-4, seed=11, n_per=6):
@@ -174,9 +178,10 @@ def test_expansion_point_beats_a_triangle_lattice(targets, case):
     as every point of a 45,451-point lattice. Measured margins +1e-5 to
     +3e-3, all positive, including the edge-active case."""
     hi = targets[case]["collapsed"][3]
-    x1, x2, Ls, _, _ = _ld_terms64(hi, THETA)
+    theta = CASE_THETA[case]
+    x1, x2, Ls, _, _ = _ld_terms64(hi, theta)
     X, _, _ = _lattice(300)
-    assert Ls[0] >= _L_on(hi, THETA, X).max() - 1e-9, case
+    assert Ls[0] >= _L_on(hi, theta, X).max() - 1e-9, case
     assert 0 <= x1[0] <= 1 and 0 <= x2[0] <= 1 and x1[0] + x2[0] <= 1 + 1e-12
 
 
@@ -190,15 +195,16 @@ def test_collapsed_value_matches_brute_force_integration(targets, case):
     the brute force is the inaccurate side; that is asserted, not assumed.
     """
     hi = targets[case]["collapsed"][3]
-    _, _, _, _, H = _ld_terms64(hi, THETA)
+    theta = CASE_THETA[case]
+    _, _, _, _, H = _ld_terms64(hi, theta)
     a, b, c = H[0]
     sigma_min = 1.0 / math.sqrt(max(np.linalg.eigvalsh([[a, b], [b, c]])))
     X, w, h = _lattice(300)
     assert h < sigma_min / 5, (case, h, sigma_min)
-    brute = (logsumexp(_L_on(hi, THETA, X) + LD.log_prior_x_np(X), b=w)
+    brute = (logsumexp(_L_on(hi, theta, X) + LD.log_prior_x_np(X), b=w)
              + math.log(h * h))
     with mx.stream(mx.cpu):
-        v5 = mx.array(THETA[None], dtype=mx.float64)
+        v5 = mx.array(theta[None], dtype=mx.float64)
         coll = float(np.array(hi(v5))[0]
                      - np.array(hi.log_prior(hi.unpack(v5)))[0])
     assert abs(coll - brute) < 2e-4, (case, coll - brute)
@@ -293,9 +299,10 @@ def test_conditional_draws_reproduce_the_exact_conditional(targets, case):
     ``L``. Measured: means within 0.8 standard errors, sds within 2%, TV on
     40 bins 0.02-0.04, acceptance 0.94-0.97."""
     lo, hi = targets[case]["collapsed"][2], targets[case]["collapsed"][3]
+    theta = CASE_THETA[case]
     C = 4096
-    q1, q2, acc, _ = LD.draw_limb_darkening(lo, np.tile(THETA, (C, 1)), seed=3)
-    (q1l, q2l), p = _exact_conditional(hi, THETA)
+    q1, q2, acc, _ = LD.draw_limb_darkening(lo, np.tile(theta, (C, 1)), seed=3)
+    (q1l, q2l), p = _exact_conditional(hi, theta)
     edges = np.linspace(0, 1, 41)
     for got, ref in ((q1, q1l), (q2, q2l)):
         mu = np.sum(p * ref)
