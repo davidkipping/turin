@@ -475,3 +475,7 @@ with no adapter.
 
 If turin contributes to a publication, please cite it along with MetalPlanet
 and anvil.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
