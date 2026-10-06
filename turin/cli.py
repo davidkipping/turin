@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from . import __version__
 from .model import B_PRIORS, GEOMETRIES
+from .params import LD_MODES
 from .profile import PROFILE_MODES
 
 #: ``--PL`` accepts any solve mode, or "auto" to measure and choose.
@@ -30,6 +31,7 @@ TARGET_RE = re.compile(r"^--(KOI-\d+\.\d+|TOI-\d+\.\d+)$", re.IGNORECASE)
 MODES = ("lineph", "ttv")
 SAMPLERS = ("chees", "ensemble")
 GIBBSGRID = ("on", "off")
+LD_CHOICES = tuple(LD_MODES)
 
 _BOOL_FLAGS = {
     "--version": "show_version",
@@ -61,6 +63,7 @@ _VALUE_FLAGS = {
     "--leapfrog": "max_leapfrog",
     "--seed": "seed",
     "--gibbsgrid": "gibbsgrid",
+    "--ld": "ld",
 }
 
 USAGE = f"""turin {__version__} — GPU transit fitting for Kepler and TESS
@@ -98,6 +101,15 @@ usage: turin --KOI-448.02 [options]
                           exact is the true flux-space profile, ratio is
                           hurin's O(transit depth) form, hybrid refines
                           ratio's static factorization back to exact
+  --ld=sampled|collapsed  limb darkening. sampled (default) samples q1, q2
+                          with everything else. collapsed integrates the
+                          quadratic law out of the log-density and draws
+                          q1, q2 afterwards from their exact conditional
+                          (collapsed Gibbs): same posterior, two fewer
+                          sampled dimensions, ~2.2x the per-evaluation
+                          memory. LinEph only (--modes=lineph); needs
+                          --PL=exact or auto, circular geometry, and
+                          MetalPlanet >= 0.7.0
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -141,6 +153,7 @@ class Args:
     max_leapfrog: int = 128
     seed: int = 0
     gibbsgrid: str = "on"
+    ld: str = "sampled"
     modes: tuple = MODES
     cache_dir: str | None = None
     outdir: str | None = None
@@ -199,11 +212,39 @@ def parse_args(argv=None):
     _choice("PL", args.profile_mode, PL_CHOICES)
     _choice("geometry", args.geometry, GEOMETRIES)
     _choice("gibbsgrid", args.gibbsgrid, GIBBSGRID)
+    _choice("ld", args.ld, LD_CHOICES)
     for mode in args.modes:
         _choice("modes", mode, MODES)
+    problem = collapsed_ld_problem(args)
+    if problem:
+        _fail(problem)
     if args.tag is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
         _fail(f"--tag={args.tag!r} must match [A-Za-z0-9_-]+")
     return args
+
+
+def collapsed_ld_problem(args):
+    """Why this combination cannot run with ``--ld=collapsed``, or None.
+
+    Checked here and again by the pipeline (a resumed lineage, or code that
+    builds ``Args`` directly, never passes through :func:`parse_args`).
+    """
+    if getattr(args, "ld", "sampled") != "collapsed":
+        return None
+    if args.profile_mode in ("ratio", "hybrid"):
+        return (f"--ld=collapsed needs --PL=exact (or auto), not "
+                f"--PL={args.profile_mode}: the omega gradient and Hessian "
+                f"come from the envelope theorem, which holds only when the "
+                f"baseline is the exact flux-space minimiser, so {args.profile_mode} "
+                f"would be wrong rather than merely untested")
+    if "ttv" in args.modes:
+        return ("--ld=collapsed is LinEph-only: pass --modes=lineph. A shared "
+                "limb darkening couples every epoch, which breaks the "
+                "per-epoch factorisation the TTV fit's grid-Gibbs relies on")
+    if args.geometry != "circular":
+        return ("--ld=collapsed needs --geometry=circular: it uses "
+                "MetalPlanet's ld_basis, which exists only on the tau kernel")
+    return None
 
 
 def _assign(args, field_name, flag, raw):

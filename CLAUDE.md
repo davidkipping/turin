@@ -50,32 +50,25 @@ in a matching `*_reply.md`. Existing briefs:
   peak, as fast as its old per-parameter loop, which 0.1.24 removed).
 - `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
   kernel with in-kernel exposure integration. **Landed**; turin uses it.
-  MetalPlanet 0.7.0 later added `ld_basis=True` for a different downstream
-  package, which turin deliberately does not use — see "MetalPlanet's
-  `ld_basis=True`" below before reaching for it.
+  MetalPlanet 0.7.0 later added `ld_basis=True` for another downstream
+  package; turin uses it *only* for `--ld=collapsed` (see "Collapsed limb
+  darkening" below) -- for the default path it is no optimisation, since
+  turin makes one kernel call and the basis triples the intermediate.
 - `docs/upstream/hurin_lightcurve_prompt.md` — hurin downloads every row of
   a MAST name search, which can include a neighbouring star (KOI-7592.01:
   two KIC targets, both at 0"), and stitches them. turin 0.1.26 restricts to
   the archive KIC/TIC and refuses repeated timestamps. **Landed in hurin
   0.1.70** (`88d15ac`): finding confirmed, all four asks taken.
 
-**Inbound: a proposal turin has accepted but not built.**
-SquishierPlanet's `docs/upstream/turin_collapsed_ld_prompt.md` proposes an
-opt-in `--ld=collapsed`, which **marginalises** the quadratic limb
-darkening out of the log-density instead of sampling `q1, q2`, dropping two
-sampled dimensions at the same accuracy. turin's questions and their answers
-are in that repo's `turin_collapsed_ld_reply.md` and
-`turin_collapsed_ld_answers.md`. Agreed and not yet implemented; the shape
-is: default `--ld=sampled` stays bit-identical, `ld` joins
-`ResumeState.GUARDS`, a first `MIN_METALPLANET` (>= 0.7.0) gated on the new
-mode, `--PL` forced to `exact` (the omega gradient comes from the envelope
-theorem, which needs `c` to be the flux-space chi-squared's exact
-minimiser, so `ratio` would be *wrong*, not merely untested), LinEph first,
-and acceptance on KOI-448.02 as well as KOI-518.02 because a grazing
-target puts the weights at a triangle vertex. Call it marginalised
-(collapsed) LD, never "collapsed Gibbs": the Gibbs part is only the
-post-hoc draws that fill the `q1`/`q2` product columns, and a true Gibbs
-omega-mode was measured and rejected at 5x slower.
+**Inbound, implemented: collapsed limb darkening (`--ld=collapsed`).**
+SquishierPlanet proposed it (`docs/upstream/turin_collapsed_ld_prompt.md`
+in that repo, with turin's questions and their answers beside it) and
+supplied a validated reference implementation; turin 0.1.39-0.1.41 built it
+as `turin/ldmarg.py` (see "Collapsed limb darkening" below). Real-target
+acceptance against the default -- KOI-518.02, and KOI-448.02, where the
+grazing geometry piles the limb darkening against a triangle vertex -- is
+**pending a free GPU**; until it lands the mode is validated on synthetic
+data only, and README says so.
 
 **Every brief turin has sent has landed, so nothing is outstanding
 upstream.** Do not open a new one without being asked to: write the finding
@@ -126,10 +119,11 @@ raise `MIN_ANVIL` to 0.4.0 in the same commit, because that failure is
 silent and passes every convergence check (see `capabilities.MIN_ANVIL`). **turin must always run against
 the packages as currently published on GitHub.** When turin starts relying
 on a new upstream feature, raise `MIN_ANVIL` in the same change; do not add
-detection plus a fallback. There is no `MIN_METALPLANET`, deliberately:
-turin uses only `flux_dev_from_tau` and `flux_dev_metal`, whose behaviour
-has been stable since 0.6.1, and a floor with no feature behind it is noise.
-Add one in the same change as the first call that needs it.
+detection plus a fallback. `MIN_METALPLANET` (0.7.0, for `ld_basis`) is
+checked **only** when `--ld=collapsed` is asked for
+(`capabilities.require_metalplanet`); the default path uses nothing newer
+than 0.6.1 and stays ungated. That is the general rule for a feature-scoped
+minimum: gate the feature, not the package.
 
 ## Architecture
 
@@ -145,6 +139,7 @@ turin/
   seeding.py      template-sweep tau seeds, batched multi-start MAP
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
+  ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
   outputs.py      CSV/PDF products, resume state
   capabilities.py minimum-anvil gate, installed versions, MLX cache release
 ```
@@ -205,14 +200,20 @@ they are solved analytically inside every log-density evaluation (a
 profile likelihood — a plug-in MLE of the nuisance parameters, with no
 `-0.5 log det` Occam factor).
 
-Two modes, `--profile=`:
+Three solves, `--PL=` (`auto`, the default, measures them per target and
+picks the fastest that is no less precise than `exact`; see `plselect.py`):
 
-- **`exact`** (default): the true flux-space profile, design matrix
-  `F L` (with `F = diag(f_transit)`) against target `y - f_transit`.
+- **`exact`**: the true flux-space profile, design matrix `F L` (with
+  `F = diag(f_transit)`) against target `y - f_transit`.
 - **`ratio`**: hurin's form, a WLS fit in ratio space (`y / f_transit`,
   weights `1/sigma^2`), which drops the `f_transit` factors from the
   weights. It agrees with `exact` to O(depth) and exists to reproduce
   hurin's likelihood surface for validation.
+- **`hybrid`**: `ratio`'s static factorization as a preconditioner, refined
+  back to the exact normal equations.
+
+`--ld=collapsed` forces `exact`: its omega gradient comes from the envelope
+theorem, which holds only when `c` is the flux-space minimiser.
 
 Implementation notes: design matrices are built once in NumPy and uploaded
 (never rebuilt inside the traced likelihood); columns above each epoch's
@@ -268,34 +269,62 @@ interior split of a continuous integrand cancels), so an FD that recomputes
 them measures the quadrature's parameter sensitivity instead — and an FD
 straddling a contact is wrong at any step size.
 
-### MetalPlanet's `ld_basis=True`, and why turin does not use it
+### Collapsed limb darkening (`--ld=collapsed`, `ldmarg.py`)
 
-MetalPlanet 0.7.0 (`2a9aba0`) added `flux_dev_from_tau(..., ld_basis=True)`,
-which returns `(n, m, 3)` instead of `(n, m)`: `B[..., j]` is the
-exposure-integrated unnormalised deficit for intensity `mu^j`, and any
-quadratic law is recovered as
+Opt-in, LinEph only. It is **collapsed Gibbs sampling**: the sampler targets
+the marginal `p(theta | D)` with the quadratic limb darkening *integrated
+out*, and `q1, q2` are then *drawn from their conditional* for every kept
+theta (`OmegaSampler`) to fill hurin's product columns. Same posterior as
+`--ld=sampled`, two fewer sampled dimensions. Keep the three mechanisms
+apart by name, because two of them were measured and rejected: (1) the
+marginal in the log-density -- the feature; (2) the post-hoc conditional
+draws -- the Gibbs half, products only; and **not** (a) *profiling* the LD,
+sampling `L(x*) + prior` at the best-fit LD (0.38 sigma bias on k, b, T14,
+46% wider k on KOI-518.02), nor (b) *non-collapsed* Gibbs, alternating
+theta | omega and omega | theta (5x slower, and it would mutate the target
+between segments, which needs `MIN_ANVIL` 0.4.0).
 
-    (B @ c) / (N @ c),   c = (1-u1-u2, u1+2u2, -u2),  N = (pi, 2pi/3, pi/2)
+The mechanism: MetalPlanet's `ld_basis=True` (>= 0.7.0) gives the three
+vertex laws of the Kipping triangle from one kernel launch
+(`model.vertex_flux_devs`, phase order kept), and every quadratic law's
+light curve is the convex mix `sum omega_j F_j`, linear in
+`x = (omega1, omega2)`. For each `x` the baseline is profiled exactly as
+always (the only profiling anywhere here), giving `L(x)`; its gradient and
+Gauss-Newton Hessian come from the envelope theorem via a Schur complement
+(hence `--PL=exact`). The sampled value is `L(x*) + 1/2 g H^-1 g + log Z`:
+the quadratic model's peak about an expansion point `x*` (one Newton step +
+exact QP projection, **detached** -- the value depends on it only at second
+order), integrated over the triangle against the prior induced by uniform
+`q` by 20x20 Gauss-Legendre in whitened coordinates.
 
-verified here at 3.5e-18 in float64. **turin does not use it, and should
-not adopt it as an optimization.** It was requested by a different
-downstream package whose target calls the kernel three times per
-log-density, once per vertex law, and its win is against *that*: 3.1x
-faster than three calls, but 0.95x forward / 0.97x value+grad against
-**one**. turin samples `q1, q2`, so it makes exactly one call and is
-already on the cheaper path. Taking the basis would triple the dominant
-intermediate -- including the `(n, m, 3)` backward cotangent -- directly
-against the memory work in "Memory: inference on every draw" above.
+Measured (`tests/test_ldmarg.py`, against references that do not share the
+scheme's approximations): conditional density = sampled density at the
+same `(q1, q2)` to 5e-14 fp64; collapsed value = brute-force lattice
+integral with the true `L` to 4e-5; draws reproduce the exact lattice
+conditional (means within 0.8 se, sds 2%); zero draws on the box edge with
+the posterior piled against the `q = (1, 0)` corner; detached gradient vs
+finite differences 6e-6 (at `exp_time = 0` only -- FD is invalid under the
+contact rule); blocking exact. Sampled-mode products stayed byte-identical
+across all three commits.
 
-It is, however, the enabling primitive for one real future direction:
-**profiling the limb darkening** as a nuisance block, the way the Legendre
-baseline already is. Two things to settle before anyone tries it. The
-deficit is *projective*-linear in `c`, `(B @ c)/(N @ c)`, not a linear
-least-squares block, so it is not a second Cholesky solve. And profiling
-`q1, q2` out discards the Kipping (2013) uniform prior that turin
-deliberately samples under, so it changes the posterior rather than just
-the cost -- a science decision needing the same brute-force marginal
-validation grid-Gibbs got, not a speed patch.
+Load-bearing details:
+
+- `OmegaSampler` **always starts from a proposal draw** and has no way to
+  pass a start. Starting at `x*` -- often on a triangle edge -- froze 5% of
+  draws exactly on the box edge in the reference's first version, because
+  rounding put `x*` a hair outside the proposal's support.
+- `epoch_log_lik` raises: a shared omega couples every epoch, so grid-Gibbs
+  cannot run, and TTV + collapsed is refused (CLI and pipeline).
+- Blocks are sized at `COLLAPSED_BYTES_PER_POINT` (2.5x the default; 271
+  vs 121 B per chain-point measured). Per-evaluation MLX peak ~2.2x.
+- Products: the summary's `q1`/`q2` rows leave R-hat/ESS blank (conditional
+  draws, not sampler output); the chains `loglike` column is the sampler's
+  stored target exactly as in sampled mode (so the ML row is its argmax);
+  the ML-row light curve uses the conditional mode at the best theta.
+- For quadratic LD it is break-even on ESS/s (157 vs 162) at ~2.2x memory,
+  which is why it is opt-in. Its turin-specific value is reliability:
+  `q1, q2` are the bounded parameters most prone to pinning ChEES chains at
+  a wall (KOI-448.02: 0.96, 0.93).
 
 Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 `model.N_GL`; turin passes it explicitly, so that default is inert here.
@@ -440,7 +469,10 @@ value+grad at 512 chains (`docs/upstream/` in that repo):
   single kernel launch, not the peak.
 
 So a per-evaluation memory problem is not solved by lowering the block
-budget. The levers that did work are the ones listed above.
+budget. The levers that did work are the ones listed above. `--ld=collapsed`
+sizes its blocks with `ldmarg.COLLAPSED_BYTES_PER_POINT` (2.5x) through the
+`bytes_per_point` argument, so its blocks are proportionally smaller; the
+same caveat applies -- that bounds the launch, not the ~2.2x peak.
 
 To check a change here, measure rather than reason: fill a `Continuation`
 with synthetic cap-sized draws (16,400 x 512 chains) and time
@@ -495,8 +527,9 @@ byte sizes of `../hurin/cache/<T>.pkl` and `~/.cache/turin/<T>.pkl`).
   limb-darkening fix changed its likelihood. The `GUARDS` tuple is the
   other half: it catches the *user* asking for a different model,
   `MODEL_REV` catches the model changing underneath them.
-- **Provenance stamping** on every product: `# turin <version> | <launch
-  command>` on **line 2** of CSVs (after the header, because
+- **Provenance stamping** on every product: `# turin <version>
+  rev<MODEL_REV> | <launch command>` (plus the run status when a fit is in
+  progress or unconverged) on **line 2** of CSVs (after the header, because
   `np.genfromtxt(names=True)` treats a leading comment as the header), a
   `turin_version.txt` member appended after the CSV in tarballs (readers
   use `getmembers()[0]`), PDF Creator/Subject metadata, and version +
@@ -505,8 +538,10 @@ byte sizes of `../hurin/cache/<T>.pkl` and `~/.cache/turin/<T>.pkl`).
   analysis scripts keep working: 7 LinEph products, 9 TTV.
 - `--tag=<name>` namespaces a run into an independent auto-resume lineage,
   inserted into every product filename before the extension.
-- Resume state records `bprior`, `ttv_max`, `tag`, `profile`, `sampler`
-  and chain count; a mismatched resume exits naming the stored value.
+- Resume state records the guards `b_prior`, `profile_mode`, `geometry`,
+  `sampler`, `ttv_max`, `gibbsgrid` and `ld` (`ResumeState.GUARDS`), plus
+  `tag` and chain count; a mismatched resume exits naming the stored value.
+  A new guard gets a class default that old pickles read correctly.
 
 ## Environment
 

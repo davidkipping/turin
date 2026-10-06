@@ -36,6 +36,7 @@ def test_defaults_match_the_documented_ones():
     assert a.modes == ("lineph", "ttv")
     assert a.ttv_max_days is None
     assert a.chains == 512 and a.max_leapfrog == 128
+    assert a.ld == "sampled"
 
 
 def test_nongrazing_is_an_alias():
@@ -77,10 +78,27 @@ def test_modes_subset():
     (["--KOI-1.01", "--tag=bad tag"], "tag"),
     (["--KOI-1.01", "--KOI-2.01"], "more than one target"),
     (["KOI-1.01"], "unrecognized"),
+    (["--KOI-1.01", "--ld=profile"], "not one of"),
+    # collapsed limb darkening: each refusal names its reason
+    (["--KOI-1.01", "--ld=collapsed", "--modes=lineph", "--PL=ratio"],
+     "envelope theorem"),
+    (["--KOI-1.01", "--ld=collapsed", "--modes=lineph", "--PL=hybrid"],
+     "PL=exact"),
+    (["--KOI-1.01", "--ld=collapsed"], "modes=lineph"),     # default modes
+    (["--KOI-1.01", "--ld=collapsed", "--modes=lineph", "--geometry=chord"],
+     "circular"),
 ])
 def test_bad_arguments_are_rejected(argv, pattern):
     with pytest.raises(SystemExit, match=pattern):
         cli.parse_args(argv)
+
+
+@pytest.mark.parametrize("pl", ["auto", "exact"])
+def test_collapsed_limb_darkening_parses_with_lineph(pl):
+    a = cli.parse_args(["--KOI-1.01", "--ld=collapsed", "--modes=lineph",
+                        f"--PL={pl}"])
+    assert (a.ld, a.modes, a.profile_mode) == ("collapsed", ("lineph",), pl)
+    assert cli.collapsed_ld_problem(a) is None
 
 
 def test_typo_gets_a_suggestion():

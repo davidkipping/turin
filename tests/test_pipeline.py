@@ -112,6 +112,92 @@ def test_lineph_pipeline_writes_every_product(tmp_path, fake_target):
     assert len(body) == 2 + 32 * 40
 
 
+def test_collapsed_lineph_writes_hurin_products(tmp_path, fake_target):
+    """--ld=collapsed samples 5 parameters but writes hurin's products
+    unchanged: q1, q2 rows and columns come from exact conditional draws."""
+    logs = []
+    assert pipeline.run(_args(tmp_path, ld="collapsed"),
+                        log=logs.append) in FINISHED
+    out = str(tmp_path)
+    names = sorted(os.listdir(out))
+    for suffix in ("_lineph_summary.csv", "_lineph_chains.csv.tar.gz",
+                   "_lineph_logrho.csv", "_lineph_lcdata.csv",
+                   "_lineph_fold.pdf", "_lineph_corner.pdf",
+                   "_lineph_resume.pkl"):
+        assert any(n.endswith(suffix) for n in names), (suffix, names)
+
+    text = "\n".join(logs)
+    assert "dim 5" in text and "limb darkening: collapsed" in text
+    assert "--PL=exact (required by --ld=collapsed" in text
+    assert "PL probe" not in text                 # never probed
+    assert "conditional draws of q1, q2" in text
+
+    # summary: every hurin row; q1, q2 carry no sampler diagnostics
+    rows = {}
+    with open(os.path.join(out, "KOI-1.01_lineph_summary.csv")) as fh:
+        header = fh.readline().strip().split(",")
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split(",")
+            rows[f[0]] = dict(zip(header, f))
+    assert list(rows)[:7] == ["dP", "dtau0", "k", "beta", "T14", "q1", "q2"]
+    assert {"b", "log10_rho"} <= set(rows)
+    for name in ("q1", "q2"):
+        assert rows[name]["R-hat"] == "" and rows[name]["Bulk_ESS"] == ""
+        assert 0 < float(rows[name]["Median"]) < 1
+    assert rows["k"]["R-hat"] != ""
+
+    # chains: hurin's columns, q's strictly inside the box
+    with tarfile.open(os.path.join(out, "KOI-1.01_lineph_chains.csv.tar.gz")) as tar:
+        body = tar.extractfile(tar.getmembers()[0]).read().decode().splitlines()
+    assert body[0].split(",") == ["dP", "dtau0", "k", "beta", "T14", "q1",
+                                  "q2", "b", "log10_rho", "loglike"]
+    draws = np.array([[float(v) for v in r.split(",")] for r in body[2:]])
+    assert len(draws) == 32 * 40
+    assert np.all((draws[:, 5] > 0) & (draws[:, 5] < 1)
+                  & (draws[:, 6] > 0) & (draws[:, 6] < 1))
+
+    state = outputs.load_resume(out, "KOI-1.01", "lineph")
+    assert state.ld == "collapsed" and state.profile_mode == "exact"
+    assert {"q1", "q2"} <= set(state.ml_params)
+
+
+def test_collapsed_and_sampled_lineages_never_mix(tmp_path, fake_target):
+    pipeline.run(_args(tmp_path, ld="collapsed"), log=lambda m: None)
+    with pytest.raises(SystemExit, match="ld"):
+        pipeline.run(_args(tmp_path), log=lambda m: None)          # sampled
+    other = tmp_path / "other"
+    pipeline.run(_args(other), log=lambda m: None)
+    with pytest.raises(SystemExit, match="ld"):
+        pipeline.run(_args(other, ld="collapsed"), log=lambda m: None)
+
+
+@pytest.mark.parametrize("over,pattern", [
+    (dict(modes=("lineph", "ttv")), "modes=lineph"),
+    (dict(profile_mode="ratio"), "envelope theorem"),
+    (dict(geometry="chord"), "circular"),
+])
+def test_pipeline_refuses_collapsed_combinations_the_cli_would(
+        tmp_path, fake_target, over, pattern):
+    """The tests' _args and any direct caller bypass parse_args, so the
+    pipeline refuses on its own -- before touching the disk."""
+    with pytest.raises(SystemExit, match=pattern):
+        pipeline.run(_args(tmp_path, ld="collapsed", **over), log=lambda m: None)
+    assert not any(tmp_path.iterdir())
+
+
+def test_collapsed_refuses_an_old_metalplanet(tmp_path, fake_target,
+                                              monkeypatch):
+    import metalplanet
+
+    monkeypatch.setattr(metalplanet, "__version__", "0.6.1")
+    with pytest.raises(SystemExit, match="MetalPlanet >= 0.7.0"):
+        pipeline.run(_args(tmp_path, ld="collapsed"), log=lambda m: None)
+    # the default path is not gated on it
+    assert pipeline.run(_args(tmp_path), log=lambda m: None) in FINISHED
+
+
 def test_recovered_parameters_are_in_the_right_region(tmp_path, fake_target):
     """A cheap fit, but it must still land near the injected truth."""
     assert pipeline.run(_args(tmp_path, chains=64, warmup=150, samples=100,

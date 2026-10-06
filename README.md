@@ -81,6 +81,7 @@ analytically inside every log-density evaluation — a profile likelihood — so
 |---|---|---|
 | `lineph` | `dP, dtau0, k, beta, T14, q1, q2` | period and epoch as offsets from the recentred ephemeris |
 | `ttv` | `k, beta, T14, q1, q2` + one `dtau` per transit | period fixed; timings seeded by a template sweep |
+| `lineph --ld=collapsed` | `dP, dtau0, k, beta, T14` | limb darkening integrated out; `q1, q2` drawn from their conditional (see below) |
 
 `beta` is the impact parameter as a fraction of its k-dependent bound, which
 is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
@@ -150,6 +151,56 @@ ball much wider than the posterior, `ratio` looks catastrophic; judged on one
 much narrower, everything passes. Only at the posterior's own scale does the
 verdict mean "this would distort the answer".
 
+### Collapsed limb darkening (`--ld=collapsed`)
+
+An opt-in alternative for the LinEph fit. Instead of sampling `q1, q2` with
+everything else, turin integrates the quadratic limb darkening out of the
+log-density, samples the other five parameters from that **marginal**
+posterior, and then draws `q1, q2` for every kept sample from their exact
+**conditional** given the rest. Marginal plus conditional draws of the
+integrated block is collapsed Gibbs sampling: the joint posterior is the same
+as the default's, `q1` and `q2` included, and every product carries the same
+columns.
+
+It works because any quadratic law's light curve is exactly a convex mixture
+of the three vertex laws of the Kipping (2013) triangle, so the transit model
+is linear in the mixing weights. For each weighting the baseline polynomials
+are profiled exactly as always; the integral over the weights is done to
+quadrature precision (checked against brute-force integration to 4e-5). The
+scheme was proposed and validated by the SquishierPlanet project.
+
+**It is not profiling.** Setting the limb darkening to its best fit at each
+sample instead of integrating over it is the obvious shortcut and it is wrong:
+measured, it biased `k`, `b` and `T14` by up to 0.38σ and inflated `k`'s width
+by 46% on KOI-518.02.
+
+Why it is opt-in rather than the default: for the two-coefficient quadratic
+law it is a wash on speed (ESS per second 157 against 162 on KOI-518.02) and
+costs about 2.2x the memory per log-density evaluation. What it buys is two
+fewer sampled dimensions — and those two are the bounded parameters most
+prone to pinning ChEES chains at a wall, since poorly constrained limb
+darkening piles against the edge of the box (KOI-448.02's `q1, q2` sit at
+0.96 and 0.93). Its value grows with the number of limb-darkening
+coefficients.
+
+Restrictions, each refused up front with the reason:
+
+- **LinEph only** (`--modes=lineph`). A shared limb darkening couples every
+  epoch, which breaks the per-epoch factorisation grid-Gibbs needs.
+- **`--PL=exact`** (`auto` resolves to it without probing). The integral's
+  gradient comes from the envelope theorem, which holds only for the exact
+  flux-space baseline; under `ratio` the formulas would be wrong.
+- **Circular geometry**, and **MetalPlanet ≥ 0.7.0** (`ld_basis`).
+
+In the summary, the `q1`/`q2` rows leave R-hat and ESS blank: they are exact
+conditional draws, not sampler output. The ML-row light curve (lcdata, fold
+plot) uses the conditional mode of `q1, q2` at the best draw. A lineage is
+either sampled or collapsed, never both: `ld` is a resume guard.
+
+Real-target acceptance against the default (KOI-518.02 and the grazing
+KOI-448.02) is pending; until then treat it as validated on synthetic data
+only.
+
 ### Weak transits and grid-Gibbs
 
 A transit observed at low signal-to-noise, or with a data gap across it, has a
@@ -199,6 +250,8 @@ cannot pool chains drawn both ways.
 --PL=auto|exact|hybrid|ratio how the baseline coefficients are solved
                              (default auto: measured per target)
 --geometry=circular|chord    true circular orbit (default) or hurin's chord
+--ld=sampled|collapsed       sample q1, q2 (default), or integrate the limb
+                             darkening out (LinEph only), see above
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache

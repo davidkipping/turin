@@ -61,6 +61,13 @@ def _gibbsgrid(mode, args):
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
+    if getattr(args, "ld", "sampled") == "collapsed":
+        from .cli import collapsed_ld_problem
+
+        problem = collapsed_ld_problem(args)
+        if problem:
+            raise SystemExit(f"turin: {problem}")
+        _caps.require_metalplanet()
     _outputs.set_run_status("")
     _outputs.set_run_tag(args.tag)
     target = args.target
@@ -148,7 +155,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             # never conflict with what a previous run resolved to
             profile_mode=(None if args.profile_mode == "auto"
                           else args.profile_mode),
-            gibbsgrid=_gibbsgrid(mode, args))
+            gibbsgrid=_gibbsgrid(mode, args),
+            ld=getattr(args, "ld", "sampled"))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -170,7 +178,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         layout = _params.ttv_layout(prepared.eph, centering, tau_half,
                                    b_prior=args.b_prior)
     else:
-        layout = _params.lineph_layout(prepared.eph, b_prior=args.b_prior)
+        layout = _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
+                                       ld=getattr(args, "ld", "sampled"))
 
     build_kw = dict(num_resample=prepared.num_resample,
                     exposure_time=prepared.exposure_time,
@@ -178,7 +187,18 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
 
     # A resumed run keeps the mode it was sampled under: a continuation must
     # not silently change its own likelihood. An explicit --PL wins otherwise.
-    if prior_state is not None and args.profile_mode == "auto":
+    if layout.ld == "collapsed":
+        # not a choice: the omega gradient and Hessian need the exact profile
+        if prior_state is not None and prior_state.profile_mode != "exact":
+            raise SystemExit(
+                f"turin: this collapsed lineage records "
+                f"profile_mode={prior_state.profile_mode!r}, which collapsed "
+                f"limb darkening cannot have been sampled under; use --fresh")
+        pl_choice = _plselect.fixed_choice(
+            "exact", "required by --ld=collapsed: the omega gradient and "
+            "Hessian come from the envelope theorem, which needs the exact "
+            "flux-space profile")
+    elif prior_state is not None and args.profile_mode == "auto":
         pl_choice = _plselect.fixed_choice(
             prior_state.profile_mode, "carried over from the resumed run")
     elif args.profile_mode != "auto":
@@ -189,9 +209,13 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
     provisional = pl_choice.mode if pl_choice else "exact"
     target_obj, transform, lp, hi = _likelihood.build_target(
         layout, centering, epoch_data, orders,
-        profile_mode=provisional, **build_kw)
+        profile_mode=provisional, ld_mode=layout.ld, **build_kw)
     log(f"  log-density: dim {layout.dim}, "
         f"{len(lp.blocks)} epoch block(s) of <= {lp.block_size}")
+    if layout.ld == "collapsed":
+        log("  limb darkening: collapsed -- integrated out of the "
+            "log-density; q1, q2 drawn afterwards from their exact "
+            "conditional")
     if prepared.exposure_time > 0:
         from .model import HAS_TAU_KERNEL, N_GL
 
@@ -294,7 +318,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         # its init ball carry over unchanged
         target_obj, transform, lp, hi = _likelihood.build_target(
             layout, centering, epoch_data, orders,
-            profile_mode=pl_choice.mode, **build_kw)
+            profile_mode=pl_choice.mode, ld_mode=layout.ld, **build_kw)
 
     if u0 is not None:
         _sampling.check_precision(target_obj, u0, log=log,
@@ -361,7 +385,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
 
 
 def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
-                   layout, centering, epoch_data, baseline, *, log):
+                   layout, centering, epoch_data, baseline, *, log, ld=None):
     """Corner and fold PDFs, from the (subsampled) physical draws."""
     try:
         # show the impact parameter b itself, not the sampled coordinate
@@ -381,7 +405,8 @@ def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
 
     mid_abs = _mid_times_absolute(mode, v_ml, layout, centering)
     try:
-        tt, tf = _plots.model_grid(lp, v_ml, T14=v_ml[layout.index("T14")])
+        tt, tf = _plots.model_grid(lp, v_ml, T14=v_ml[layout.index("T14")],
+                                   ld=ld)
         _plots.fold_plot(
             _outputs.product_path(outdir, target, mode, "fold", "pdf"),
             epoch_data=epoch_data, mid_times=mid_abs, baseline=baseline,
@@ -417,14 +442,39 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     ones and the resume state, which are what make a run interruptible.
     """
     target = prepared.target
-    names = list(layout.names)
+    names_s = list(layout.names)            # what was sampled
+    names = names_s
     thin = _sampling.export_thin(results)
-    phys = _sampling.physical_draws(transform, results, thin=thin)
+    collapsed = layout.ld == "collapsed"
+    if collapsed:
+        # collapsed Gibbs: q1, q2 were integrated out of the sampled target,
+        # so each kept draw gets them from its exact conditional here. The
+        # sampler needs model-space draws (physical ones carry dP/dtau0's
+        # report offsets).
+        from . import ldmarg as _ldmarg
+
+        flat = results.get_chain(thin=thin, flat=True).astype(np.float64)
+        v_model = transform.model_np(flat)
+        q1, q2, acc, edge = _ldmarg.draw_limb_darkening(lp, v_model,
+                                                        seed=args.seed)
+        phys = np.column_stack([transform.to_physical(v_model), q1, q2])
+        names = names_s + ["q1", "q2"]
+        log(f"  limb darkening: {len(q1)} conditional draws of q1, q2 "
+            f"(MH acceptance {acc:.2f}; expansion point on a triangle edge "
+            f"for {100 * edge:.0f}% of draws)")
+    else:
+        phys = _sampling.physical_draws(transform, results, thin=thin)
 
     # anvil reports rank-normalized bulk ESS only (no tail ESS), so hurin's
     # Tail_ESS column is written empty rather than filled with a placeholder.
-    summary = _outputs.summarize(phys, names, rhat=verdict.rhat,
-                                 ess_bulk=verdict.ess, ess_tail=None)
+    # R-hat/ESS exist only for sampled parameters; collapsed q1, q2 are exact
+    # conditional draws, so their rows leave the diagnostics blank, as the
+    # derived b and log10_rho rows do.
+    summary = _outputs.summarize(phys[:, :len(names_s)], names_s,
+                                 rhat=verdict.rhat, ess_bulk=verdict.ess,
+                                 ess_tail=None)
+    if collapsed:
+        summary.update(_outputs.summarize(phys[:, len(names_s):], ["q1", "q2"]))
 
     # derived quantities, computed after sampling in float64
     b_draws = _outputs.derived_b(phys, names, layout.b_prior)
@@ -449,22 +499,32 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
 
     # maximum-likelihood model, for the light-curve export and the plots
     v_ml, logl_ml = _ml_row(results, lp, transform)
+    q_ml = None
+    v_ml_named = v_ml
     with mx.stream(mx.cpu):
-        model, coeffs = lp.full_model(
-            mx.array(v_ml[None, :].astype(np.float32)))
+        v_row = mx.array(v_ml[None, :].astype(np.float32))
+        if collapsed:
+            # one curve needs one (q1, q2): the conditional mode at the ML
+            # theta. A display point estimate only; the posterior q1, q2 in
+            # every other product are the conditional draws above.
+            (cq1,), (cq2,) = lp.conditional_mode_ld(v_row)
+            q_ml = (float(cq1), float(cq2))
+            v_ml_named = np.concatenate([v_ml, q_ml])
+        model, coeffs = lp.full_model(v_row, ld=q_ml)
         model = np.array(model, dtype=np.float64)[0]
         baseline = np.array(_profile.baseline(lp.design, coeffs),
                             dtype=np.float64)[0]
     _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
 
     state_holder["ml_params"] = {
-        n: float(v_ml[i]) for i, n in enumerate(names)
+        n: float(v_ml_named[i]) for i, n in enumerate(names)
         if n in ("k", "beta", "T14", "q1", "q2")}
 
     # ---- figures
     if heavy:
         _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
-                       layout, centering, epoch_data, baseline, log=log)
+                       layout, centering, epoch_data, baseline, log=log,
+                       ld=q_ml)
 
     if mode == "ttv":
         rows = _ttv_rows(phys, names, layout, centering, epoch_data, model,
@@ -497,6 +557,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         b_prior=layout.b_prior, profile_mode=pl_mode,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
+        ld=layout.ld,
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
         n_durations=float(prepared.n_durations),
         legendre_orders=np.asarray(orders), exposure_time=prepared.exposure_time,
@@ -509,7 +570,8 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     _outputs.save_resume(outdir, target, mode, state, log=log)
 
     # width breakdown, if any chain looked trapped
-    rows = _sampling.width_breakdown(transform, results, names, verdict.health)
+    rows = _sampling.width_breakdown(transform, results, names_s,
+                                     verdict.health)
     if rows:
         log("  widths with / without the flagged chains:")
         for name, sd_all, sd_bulk, ratio in rows:
