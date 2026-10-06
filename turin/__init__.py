@@ -7,7 +7,7 @@ The version here is the runtime source of truth (the install is editable);
 keep it in sync with pyproject.toml and add a VERSIONS.md row per commit.
 """
 
-__version__ = "0.1.39"
+__version__ = "0.1.40"
 
 #: Revision of the *likelihood itself*, as distinct from the package version.
 #:

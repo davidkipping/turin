@@ -277,7 +277,8 @@ def _prep_offsets(exposure_time, num_resample):
     return supersample_offsets(exposure_time, num_resample)
 
 
-def build_target(layout, centering, epoch_data, orders, *, fp64=True, **kw):
+def build_target(layout, centering, epoch_data, orders, *, fp64=True,
+                 ld_mode=None, **kw):
     """Assemble the anvil target for one fit.
 
     Returns ``(target, transform, log_prob, log_prob_hi)``, where ``target``
@@ -287,16 +288,30 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True, **kw):
     ``fp64=True`` also builds the float64 CPU replica anvil needs for
     ``validate_precision``, ``certify`` and ``reanchor_every``. It costs a
     second copy of the static tensors (a few MB) and nothing per call.
+
+    The likelihood class follows ``layout.ld``: ``"collapsed"`` builds
+    :class:`turin.ldmarg.MarginalLDLogProb` for both the float32 target and
+    the float64 replica, so ``log_prob_hi`` is the float64 collapsed density.
+    ``ld_mode``, if given, must agree with the layout -- it is a check, not a
+    switch, because the two modes have different dimensions.
     """
     import anvil
 
-    lo = ProfiledTransitLogProb(layout, centering, epoch_data, orders,
-                                dtype=mx.float32, **kw)
+    ld = ld_mode or layout.ld
+    if ld != layout.ld:
+        raise ValueError(f"ld_mode={ld_mode!r} but the layout was built with "
+                         f"ld={layout.ld!r}")
+    if ld == "collapsed":
+        from .ldmarg import MarginalLDLogProb as cls
+    else:
+        cls = ProfiledTransitLogProb
+
+    lo = cls(layout, centering, epoch_data, orders, dtype=mx.float32, **kw)
     hi = None
     if fp64:
         with mx.stream(mx.cpu):
-            hi = ProfiledTransitLogProb(layout, centering, epoch_data, orders,
-                                        dtype=mx.float64, **kw)
+            hi = cls(layout, centering, epoch_data, orders,
+                     dtype=mx.float64, **kw)
 
     transform = layout.transform()
     target = anvil.TransformedLogDensity(
