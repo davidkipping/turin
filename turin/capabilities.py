@@ -25,7 +25,8 @@ from dataclasses import dataclass
 #: turin uses, and the first whose ``diagnose`` ranks correctly between
 #: 2,095,104 and 2^21 rows.
 #:
-#: **Not raised to 0.4.0, deliberately.** anvil 0.4.0 fixes a silent
+#: **Not raised to 0.4.x, deliberately** (0.4.2 is current and is what
+#: turin runs against). anvil 0.4.0 fixes a silent
 #: correctness bug -- ``mx.compile`` froze whatever a kernel's traced graph
 #: read from the *target*, so a target mutated between ``run`` calls kept
 #: being sampled as it was at the first trace, giving a healthy-looking run
