@@ -225,6 +225,31 @@ def test_batching_is_independent(dataset, lineph):
         assert abs(many32[i] - one32[0]) < 0.02
 
 
+def test_bytes_per_point_defaults_to_todays_constant_and_scales_blocks():
+    """The default path's block size must not move; a larger per-point cost
+    (--ld=collapsed passes 2.5x) must give proportionally smaller blocks."""
+    args = (512, 600, 223, 1)
+    assert (likelihood.epoch_block_size(*args)
+            == likelihood.epoch_block_size(
+                *args, bytes_per_point=likelihood.BYTES_PER_POINT))
+    base = likelihood.epoch_block_size(*args)
+    big = likelihood.epoch_block_size(
+        *args, bytes_per_point=int(2.5 * likelihood.BYTES_PER_POINT))
+    assert base > big >= 1 and abs(base / big - 2.5) < 0.1
+
+
+def test_collapsed_layout_drops_q1_q2_and_nothing_else():
+    lin = params.lineph_layout(EPH)
+    col = params.lineph_layout(EPH, ld="collapsed")
+    assert lin.names == params.LINEPH_BASE and lin.ld == "sampled"
+    assert col.names == params.LINEPH_BASE_COLLAPSED and col.ld == "collapsed"
+    np.testing.assert_array_equal(col.lo, lin.lo[:5])
+    np.testing.assert_array_equal(col.hi, lin.hi[:5])
+    np.testing.assert_array_equal(col.report_offset, lin.report_offset[:5])
+    with pytest.raises(ValueError, match="ld mode"):
+        params.lineph_layout(EPH, ld="profile")
+
+
 @pytest.mark.parametrize("budget", [1 << 31, 1 << 16, 1])
 def test_epoch_blocking_does_not_change_the_answer(dataset, budget):
     """Chunking is a memory strategy, not an approximation."""

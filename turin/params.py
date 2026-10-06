@@ -48,6 +48,14 @@ TTV_LOG_SCALE = 1.71
 LINEPH_BASE = ("dP", "dtau0", "k", "beta", "T14", "q1", "q2")
 TTV_BASE = ("k", "beta", "T14", "q1", "q2")
 
+#: How the quadratic limb darkening is handled. ``sampled`` (default) puts
+#: ``q1, q2`` in the sampled vector. ``collapsed`` integrates it out of the
+#: log-density and draws ``q1, q2`` afterwards from their conditional
+#: (collapsed Gibbs; see :mod:`turin.ldmarg`), so they are not sampled.
+LD_MODES = ("sampled", "collapsed")
+#: The LinEph sampled vector under ``--ld=collapsed``.
+LINEPH_BASE_COLLAPSED = ("dP", "dtau0", "k", "beta", "T14")
+
 
 @dataclass
 class ParamLayout:
@@ -64,6 +72,11 @@ class ParamLayout:
     #: (n_epochs,) predicted-time offsets d_arr, and integer epoch numbers
     n_arr: np.ndarray = field(default_factory=lambda: np.zeros(0))
     centers_abs: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    #: limb-darkening mode (:data:`LD_MODES`). A ``collapsed`` layout has no
+    #: ``q1, q2``; :func:`turin.likelihood.build_target` reads this to choose
+    #: the likelihood class, so a 5-column layout can never reach the default
+    #: class (whose ``unpack`` would slice an empty column, not raise).
+    ld: str = "sampled"
 
     @property
     def dim(self) -> int:
@@ -108,12 +121,21 @@ def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None):
     )
 
 
-def lineph_layout(eph, b_prior="transiting", T14_max=None):
-    """Parameter layout for the linear-ephemeris fit."""
+def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled"):
+    """Parameter layout for the linear-ephemeris fit.
+
+    ``ld="collapsed"`` drops ``q1, q2`` from the sampled vector: the limb
+    darkening is integrated out of the log-density instead
+    (:class:`turin.ldmarg.MarginalLDLogProb`).
+    """
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
+    if ld not in LD_MODES:
+        raise ValueError(f"unknown ld mode {ld!r}; expected {LD_MODES}")
     rows = [("dP", -DP_HALF, DP_HALF), ("dtau0", -DTAU0_HALF, DTAU0_HALF)]
     rows += list(_shape_bounds(eph, T14_max=T14_max))
+    if ld == "collapsed":
+        rows = [r for r in rows if r[0] not in ("q1", "q2")]
     names = tuple(r[0] for r in rows)
     lo = np.array([r[1] for r in rows], dtype=np.float64)
     hi = np.array([r[2] for r in rows], dtype=np.float64)
@@ -123,7 +145,7 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None):
     return ParamLayout(mode="lineph", names=names, lo=lo, hi=hi,
                        report_offset=off, b_prior=b_prior,
                        P_ref=float(eph["period"]),
-                       tau0_ref=float(eph["epoch"]))
+                       tau0_ref=float(eph["epoch"]), ld=ld)
 
 
 def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None):

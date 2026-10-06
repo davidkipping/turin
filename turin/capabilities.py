@@ -12,8 +12,10 @@ names the upgrade command rather than letting an old install fail somewhere
 deep in a fit.
 
 When turin starts relying on a new upstream feature, raise
-:data:`MIN_ANVIL` (or add a MetalPlanet minimum the same way) in the same
-change, rather than adding detection plus a fallback.
+:data:`MIN_ANVIL` or :data:`MIN_METALPLANET` in the same change, rather than
+adding detection plus a fallback. :data:`MIN_METALPLANET` is checked only by
+the feature that needs it (``--ld=collapsed``), via
+:func:`require_metalplanet`.
 """
 
 from __future__ import annotations
@@ -42,6 +44,15 @@ from dataclasses import dataclass
 #: survives every convergence check, so it will not be caught downstream.
 MIN_ANVIL = (0, 3, 0)
 
+#: The oldest MetalPlanet ``--ld=collapsed`` runs against, and checked only
+#: when that mode is asked for: 0.7.0 is the first with
+#: ``flux_dev_from_tau(..., ld_basis=True)``, which returns the three
+#: vertex-law light curves from one kernel launch. The default path uses
+#: nothing newer than 0.6.1 and is not gated. This is the module docstring's
+#: rule applied: a minimum, not detection plus a fallback (the reference
+#: implementation silently fell back to three kernel launches).
+MIN_METALPLANET = (0, 7, 0)
+
 UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
                 'git+https://github.com/davidkipping/anvil.git"')
 #: The same, for MetalPlanet. Separate constant on purpose: pointing a
@@ -59,6 +70,24 @@ def version_tuple(version):
 
 def anvil_ok(version):
     return version_tuple(version) >= MIN_ANVIL
+
+
+def metalplanet_ok(version):
+    return version_tuple(version) >= MIN_METALPLANET
+
+
+def require_metalplanet():
+    """Exit with the upgrade command if MetalPlanet is too old for
+    ``--ld=collapsed``. Not called on the default path."""
+    import metalplanet
+
+    have = getattr(metalplanet, "__version__", "unknown")
+    if not metalplanet_ok(have):
+        need = ".".join(map(str, MIN_METALPLANET))
+        raise SystemExit(
+            f"--ld=collapsed needs MetalPlanet >= {need} (ld_basis), but "
+            f"{have} is installed. Upgrade with:\n  {MP_UPGRADE_HINT}")
+    return have
 
 
 def require_anvil():
@@ -95,6 +124,8 @@ class Capabilities:
         """The run-log header: versions, and whether anvil is new enough."""
         need = ".".join(map(str, MIN_ANVIL))
         ok = anvil_ok(self.anvil_version)
+        mp_need = ".".join(map(str, MIN_METALPLANET))
+        mp_ok = metalplanet_ok(self.metalplanet_version)
         return "\n".join([
             f"  anvil {self.anvil_version}, "
             f"MetalPlanet {self.metalplanet_version}",
@@ -107,6 +138,9 @@ class Capabilities:
                "geometry=circular)" if self.metalplanet_flux_dev_from_tau else
                " MISSING: exposures would be supersampled, ~2% of a depth and "
                "dF/dP ~100x wrong  ->  " + MP_UPGRADE_HINT),
+            f"  {'yes' if mp_ok else 'NO ':3s}  MetalPlanet >= {mp_need} "
+            "(ld_basis, needed only by --ld=collapsed)"
+            + ("" if mp_ok else f"  ->  {MP_UPGRADE_HINT}"),
         ])
 
 

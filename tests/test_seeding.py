@@ -256,6 +256,12 @@ def test_initial_model_vector_shapes_and_clipping():
     assert v.shape == (7,)
     assert v[0] == 0.001 and v[1] == -0.002
 
+    # --ld=collapsed: the same vector without q1, q2, built by name
+    col = params.lineph_layout(EPH, ld="collapsed")
+    vc = seeding.initial_model_vector(col, EPH, dP=0.001, dtau0=-0.002)
+    assert col.names == params.LINEPH_BASE_COLLAPSED
+    np.testing.assert_array_equal(vc, v[:5])
+
     ttv = params.ttv_layout(EPH, cen, tau_half=0.01)
     v2 = seeding.initial_model_vector(ttv, EPH, dtau=np.full(n_ep, 0.5))
     assert v2.shape == (5 + n_ep,)

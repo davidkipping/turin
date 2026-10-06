@@ -152,11 +152,12 @@ def oc_plot(path, epochs, tmid, tmid_err, *, title="", colour="#e67e22",
     return _save(fig, path, title or "O-C", log)
 
 
-def model_grid(lp, v_row, *, n=1000, span_durations=3.0, T14=None):
+def model_grid(lp, v_row, *, n=1000, span_durations=3.0, T14=None, ld=None):
     """A densely sampled transit model for overlaying on a fold plot.
 
     Evaluates the model on its own fine time grid at one parameter vector,
-    in float64 on the CPU, with a single synthetic epoch.
+    in float64 on the CPU, with a single synthetic epoch. ``ld=(q1, q2)``
+    supplies the limb darkening when ``v_row`` has none (``--ld=collapsed``).
     """
     import mlx.core as mx
 
@@ -176,8 +177,13 @@ def model_grid(lp, v_row, *, n=1000, span_durations=3.0, T14=None):
             n_gl=lp.grid.n_gl)
         p = lp.unpack(mx.array(np.asarray(v_row, dtype=np.float64)[None, :],
                                dtype=mx.float64))
+        if ld is None:
+            q1, q2 = p["q1"], p["q2"]
+        else:
+            q1 = mx.full((1, 1), float(ld[0]), dtype=mx.float64)
+            q2 = mx.full((1, 1), float(ld[1]), dtype=mx.float64)
         f = _model.transit_flux(
             grid, mid=mx.zeros((1, 1), dtype=mx.float64), k=p["k"], b=p["b"],
-            T14=p["T14"], q1=p["q1"], q2=p["q2"], period=p["period"],
+            T14=p["T14"], q1=q1, q2=q2, period=p["period"],
             geometry=lp.geometry)
         return tt, np.array(f, dtype=np.float64)[0, 0]

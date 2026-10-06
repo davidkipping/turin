@@ -46,7 +46,9 @@ from . import profile as _profile
 #: generous enough that real targets take one block anyway (at 223 points per
 #: epoch it only splits past ~390 epochs), but do not read this as a safety
 #: margin -- there is none. Raise it, rather than trusting it, before relying
-#: on blocking to fit a large target.
+#: on blocking to fit a large target. ``--ld=collapsed`` passes its own,
+#: 2.5x larger figure (``ldmarg.COLLAPSED_BYTES_PER_POINT``): it measured 271
+#: against this path's 121 B.
 BYTES_PER_POINT = 48
 #: Budget used to pick the block size. **Not a ceiling on peak memory.**
 #: Inside one compiled value+grad the whole graph is live at once, so every
@@ -75,7 +77,8 @@ class WhiteNoise:
 
 
 def epoch_block_size(n_chains, n_epochs, max_pts, n_sub,
-                     budget_bytes=DEFAULT_BLOCK_BUDGET_BYTES, itemsize=4):
+                     budget_bytes=DEFAULT_BLOCK_BUDGET_BYTES, itemsize=4,
+                     bytes_per_point=BYTES_PER_POINT):
     """How many epochs to evaluate at once, from a memory budget.
 
     Returns at least 1, so a single pathological epoch still runs (and fails
@@ -86,7 +89,7 @@ def epoch_block_size(n_chains, n_epochs, max_pts, n_sub,
     launch rather than capping peak memory.
     """
     per_epoch = max(1, n_chains * max_pts * max(1, n_sub)
-                    * BYTES_PER_POINT * itemsize // 4)
+                    * bytes_per_point * itemsize // 4)
     return int(max(1, min(n_epochs, budget_bytes // per_epoch)))
 
 
@@ -113,7 +116,8 @@ class ProfiledTransitLogProb:
                  num_resample=1, exposure_time=0.0, profile_mode="exact",
                  geometry="circular", noise=None,
                  n_chains_hint=512, dtype=mx.float32,
-                 budget_bytes=DEFAULT_BLOCK_BUDGET_BYTES):
+                 budget_bytes=DEFAULT_BLOCK_BUDGET_BYTES,
+                 bytes_per_point=BYTES_PER_POINT):
         if profile_mode not in _profile.PROFILE_MODES:
             raise ValueError(f"unknown profile mode {profile_mode!r}")
         self.layout = layout
@@ -123,6 +127,7 @@ class ProfiledTransitLogProb:
         self.noise = noise or WhiteNoise()
         self.dtype = dtype
         self.dim = layout.dim
+        self.ld = layout.ld
 
         sub_offsets = _prep_offsets(exposure_time, num_resample)
         full_grid = _model.build_grid(centering, sub_offsets, dtype=dtype,
@@ -146,7 +151,8 @@ class ProfiledTransitLogProb:
 
         step = epoch_block_size(n_chains_hint, self.n_epochs, self.max_pts,
                                 self.n_sub, budget_bytes,
-                                itemsize=8 if dtype == mx.float64 else 4)
+                                itemsize=8 if dtype == mx.float64 else 4,
+                                bytes_per_point=bytes_per_point)
         self.blocks = [
             _Block(lo, min(lo + step, self.n_epochs),
                    full_grid.select(lo, min(lo + step, self.n_epochs)),
@@ -241,17 +247,26 @@ class ProfiledTransitLogProb:
         """The log-density with the float64 constant restored (host float64)."""
         return np.asarray(self(v), dtype=np.float64) + self.log_const
 
-    def full_model(self, v):
+    def full_model(self, v, *, ld=None):
         """Detrended model and coefficients over every epoch, for plots.
 
         Returns ``(model, coeffs)`` with shapes ``(n_chains, n_epochs,
         max_pts)`` and ``(n_chains, n_epochs, n_cols)``. Not used on the
         sampling path -- it deliberately skips the block chunking.
+
+        ``ld=(q1, q2)``, host floats, overrides the limb darkening in ``v``;
+        it is how a layout without ``q1, q2`` (``--ld=collapsed``) still gets
+        a light curve. ``None`` reads them from ``v`` as before.
         """
         p = self.unpack(v)
+        if ld is None:
+            q1, q2 = p["q1"], p["q2"]
+        else:
+            q1 = mx.full(p["k"].shape, float(ld[0]), dtype=self.dtype)
+            q2 = mx.full(p["k"].shape, float(ld[1]), dtype=self.dtype)
         f_dev = _model.transit_flux_dev(
             self.grid, mid=self.mid_times(self.grid, p, 0, self.n_epochs),
-            k=p["k"], b=p["b"], T14=p["T14"], q1=p["q1"], q2=p["q2"],
+            k=p["k"], b=p["b"], T14=p["T14"], q1=q1, q2=q2,
             period=p["period"], geometry=self.geometry)
         return _profile.detrended_model(self.design, f_dev, self.profile_mode)
 

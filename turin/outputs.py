@@ -311,9 +311,14 @@ class ResumeState:
     #: "off" because every state written before it existed was sampled
     #: without it; LinEph records "off" since it has no epoch times.
     gibbsgrid: str = "off"
+    #: how limb darkening was handled ("sampled"/"collapsed"). Defaulted to
+    #: "sampled" because every state written before it existed sampled q1, q2.
+    #: The two are different targets in different dimensions, so a lineage
+    #: can never switch between them.
+    ld: str = "sampled"
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
-              "gibbsgrid")
+              "gibbsgrid", "ld")
 
     def check_model_rev(self, log=None):
         """Refuse to continue chains sampled under an older likelihood.

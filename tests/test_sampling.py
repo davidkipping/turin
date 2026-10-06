@@ -126,6 +126,29 @@ def test_anvil_version_gate(version, ok):
     assert capabilities.anvil_ok(version) is ok
 
 
+@pytest.mark.parametrize("version,ok", [
+    ("0.7.0", True), ("0.9.7", True), ("1.0", True), ("0.7.0.dev1", True),
+    ("0.6.1", False), ("0.4.1", False), ("unknown", False)])
+def test_metalplanet_version_gate(version, ok):
+    assert capabilities.metalplanet_ok(version) is ok
+
+
+def test_require_metalplanet_names_the_upgrade_command(monkeypatch):
+    """--ld=collapsed needs ld_basis (MetalPlanet >= 0.7.0); the gate must
+    name the MetalPlanet command, not anvil's, and must not touch the
+    default path (it is only called for that mode)."""
+    import metalplanet
+
+    assert capabilities.require_metalplanet() == metalplanet.__version__
+    monkeypatch.setattr(metalplanet, "__version__", "0.6.1")
+    with pytest.raises(SystemExit, match="metalplanet @") as exc:
+        capabilities.require_metalplanet()
+    assert "anvil.git" not in str(exc.value), "points at the wrong package"
+    line = [ln for ln in capabilities.detect().summary().splitlines()
+            if "ld_basis" in ln][0]
+    assert line.lstrip().startswith("NO") and "MetalPlanet.git" in line
+
+
 def test_require_anvil_names_the_upgrade_command(monkeypatch):
     import anvil
 

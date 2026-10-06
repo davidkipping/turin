@@ -27,6 +27,7 @@ import tempfile
 import mlx.core as mx
 import numpy as np
 import pytest
+import metalplanet
 from metalplanet.api import TransitModel, TransitParams
 
 from turin import model as M
@@ -479,6 +480,70 @@ def test_grazing_gradient_matches_a_finite_differenced_reference(k, b, n_gl, tol
     assert np.all(np.abs(g[:2]) > 1e-6), (k, b, g)    # not silently zeroed
     rel = np.abs(g[:2] - fd) / np.abs(fd)
     assert np.all(rel < tol), (k, b, n_gl, rel, g[:2], fd)
+
+
+def _three_epoch_grid(dtype, exp_time=29.4 / 1440):
+    """Three epochs with different predicted offsets, so the phase-order
+    permutation interleaves them -- a single sorted epoch would leave it the
+    identity and test nothing."""
+    times = np.stack([TIMES, TIMES[::-1] * 0.9, TIMES * 1.1])
+    centering = dict(times_centered=times, n_arr=np.array([-1.0, 0.0, 1.0]),
+                     d_arr=np.array([0.012, -0.021, 0.004]),
+                     P_ref=P_REF, tau0_ref=0.0)
+    return M.build_grid(centering, prep.supersample_offsets(exp_time, 1),
+                        dtype=dtype, exp_time=exp_time)
+
+
+@pytest.mark.parametrize("dtype,tol", [(mx.float64, 4e-11), (mx.float32, 2e-6)])
+def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol):
+    """``vertex_flux_devs`` (one ld_basis launch, phase-ordered) against
+    two independent references.
+
+    Each vertex against MetalPlanet's scalar kernel called at exactly that
+    ``(u1, u2)`` on the points in plain *storage* order -- no gathers -- so
+    the phase-order round trip is checked too. Not via turin's q route:
+    ``q_to_u`` clamps ``q1 >= 1e-12``, so ``q1 = 0`` gives ``u1 = 1e-6``, not
+    the ``(0, 0)`` vertex (measured 2.8e-9 off, which is the clamp, not a
+    bug). Then the convex combination at a general law against turin's own
+    ``transit_flux_dev``, through the q route where no clamp is active.
+    """
+    stream = mx.cpu if dtype == mx.float64 else mx.gpu
+    grid = _three_epoch_grid(dtype)
+    assert grid.order is not None and not np.array_equal(
+        np.array(grid.order), np.arange(grid.order.size))
+    col = lambda v: mx.array([[float(v)]], dtype=dtype)
+    mid = mx.array(np.array([[0.002, -0.001, 0.0005]]), dtype=dtype)
+    geo = dict(k=col(0.11), b=col(0.42), T14=col(T14), period=col(P_REF))
+    with mx.stream(stream):
+        verts = [np.array(f, dtype=np.float64)
+                 for f in M.vertex_flux_devs(grid, mid=mid, **geo)]
+
+        def single(q1, q2):
+            return np.array(M.transit_flux_dev(grid, mid=mid, q1=col(q1),
+                                               q2=col(q2), **geo),
+                            dtype=np.float64)
+
+        tau = M.time_from_mid(grid, mid).reshape(1, -1)      # storage order
+        a = M.a_over_rstar(geo["T14"], geo["period"], geo["k"], geo["b"])
+
+        def at_u(u1, u2):
+            dev = metalplanet.flux_dev_from_tau(
+                tau, geo["period"], a, geo["b"], geo["k"], col(u1), col(u2),
+                exp_time=grid.exp_time, integration="contact", n_gl=grid.n_gl)
+            return np.array(dev, dtype=np.float64).reshape(verts[0].shape)
+
+        for got, (u1, u2) in zip(verts, ((0.0, 0.0), (2.0, -1.0), (0.0, 1.0))):
+            assert np.max(np.abs(got - at_u(u1, u2))) <= tol
+
+        # a general law is the convex combination with omega_j proportional
+        # to lambda_j * F*_j, lambda = (1 - sqrt q1, sqrt q1 q2, sqrt q1 (1-q2))
+        q1, q2 = 0.37, 0.61
+        r = math.sqrt(q1)
+        lam = np.array([1 - r, r * q2, r * (1 - q2)])
+        om = lam * np.array(M.VERTEX_FSTAR)
+        om /= om.sum()
+        mix = sum(w * f for w, f in zip(om, verts))
+        assert np.max(np.abs(mix - single(q1, q2))) <= tol
 
 
 def test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry():

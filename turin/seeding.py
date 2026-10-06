@@ -272,8 +272,9 @@ def initial_model_vector(layout, eph, *, shape=None, dtau=None, dP=0.0,
     if shape:
         s.update({k: float(v) for k, v in shape.items() if k in s})
     if layout.mode == "lineph":
-        return np.array([dP, dtau0, s["k"], s["beta"], s["T14"],
-                         s["q1"], s["q2"]], dtype=np.float64)
+        # by name, so a layout without q1, q2 (--ld=collapsed) needs no case
+        vals = dict(s, dP=dP, dtau0=dtau0)
+        return np.array([vals[n] for n in layout.names], dtype=np.float64)
     base = np.array([s["k"], s["beta"], s["T14"], s["q1"], s["q2"]],
                     dtype=np.float64)
     n_ep = layout.n_epochs

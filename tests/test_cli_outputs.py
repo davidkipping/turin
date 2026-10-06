@@ -281,6 +281,19 @@ def _state(**over):
     return outputs.ResumeState(**base)
 
 
+def test_ld_is_a_resume_guard_and_old_states_read_sampled():
+    """A lineage sampled with q1, q2 and one that integrated them out are
+    different targets in different dimensions; never pool them. States
+    written before the field existed sampled q1, q2."""
+    assert "ld" in outputs.ResumeState.GUARDS
+    assert _state().ld == "sampled"
+    _state(ld="collapsed").check(ld="collapsed")          # must not raise
+    with pytest.raises(SystemExit, match="ld"):
+        _state(ld="collapsed").check(ld="sampled")
+    with pytest.raises(SystemExit, match="ld"):
+        _state().check(ld="collapsed")
+
+
 def test_model_rev_defaults_to_one_for_states_written_before_the_field():
     assert _state().model_rev == 1
 

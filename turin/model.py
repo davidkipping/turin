@@ -105,6 +105,13 @@ HAS_TAU_KERNEL = hasattr(metalplanet, "flux_dev_from_tau")
 #: and 40x below it on the value (the --PL probe accepts sd 0.02).
 N_GL = 5
 
+#: Disc-integrated flux of the three vertex laws of the Kipping (2013)
+#: triangle, ``(u1, u2) = (0, 0), (2, -1), (0, 1)``: the normalisers that turn
+#: :func:`vertex_flux_devs`'s unnormalised basis into light curves, and the
+#: ``F*`` of the collapsed-LD prior. Python floats, so nothing float64 leaks
+#: into a float32 graph.
+VERTEX_FSTAR = (math.pi, math.pi / 2.0, 5.0 * math.pi / 6.0)
+
 #: (b, k) prior parameterizations, after hurin's ``_sample_b_k``. Each maps a
 #: sampled fraction in [0, 1] to the impact parameter.
 B_PRIORS = ("transiting", "nongrazing", "box")
@@ -419,6 +426,47 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
     if grid.order is not None:
         dev = mx.take(dev, grid.unorder, axis=1)
     return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
+
+
+def vertex_flux_devs(grid, *, mid, k, b, T14, period):
+    """Light-curve deviations of the three vertex limb-darkening laws.
+
+    Returns ``[F0 - 1, F1 - 1, F2 - 1]``, each ``(n_chains, n_epochs,
+    max_pts)``, for the Kipping-triangle vertices ``(u1, u2) = (0, 0),
+    (2, -1), (0, 1)``. Every physical quadratic law's deviation is the convex
+    combination ``sum_j omega_j (F_j - 1)`` with ``omega`` on the 2-simplex,
+    which is what lets :mod:`turin.ldmarg` integrate the limb darkening out.
+
+    One kernel launch: MetalPlanet's ``ld_basis=True`` (>= 0.7.0) returns the
+    unnormalised deficits ``B`` for intensities ``mu^0, mu^1, mu^2``, and
+    ``F0 - 1 = B0/pi``, ``F1 - 1 = B2/(pi/2)``, ``F2 - 1 = (2 B1 - B2)/(5 pi/6)``
+    (verified to 3.5e-18 in float64 against three scalar calls). Same route as
+    :func:`transit_flux_dev`'s tau-kernel branch, including the phase-order
+    gathers, which act on axis 1 and so carry the trailing basis axis through
+    unchanged. There is deliberately no fallback: the caller is gated on
+    ``capabilities.MIN_METALPLANET``, and ``geometry="chord"`` has no tau
+    kernel to ask.
+    """
+    if not HAS_TAU_KERNEL:
+        raise RuntimeError("vertex_flux_devs needs MetalPlanet's tau kernel "
+                           "(flux_dev_from_tau)")
+    n_chains = mid.shape[0]
+    flat = time_from_mid(grid, mid).reshape(n_chains, -1)
+    if grid.order is not None:
+        flat = mx.take(flat, grid.order, axis=1)
+    basis = metalplanet.flux_dev_from_tau(
+        flat, period, a_over_rstar(T14, period, k, b), b, k,
+        exp_time=grid.exp_time,
+        integration="contact" if grid.exp_time > 0 else "none",
+        n_gl=grid.n_gl, ld_basis=True)                       # (C, m, 3)
+    if grid.order is not None:
+        basis = mx.take(basis, grid.unorder, axis=1)
+    shape = (n_chains, grid.n_epochs, grid.max_pts)
+    b0 = basis[..., 0].reshape(shape)
+    b1 = basis[..., 1].reshape(shape)
+    b2 = basis[..., 2].reshape(shape)
+    f0, f1, f2 = VERTEX_FSTAR
+    return [b0 / f0, b2 / f1, (2.0 * b1 - b2) / f2]
 
 
 def transit_flux(grid, **kw):
