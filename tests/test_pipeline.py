@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from turin import cli, model as M, pipeline, prep, outputs
+from turin import MODEL_REV as _MODEL_REV
 
 P_TRUE, EPOCH_TRUE, DUR_H = 6.2431, 131.7, 3.1
 K_TRUE, B_TRUE, Q1_TRUE, Q2_TRUE = 0.10, 0.28, 0.32, 0.24
@@ -425,3 +426,52 @@ def test_replot_rebuilds_figures_without_sampling(tmp_path, fake_target):
     np.testing.assert_allclose(new[:, oc], old[:, oc], rtol=0, atol=1e-3)
     assert open(summ).read() == before_summary
     assert os.path.getmtime(corner_pdf) > 0               # rewritten
+
+
+def test_replot_refuses_a_fit_its_model_does_not_reproduce(tmp_path,
+                                                           fake_target):
+    """--replot's "same model" test is the replayed best log-density, not
+    MODEL_REV: an older revision replots when it reproduces, and a fit whose
+    stored log-density the current model misses (here by 1 nat) is refused
+    and left untouched."""
+    import io
+    import tarfile
+
+    import pandas as pd
+
+    assert pipeline.run(_args(tmp_path, modes=("lineph",)),
+                        log=lambda m: None) in FINISHED
+    d = str(tmp_path)
+    fold = os.path.join(d, "KOI-1.01_lineph_fold.pdf")
+
+    # an older MODEL_REV that reproduces: replotted
+    st = outputs.load_resume(d, "KOI-1.01", "lineph")
+    st.model_rev = _MODEL_REV - 1
+    outputs.save_resume(d, "KOI-1.01", "lineph", st)
+    logs = []
+    args = _args(tmp_path, modes=("lineph",))
+    args.replot = True
+    assert pipeline.run(args, log=logs.append) == 0
+    assert any("replotting" in l and f"MODEL_REV {_MODEL_REV - 1}" in l
+               for l in logs)
+
+    # a stored log-density 1 nat off: refused, figures untouched
+    path = os.path.join(d, "KOI-1.01_lineph_chains.csv.tar.gz")
+    with tarfile.open(path) as tf:
+        members = [(m, tf.extractfile(m).read()) for m in tf.getmembers()]
+    text = members[0][1].decode()
+    header, stamp = text.splitlines()[:2]
+    df = pd.read_csv(io.StringIO(text), comment="#")
+    df["loglike"] += 1.0
+    body = "\n".join([header, stamp]) + "\n" + df.to_csv(
+        index=False, header=False)
+    with tarfile.open(path, "w:gz") as tf:
+        for (m, data), new in zip(members, [body.encode(), None]):
+            data = new if new is not None else data
+            m.size = len(data)
+            tf.addfile(m, io.BytesIO(data))
+    os.utime(fold, (0, 0))
+    logs = []
+    assert pipeline.run(args, log=logs.append) == 1
+    assert any("does not reproduce" in l for l in logs)
+    assert os.path.getmtime(fold) == 0

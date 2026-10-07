@@ -116,6 +116,14 @@ def run(args, log=print):
     return _report_outcome(target, outcome, log)
 
 
+#: --replot's "same model" test: the rebuilt float64 log-density at the
+#: fit's ML row must match the stored value to this many nats (scaled up
+#: by 1 + |logL|/5e4 for the float32 rounding of very large likelihoods).
+#: Reproducible fits agree to ~1e-3; the smallest real change measured
+#: (22 points of 213, KOI-5749.01) missed by 128.
+_ML_REPLAY_TOL = 0.05
+
+
 def replot(args, prepared, outdir, *, log=print):
     """Redraw a finished lineage's figures and ttv_times, without sampling.
 
@@ -128,6 +136,14 @@ def replot(args, prepared, outdir, *, log=print):
     and SNR columns depend on code); the summary, chains, logrho, lcdata and
     resume state are left as the fit wrote them, since R-hat and ESS cannot
     be recomputed from the thinned chains.
+
+    It refuses unless the rebuilt model reproduces the fit's stored best
+    log-density at its ML row (`_ML_REPLAY_TOL`), checked in float64. That
+    is the test of "same model" here, not MODEL_REV: a revision that changed
+    other targets' likelihoods (0.1.50 changed two of 37) leaves most fits
+    exactly reproducible, and a fit whose data or model did change misses
+    by far more (KOI-5749.01 against the old segmentation: 128 nats, where
+    reproducible fits agree to 1e-3).
     """
     import io
     import tarfile
@@ -143,11 +159,6 @@ def replot(args, prepared, outdir, *, log=print):
         if state is None:
             log(f"[{target}] {mode}: no saved fit to replot")
             continue
-        if getattr(state, "model_rev", 1) != _MODEL_REV:
-            log(f"[{target}] {mode}: fitted under MODEL_REV {state.model_rev}, "
-                f"this turin is {_MODEL_REV}; not replotting with a "
-                "different model")
-            continue
         state.check(b_prior=args.b_prior, geometry=args.geometry,
                     ttv_max=args.ttv_max_days, gibbsgrid=_gibbsgrid(mode, args),
                     ld=getattr(args, "ld", "sampled"))
@@ -161,11 +172,11 @@ def replot(args, prepared, outdir, *, log=print):
 
         layout, _ = _mode_layout(mode, args, prepared, centering, ed)
         orders = np.asarray(state.legendre_orders)
-        _, _, lp, _ = _likelihood.build_target(
+        target_fn, transform, lp, _ = _likelihood.build_target(
             layout, centering, ed, orders, profile_mode=state.profile_mode,
             ld_mode=layout.ld, num_resample=prepared.num_resample,
             exposure_time=prepared.exposure_time, geometry=args.geometry,
-            n_chains_hint=64, fp64=False)
+            n_chains_hint=64, fp64=True)
         collapsed = layout.ld == "collapsed"
         names = list(layout.names) + (["q1", "q2"] if collapsed else [])
 
@@ -177,6 +188,17 @@ def replot(args, prepared, outdir, *, log=print):
         best = int(np.argmax(d["loglike"].to_numpy()))
         v_ml = (phys[best, :layout.dim]
                 - np.asarray(layout.report_offset, dtype=np.float64))
+        stored = float(d["loglike"].iloc[best])
+        replayed = float(np.asarray(target_fn.log_prob_hi(
+            transform.from_model_np(v_ml[None, :])))[0]) + lp.log_const
+        miss = replayed - stored
+        rev = getattr(state, "model_rev", 1)
+        if not abs(miss) <= _ML_REPLAY_TOL * (1.0 + abs(stored) / 5e4):
+            log(f"[{target}] {mode}: this turin's model does not reproduce "
+                f"the fit (best log-density {stored:.4f} stored, "
+                f"{replayed:.4f} now, fitted under MODEL_REV {rev}); "
+                "refit it rather than replot")
+            continue
 
         summary = {}
         rhats = []
@@ -193,7 +215,8 @@ def replot(args, prepared, outdir, *, log=print):
                 f"UNCONVERGED: worst R-hat {r:.4f} ({p}) at "
                 f"{state.n_samples_done} draws/chain")
 
-        log(f"[{target}] {mode}: replotting from {len(d)} saved draws")
+        log(f"[{target}] {mode}: replotting from {len(d)} saved draws "
+            f"(MODEL_REV {rev}; best log-density reproduced to {miss:+.1e})")
         model, baseline, q_ml = _ml_model(lp, v_ml, collapsed)
         _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
                        layout, centering, ed, baseline, log=log, ld=q_ml)

@@ -260,7 +260,9 @@ cannot pool chains drawn both ways.
 --replot                     redraw a finished fit's figures and ttv_times.csv
                              from its saved products, without sampling (for
                              figures made by an older turin; summary, chains
-                             and resume state are left untouched)
+                             and resume state are left untouched; refused
+                             unless this turin reproduces the fit's best
+                             log-density)
 --extend1 / --extend2        extend the LinEph / TTV fit by one round
 --modes=lineph,ttv           which fits to run
 --tag=NAME                   namespace a run into its own resume lineage
