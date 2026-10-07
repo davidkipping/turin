@@ -91,6 +91,9 @@ def run(args, log=print):
         target, ttv_max_days=args.ttv_max_days or 0.0,
         sc_override=args.sc_override, log=log)
 
+    if getattr(args, "replot", False):
+        return replot(args, prepared, outdir, log=log)
+
     log(f"[{target}] Cross-validating Legendre orders...")
     cv = _prep.cv_orders(prepared.epoch_data, prepared.eph["duration"],
                          tau_shift_max=args.ttv_max_days or 0.0,
@@ -113,6 +116,96 @@ def run(args, log=print):
     return _report_outcome(target, outcome, log)
 
 
+def replot(args, prepared, outdir, *, log=print):
+    """Redraw a finished lineage's figures and ttv_times, without sampling.
+
+    turin skips a converged fit outright, and only writes figures during
+    sampling, so figures made by an older turin stay old. This rebuilds them
+    from the saved products: the layout and likelihood exactly as fitted (the
+    recorded Legendre orders, profile mode and limb-darkening mode), the
+    draws from the chains tarball, and the ML row from its loglike column.
+    It rewrites the corner, fold and O-C figures and ttv_times.csv (its O-C
+    and SNR columns depend on code); the summary, chains, logrho, lcdata and
+    resume state are left as the fit wrote them, since R-hat and ESS cannot
+    be recomputed from the thinned chains.
+    """
+    import io
+    import tarfile
+
+    import pandas as pd
+
+    target = prepared.target
+    ed = prepared.epoch_data
+    centering = _prep.centering_constants(ed, prepared.eph)
+    done_any = False
+    for mode in args.modes:
+        state = _outputs.load_resume(outdir, target, mode)
+        if state is None:
+            log(f"[{target}] {mode}: no saved fit to replot")
+            continue
+        if getattr(state, "model_rev", 1) != _MODEL_REV:
+            log(f"[{target}] {mode}: fitted under MODEL_REV {state.model_rev}, "
+                f"this turin is {_MODEL_REV}; not replotting with a "
+                "different model")
+            continue
+        state.check(b_prior=args.b_prior, geometry=args.geometry,
+                    ttv_max=args.ttv_max_days, gibbsgrid=_gibbsgrid(mode, args),
+                    ld=getattr(args, "ld", "sampled"))
+        chains_path = _outputs.product_path(outdir, target, mode, "chains",
+                                            "csv.tar.gz")
+        summary_path = _outputs.product_path(outdir, target, mode, "summary",
+                                             "csv")
+        if not (os.path.exists(chains_path) and os.path.exists(summary_path)):
+            log(f"[{target}] {mode}: chains or summary missing; skipped")
+            continue
+
+        layout, _ = _mode_layout(mode, args, prepared, centering, ed)
+        orders = np.asarray(state.legendre_orders)
+        _, _, lp, _ = _likelihood.build_target(
+            layout, centering, ed, orders, profile_mode=state.profile_mode,
+            ld_mode=layout.ld, num_resample=prepared.num_resample,
+            exposure_time=prepared.exposure_time, geometry=args.geometry,
+            n_chains_hint=64, fp64=False)
+        collapsed = layout.ld == "collapsed"
+        names = list(layout.names) + (["q1", "q2"] if collapsed else [])
+
+        tf = tarfile.open(chains_path)
+        d = pd.read_csv(io.StringIO(
+            tf.extractfile(tf.getmembers()[0]).read().decode()), comment="#")
+        phys = d[names].to_numpy(dtype=np.float64)
+        b_draws = d["b"].to_numpy(dtype=np.float64)
+        best = int(np.argmax(d["loglike"].to_numpy()))
+        v_ml = (phys[best, :layout.dim]
+                - np.asarray(layout.report_offset, dtype=np.float64))
+
+        summary = {}
+        rhats = []
+        for row in open(summary_path).read().splitlines()[2:]:
+            f = row.split(",")
+            summary[f[0]] = {"median": float(f[1]), "std": float(f[2])}
+            if f[5]:
+                rhats.append((float(f[5]), f[0]))
+        if state.done:
+            _outputs.set_run_status("")
+        else:
+            r, p = max(rhats)
+            _outputs.set_run_status(
+                f"UNCONVERGED: worst R-hat {r:.4f} ({p}) at "
+                f"{state.n_samples_done} draws/chain")
+
+        log(f"[{target}] {mode}: replotting from {len(d)} saved draws")
+        model, baseline, q_ml = _ml_model(lp, v_ml, collapsed)
+        _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
+                       layout, centering, ed, baseline, log=log, ld=q_ml)
+        if mode == "ttv":
+            _write_ttv_products(target, outdir, phys, names, layout,
+                                centering, ed, model, summary, lp, v_ml,
+                                plot=True, log=log)
+        done_any = True
+    _outputs.set_run_status("")
+    return 0 if done_any else 1
+
+
 #: Exit code for a run that finished but left a fit unconverged at the draw
 #: cap; its products are complete and stamped UNCONVERGED on line 2.
 EXIT_UNCONVERGED = 3
@@ -132,6 +225,22 @@ def _report_outcome(target, outcome, log):
                 f" (worst R-hat {v.worst_rhat[1]:.4f}, {v.worst_rhat[0]}); "
                 "products are written and stamped UNCONVERGED")
     return EXIT_UNCONVERGED if unconverged else 0
+
+
+def _mode_layout(mode, args, prepared, centering, epoch_data):
+    """The parameter layout a fit mode samples, and (TTV) its timing half-width."""
+    if mode == "ttv":
+        if args.ttv_max_days:
+            tau_half = np.full(epoch_data["n_epochs"], args.ttv_max_days)
+        else:
+            lo, hi = _seeding._epoch_time_extent(epoch_data)
+            tau_half = np.maximum(
+                np.minimum(-lo, hi) - 0.55 * (prepared.eph["duration"] / 24.0),
+                2.0 * prepared.cadence_days)
+        return _params.ttv_layout(prepared.eph, centering, tau_half,
+                                  b_prior=args.b_prior), tau_half
+    return _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
+                                 ld=getattr(args, "ld", "sampled")), None
 
 
 def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
@@ -170,20 +279,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             return prior_state.ml_params or None
         log(f"  resuming from {prior_state.n_samples_done} draws/chain")
 
-    # timing priors
-    if mode == "ttv":
-        if args.ttv_max_days:
-            tau_half = np.full(n_ep, args.ttv_max_days)
-        else:
-            lo, hi = _seeding._epoch_time_extent(epoch_data)
-            tau_half = np.maximum(
-                np.minimum(-lo, hi) - 0.55 * (prepared.eph["duration"] / 24.0),
-                2.0 * prepared.cadence_days)
-        layout = _params.ttv_layout(prepared.eph, centering, tau_half,
-                                   b_prior=args.b_prior)
-    else:
-        layout = _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
-                                       ld=getattr(args, "ld", "sampled"))
+    layout, tau_half = _mode_layout(mode, args, prepared, centering,
+                                    epoch_data)
 
     build_kw = dict(num_resample=prepared.num_resample,
                     exposure_time=prepared.exposure_time,
@@ -388,6 +485,23 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
     return ml if mode == "lineph" else None
 
 
+def _write_ttv_products(target, outdir, phys, names, layout, centering,
+                        epoch_data, model, summary, lp, v_ml, *, plot, log):
+    """ttv_times.csv, and (``plot``) the O-C diagram."""
+    rows = _ttv_rows(phys, names, layout, centering, epoch_data, model,
+                     summary, lp=lp, v_ml=v_ml)
+    _outputs.export_ttv_times(outdir, target, "ttv", rows, log=log)
+    if plot:
+        try:
+            _plots.oc_plot(
+                _outputs.product_path(outdir, target, "ttv", "oc", "pdf"),
+                [r["epoch"] for r in rows], [r["tmid"] for r in rows],
+                [r["tmid_err"] for r in rows],
+                title=f"{target} transit timing", log=log)
+        except Exception as exc:
+            log(f"    O-C plot skipped: {exc}")
+
+
 def _corner_columns(names):
     """Which parameters a corner plot shows, and where its "..." gap goes.
 
@@ -443,6 +557,28 @@ def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
             n_bins_from=epoch_data["n_epochs"], log=log)
     except Exception as exc:
         log(f"    fold plot skipped: {exc}")
+
+
+def _ml_model(lp, v_ml, collapsed):
+    """Detrended model and baseline at the ML parameters (model space).
+
+    Returns ``(model, baseline, q_ml)``; ``q_ml`` is the collapsed mode's
+    display limb darkening (the conditional mode at the ML theta), else None.
+    """
+    q_ml = None
+    with mx.stream(mx.cpu):
+        v_row = mx.array(np.asarray(v_ml)[None, :].astype(np.float32))
+        if collapsed:
+            # one curve needs one (q1, q2): the conditional mode at the ML
+            # theta. A display point estimate only; the posterior q1, q2 in
+            # every other product are the conditional draws.
+            (cq1,), (cq2,) = lp.conditional_mode_ld(v_row)
+            q_ml = (float(cq1), float(cq2))
+        model, coeffs = lp.full_model(v_row, ld=q_ml)
+        model = np.array(model, dtype=np.float64)[0]
+        baseline = np.array(_profile.baseline(lp.design, coeffs),
+                            dtype=np.float64)[0]
+    return model, baseline, q_ml
 
 
 def _ml_row(results, lp, transform):
@@ -526,21 +662,8 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
 
     # maximum-likelihood model, for the light-curve export and the plots
     v_ml, logl_ml = _ml_row(results, lp, transform)
-    q_ml = None
-    v_ml_named = v_ml
-    with mx.stream(mx.cpu):
-        v_row = mx.array(v_ml[None, :].astype(np.float32))
-        if collapsed:
-            # one curve needs one (q1, q2): the conditional mode at the ML
-            # theta. A display point estimate only; the posterior q1, q2 in
-            # every other product are the conditional draws above.
-            (cq1,), (cq2,) = lp.conditional_mode_ld(v_row)
-            q_ml = (float(cq1), float(cq2))
-            v_ml_named = np.concatenate([v_ml, q_ml])
-        model, coeffs = lp.full_model(v_row, ld=q_ml)
-        model = np.array(model, dtype=np.float64)[0]
-        baseline = np.array(_profile.baseline(lp.design, coeffs),
-                            dtype=np.float64)[0]
+    model, baseline, q_ml = _ml_model(lp, v_ml, collapsed)
+    v_ml_named = v_ml if q_ml is None else np.concatenate([v_ml, q_ml])
     _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
 
     state_holder["ml_params"] = {
@@ -554,18 +677,9 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                        ld=q_ml)
 
     if mode == "ttv":
-        rows = _ttv_rows(phys, names, layout, centering, epoch_data, model,
-                         summary, lp=lp, v_ml=v_ml)
-        _outputs.export_ttv_times(outdir, target, mode, rows, log=log)
-        if heavy:
-            try:
-                _plots.oc_plot(
-                    _outputs.product_path(outdir, target, mode, "oc", "pdf"),
-                    [r["epoch"] for r in rows], [r["tmid"] for r in rows],
-                    [r["tmid_err"] for r in rows],
-                    title=f"{target} transit timing", log=log)
-            except Exception as exc:
-                log(f"    O-C plot skipped: {exc}")
+        _write_ttv_products(target, outdir, phys, names, layout, centering,
+                            epoch_data, model, summary, lp, v_ml,
+                            plot=heavy, log=log)
 
     # ---- resume state
     # a write failure (disk full, permissions) must not kill the fit: the

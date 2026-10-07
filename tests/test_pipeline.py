@@ -389,3 +389,39 @@ def test_report_outcome_maps_verdicts_to_exit_codes():
         "T", {"lineph": V(True), "ttv": V(False)}, log.append) == 3
     assert pipeline._report_outcome(
         "T", {"lineph": "converged earlier"}, log.append) == 0
+
+
+def test_replot_rebuilds_figures_without_sampling(tmp_path, fake_target):
+    """--replot redraws the figures and ttv_times from the saved products:
+    the times file comes back identical (same layout, likelihood and ML row
+    as the fit), the summary and chains are not touched, and nothing
+    samples."""
+    assert pipeline.run(_args(tmp_path, modes=("lineph", "ttv")),
+                        log=lambda m: None) in FINISHED
+    d = str(tmp_path)
+    times = os.path.join(d, "KOI-1.01_ttv_times.csv")
+    summ = os.path.join(d, "KOI-1.01_ttv_summary.csv")
+    corner_pdf = os.path.join(d, "KOI-1.01_ttv_corner.pdf")
+    before_times = open(times).read().splitlines()
+    before_summary = open(summ).read()
+    os.utime(corner_pdf, (0, 0))
+
+    logs = []
+    args = _args(tmp_path, modes=("lineph", "ttv"))
+    args.replot = True
+    assert pipeline.run(args, log=logs.append) == 0
+    assert not any("round 0" in l for l in logs)          # no sampling
+    after_times = open(times).read().splitlines()
+    assert after_times[0] == before_times[0]
+    assert after_times[1].startswith("# turin")           # line 2 = provenance
+    # the same rows: replot reads the medians and sds back from the summary
+    # CSV (10 significant figures), so values derived from them match to
+    # that precision -- the O-C column (minutes, sub-ms) and the errors
+    old = np.array([[float(x) for x in r.split(",")] for r in before_times[2:]])
+    new = np.array([[float(x) for x in r.split(",")] for r in after_times[2:]])
+    oc = 3
+    np.testing.assert_allclose(np.delete(new, oc, 1), np.delete(old, oc, 1),
+                               rtol=1e-9)
+    np.testing.assert_allclose(new[:, oc], old[:, oc], rtol=0, atol=1e-3)
+    assert open(summ).read() == before_summary
+    assert os.path.getmtime(corner_pdf) > 0               # rewritten

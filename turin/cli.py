@@ -45,6 +45,7 @@ _BOOL_FLAGS = {
     "--sc": "sc_override",
     "--no-strict-precision": "no_strict_precision",
     "--capabilities": "show_capabilities",
+    "--replot": "replot",
 }
 _VALUE_FLAGS = {
     "--chains": "chains",
@@ -75,6 +76,9 @@ usage: turin --KOI-448.02 [options]
   --extend1 / --extend2   extend the LinEph / TTV fit by one round
   --modes=lineph,ttv      which fits to run (default both)
   --tag=NAME              namespace this run into its own resume lineage
+  --replot                redraw a finished fit's figures and ttv_times.csv
+                          from its saved products, without sampling (for
+                          figures made by an older turin)
 
   --chains=N              sampling chains (default 512, raised to 4*dim)
   --sampler=chees|ensemble  gradient-based (default) or gradient-free
@@ -133,6 +137,7 @@ class Args:
     show_version: bool = False
     show_help: bool = False
     show_capabilities: bool = False
+    replot: bool = False
     clear_cache: bool = False
     fresh: bool = False
     extend1: bool = False
