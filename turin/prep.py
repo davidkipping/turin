@@ -108,25 +108,32 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     """
     dur_days = duration_hours / 24.0
     half_window = n_durations * dur_days
-    transit_times = _predicted_transit_times(time, period, epoch)
-    if transit_times.size == 0:
+    time = np.asarray(time, dtype=np.float64)
+    if time.size == 0:
         raise ValueError("No epochs with sufficient data points")
 
-    # nearest predicted centre for each point, in closed form: the centres
-    # are epoch + n*P, so this is O(N) rather than a dense (N, n_transits)
-    # distance matrix (~1.5 GB at P ~ 0.8 d). ceil(x - 1/2) breaks an exact
-    # tie toward the earlier centre, as argmin did.
-    n_lo = round((transit_times[0] - epoch) / period)
-    nearest = np.clip(
-        np.ceil((time - epoch) / period - 0.5).astype(np.int64) - n_lo,
-        0, transit_times.size - 1)
+    # Each point's nearest predicted transit, by number, in closed form (the
+    # centres are epoch + n*P): O(N), with ceil(x - 1/2) breaking an exact tie
+    # toward the earlier centre. The transit list spans every number that
+    # occurs, so every point's own nearest transit is in it. It used to be
+    # the transits whose *centres* fall inside the data's span, with points
+    # clipped to the nearest listed one: a window that starts just after an
+    # uncovered transit then joined the previous epoch, a whole period away
+    # (KOI-5749.01: 22 points 282 d from their epoch's centre, at Legendre
+    # x ~ -490, in the fit). hurin's segment_epochs does the same.
+    n_pt = np.ceil((time - epoch) / period - 0.5).astype(np.int64)
+    n_lo, n_hi = int(n_pt.min()), int(n_pt.max())
+    transit_times = epoch + np.arange(n_lo, n_hi + 1) * period
+    nearest = n_pt - n_lo
 
     half_transit = 0.5 * dur_days + tau_shift_max
     epoch_groups = []
     epoch_centers = []
     n_in_transit = []
     for i, tt in enumerate(transit_times):
-        mask_i = nearest == i
+        # nearest centre AND inside its window: a point can only belong to
+        # an epoch it is near, whatever produced the input
+        mask_i = (nearest == i) & (np.abs(time - tt) <= half_window)
         if np.sum(mask_i) < min_pts:
             continue
         t_epoch = time[mask_i]

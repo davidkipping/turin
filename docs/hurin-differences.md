@@ -248,6 +248,16 @@ Two data-handling differences, neither in the model:
   For almost every target the epochs, and so the comparison, are
   identical; they differ only when an epoch has exactly one point in
   transit or too few points in its window. KOI-518.02 is unaffected.
+- **Edge windows (turin >= 0.1.50).** Both packages segment the windowed
+  data by assigning each point to its nearest predicted transit, from a list
+  of transits whose *centres* lie inside the data's span. A window that
+  starts just after an uncovered transit (centre in a gap or before the
+  light curve) therefore joined the previous listed epoch, a whole period
+  away, and entered its baseline fit at Legendre x ~ -490. turin now builds
+  the list from every point's own nearest transit and keeps a point only
+  within its epoch's window. Of the first 37 Kepler targets this changed two,
+  KOI-5749.01 (22 points) and KOI-5790.01 (38), and no comparison target in
+  this document. hurin's `segment_epochs` has the same construction.
 - **One star.** turin restricts MAST results to the host's KIC/TIC
   (0.1.26). hurin downloads every row of the name search, which for
   KOI-7592.01 includes a neighbouring star; see

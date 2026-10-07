@@ -566,3 +566,27 @@ def test_corner_shows_all_epochs_or_first_and_last_seven(n_epochs, panels, gap):
     # LinEph: all seven, never a gap
     lin = ["dP", "dtau0", "k", "beta", "T14", "q1", "q2"]
     assert pipeline._corner_columns(lin) == (list(range(7)), None)
+
+
+def test_points_after_an_uncovered_transit_stay_out_of_other_epochs():
+    """KOI-5749.01's case: a transit whose centre falls in a data gap, with
+    points just after it inside its window. Those points used to join the
+    next epoch a whole period away (the transit list was built from centres
+    inside the data's span), so a baseline polynomial was evaluated at
+    x ~ -490. Every kept point must lie within its own epoch's window, and
+    a transit with no in-transit points must still not be fitted."""
+    from turin import prep
+
+    P, T0, dur_h = 10.0, 5.0, 2.0
+    cad = 29.4 / 1440
+    t = np.arange(0.0, 40.0, cad)
+    t = t[(t < 4.0) | (t > 5.1)]          # the gap swallows the transit at 5.0
+    f, e = np.ones_like(t), np.full(t.size, 1e-4)
+    tw, fw, ew = prep.extract_near_transit_data(t, f, e, P, T0, dur_h)
+    assert np.any((tw > 5.05) & (tw < 5.5))   # the edge points survive windowing
+    ed = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
+    np.testing.assert_allclose(ed["epoch_centers"], [15.0, 25.0, 35.0])
+    m = ed["mask"] > 0
+    for i, c in enumerate(ed["epoch_centers"]):
+        assert np.all(np.abs(ed["times_padded"][i][m[i]] - c)
+                      <= ed["half_window"] + 1e-12)
