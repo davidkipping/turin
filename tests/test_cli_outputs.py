@@ -590,3 +590,18 @@ def test_points_after_an_uncovered_transit_stay_out_of_other_epochs():
     for i, c in enumerate(ed["epoch_centers"]):
         assert np.all(np.abs(ed["times_padded"][i][m[i]] - c)
                       <= ed["half_window"] + 1e-12)
+
+
+def test_binned_errors_come_from_the_formal_errors():
+    """The fold plot's bin error is median(formal error)/sqrt(n), not the
+    bin's own scatter (which put ~40% noise on 4-point bins and read the
+    transit's slope as scatter): equal errors give equal bars, whatever
+    the points do."""
+    from turin.plots import bin_points
+    t = np.arange(10.0)
+    y = np.array([0, 5, 0, 5, 1, 1, 1, 1, 9, 9.0])     # last 2 points dropped
+    e = np.array([2, 2, 2, 2, 1, 3, 3, 3, 7, 7.0])
+    bt, by, be = bin_points(t, y, e, 4)
+    np.testing.assert_allclose(bt, [1.5, 5.5])
+    np.testing.assert_allclose(by, [2.5, 1.0])
+    np.testing.assert_allclose(be, [2 / 2, 3 / 2])

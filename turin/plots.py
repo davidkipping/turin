@@ -142,6 +142,23 @@ def corner_plot(path, draws, labels, *, title="", colour="#808080",
     return _save(fig, path, title or "corner", log)
 
 
+def bin_points(t, y, yerr, n_bin):
+    """Consecutive bins of ``n_bin`` points (a partial last bin dropped):
+    mean time, mean flux, and the error of that mean, ``median(yerr) /
+    sqrt(n_bin)``.
+
+    The error comes from the formal errors, not the bin's own scatter: a
+    standard deviation of a handful of points varies ~40% from bin to bin,
+    and across ingress it picks up the transit's slope. The formal errors
+    are also what the likelihood assumes.
+    """
+    nb = t.size // n_bin
+    sl = slice(0, nb * n_bin)
+    shape = (nb, n_bin)
+    return (t[sl].reshape(shape).mean(1), y[sl].reshape(shape).mean(1),
+            np.median(yerr[sl].reshape(shape), axis=1) / np.sqrt(n_bin))
+
+
 def fold_plot(path, *, epoch_data, mid_times, baseline, model_grid_t,
               model_grid_f, period, title="", colour="#1f77b4",
               n_bins_from=None, log=None):
@@ -175,11 +192,7 @@ def fold_plot(path, *, epoch_data, mid_times, baseline, model_grid_t,
 
     n_bin = int(n_bins_from or max(1, mask.shape[0]))
     if n_bin > 1 and dt.size > n_bin:
-        nb = dt.size // n_bin
-        bt = np.array([dt[i * n_bin:(i + 1) * n_bin].mean() for i in range(nb)])
-        by = np.array([y[i * n_bin:(i + 1) * n_bin].mean() for i in range(nb)])
-        bs = np.array([y[i * n_bin:(i + 1) * n_bin].std()
-                       / max(1, np.sqrt(n_bin)) for i in range(nb)])
+        bt, by, bs = bin_points(dt, y, ye, n_bin)
         ax.errorbar(bt * 24.0, by, yerr=bs, fmt="o", ms=3.4, color="k",
                     lw=0.9, capsize=0, zorder=3, label=f"binned x{n_bin}")
 
