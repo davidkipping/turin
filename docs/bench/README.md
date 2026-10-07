@@ -1,11 +1,14 @@
 # Benchmark and acceptance artefacts
 
-Two records live here.
+Three records live here.
 
 - `collapsed_ld_acceptance.md` and `collapsed_ld_compare.py`: `--ld=collapsed`
   against the default on KOI-518.02 and KOI-448.02 (see that file; the
   chains tarballs are not kept, being hundreds of MB, so the script reruns
   only against freshly made runs).
+- `collapsed_ld_battery.md` and `collapsed_ld_battery_compare.py`: the same
+  comparison on 20 Kepler targets, including 14 with real grazing posterior
+  mass; same posteriors, ~1.25x the LinEph cost.
 - Everything below: the hurin/turin comparison on KOI-518.02.
 
 ## KOI-518.02 hurin/turin benchmark artefacts

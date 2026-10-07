@@ -327,12 +327,16 @@ Load-bearing details:
   `q` draws on the box edge (KOI-448.02: `x*` on a triangle edge for 54% of
   draws). One pairing failed that null (KOI-518.02 `q1`, seed 0); a second
   seed of both modes showed two opposite run-level fluctuations, not a mode
-  difference. KOI-448.02 ran `--nongrazing`, so grazing is covered by
-  synthetic tests only (`test_model` / `test_ldmarg` grazing cases).
+  difference. KOI-448.02 ran `--nongrazing`; real grazing posteriors are
+  covered by the 20-target battery (`docs/bench/collapsed_ld_battery.md`):
+  14 targets with grazing mass up to 78%, reproduced to within 0.4
+  percentage points, every parameter within 0.013 sigma, 0/160 shifts
+  beyond 3 MCSE.
   **Cost, minimum ESS over the shared five parameters per end-to-end wall
   second: break-even on KOI-518.02 (156.5 vs 157.4), 1.41x the time per
-  effective sample on KOI-448.02 (37.6 vs 53.1).** That is why it stays
-  opt-in.
+  effective sample on KOI-448.02 (37.6 vs 53.1); on 20 Kepler targets the
+  median is 1.26x the LinEph wall time and 0.77x the ESS/s (faster on 6 of
+  20, clearly only at SNR 272).** That is why it stays opt-in.
 - **How not to judge a two-sampler comparison, learned here.** Random-row
   halves of one run are not a null for two runs (within-chain
   autocorrelation); split by chain. Even that can be optimistic, since

@@ -187,7 +187,9 @@ wall time, so collapsed mode's post-hoc draws are counted):
 | KOI-448.02 (`--nongrazing`) | 53.1 | **37.6** | **1.41x** |
 
 On KOI-518.02 it is break-even; on KOI-448.02 it takes 1.41x the wall time
-per effective sample. We had
+per effective sample. Across 20 Kepler targets the median is 1.26x the LinEph
+wall time (0.77x the ESS/s), with identical posteriors including grazing ones
+(`docs/bench/collapsed_ld_battery.md`). We had
 expected the opposite there: `q1, q2` sit against the edge of the box
 (0.96, 0.93), and taking them out of ChEES looked like it should help. It did
 not -- the sampled run had no trapped chains, so there was nothing to fix,
