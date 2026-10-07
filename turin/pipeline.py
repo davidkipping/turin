@@ -28,6 +28,10 @@ from . import profile as _profile
 from . import sampling as _sampling
 from . import seeding as _seeding
 
+#: Transit times shown at each end of a long TTV fit's corner plot; the ones
+#: between are replaced by a "..." row and column.
+CORNER_EPOCHS = 7
+
 #: Minimum seconds between writes of the chains tarball and the PDFs during
 #: a run; they are always written after round 0 and at the end.
 HEAVY_EVERY_S = 1200
@@ -384,6 +388,24 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
     return ml if mode == "lineph" else None
 
 
+def _corner_columns(names):
+    """Which parameters a corner plot shows, and where its "..." gap goes.
+
+    Every shape parameter and every transit time; past 2 * CORNER_EPOCHS
+    transit times, the first and last CORNER_EPOCHS with a "..." row and
+    column between them (5 + 7 + 1 + 7 = 20 panels for a TTV fit). With
+    exactly 2 * CORNER_EPOCHS times nothing is left out, so there is no gap.
+    Returns ``(column indices, gap_after)``, ``gap_after`` being the position
+    in that list after which the gap goes, or None.
+    """
+    shape = [i for i, n in enumerate(names) if not n.startswith("dtau_")]
+    times = [i for i, n in enumerate(names) if n.startswith("dtau_")]
+    if len(times) <= 2 * CORNER_EPOCHS:
+        return shape + times, None
+    times = times[:CORNER_EPOCHS] + times[-CORNER_EPOCHS:]
+    return shape + times, len(shape) + CORNER_EPOCHS - 1
+
+
 def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
                    layout, centering, epoch_data, baseline, *, log, ld=None):
     """Corner and fold PDFs, from the (subsampled) physical draws."""
@@ -391,21 +413,26 @@ def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
         # show the impact parameter b itself, not the sampled coordinate
         # beta = b / b_max(k), which is a prior device, not a physical
         # quantity
-        n_c = min(len(names), 7)
-        c_names = ["b" if n == "beta" else n for n in names[:n_c]]
-        c_draws = phys[:, :n_c].copy()
-        if "beta" in names[:n_c]:
-            c_draws[:, names.index("beta")] = b_draws
+        cols, gap_after = _corner_columns(names)
+        c_names = ["b" if names[i] == "beta" else names[i] for i in cols]
+        c_draws = phys[:, cols].copy()
+        if "beta" in names:
+            c_draws[:, c_names.index("b")] = b_draws
         _plots.corner_plot(
             _outputs.product_path(outdir, target, mode, "corner", "pdf"),
             c_draws, [_label(n) for n in c_names],
-            title=f"{target} {mode}", log=log)
+            title=f"{target} {mode}", gap_after=gap_after, log=log)
     except Exception as exc:
         log(f"    corner plot skipped: {exc}")
 
     mid_abs = _mid_times_absolute(mode, v_ml, layout, centering)
     try:
+        # span the folded data itself, whatever the window width
+        real = np.asarray(epoch_data["mask"]) > 0
+        offsets = (np.asarray(epoch_data["times_padded"], dtype=np.float64)
+                   - mid_abs[:, None])[real]
         tt, tf = _plots.model_grid(lp, v_ml, T14=v_ml[layout.index("T14")],
+                                   half_span=1.001 * np.max(np.abs(offsets)),
                                    ld=ld)
         _plots.fold_plot(
             _outputs.product_path(outdir, target, mode, "fold", "pdf"),

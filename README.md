@@ -293,7 +293,10 @@ working. Seven products per LinEph fit, nine per TTV fit:
 <T>_<mode>_logrho.csv         the stellar-density posterior
 <T>_<mode>_lcdata.csv         time, flux, flux_err, model_flux
 <T>_<mode>_fold.pdf           phase-folded transit, baseline divided out
-<T>_<mode>_corner.pdf         corner plot with 1/1.5/2-sigma contours
+<T>_<mode>_corner.pdf         corner plot with 1/1.5/2-sigma contours: every
+                              parameter and every transit time; past 14
+                              transits, the first and last 7 with a "..."
+                              row and column between them
 <T>_<mode>_resume.pkl         resume state
 <T>_ttv_times.csv             epoch, tmid, tmid_err, O-C, SNR, npts, chi2
                               (SNR: sqrt(2 dlnL) per transit against a
@@ -302,6 +305,11 @@ working. Seven products per LinEph fit, nine per TTV fit:
                               measured times, weighted by their errors; its
                               chi2 measures how non-linear the timings are
 ```
+
+Values quoted on the figures follow one rounding rule: both errors are rounded
+to two significant figures, the more precise of their decimal places is
+taken, and the median and both errors are quoted to it (628.208 +0.017
+-0.120; 12350 +1230 -990).
 
 Every product records turin's version and the exact command that made it, on
 line 2 of each CSV. While a run is going that line also says `in progress:

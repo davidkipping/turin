@@ -520,3 +520,49 @@ def test_occupied_epochs_come_from_the_fitted_segmentation(monkeypatch):
     fitted = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
     assert not np.any(np.isclose(fitted["epoch_centers"], tc))
     assert prepared.n_occupied == fitted["n_epochs"]
+
+
+@pytest.mark.parametrize("median,plus,minus,want", [
+    # errors to 2 s.f., each one's decimal places, the larger wins
+    (628.20791596, 0.01718, 0.1202, ("628.208", "0.017", "0.120")),
+    (3.8033, 0.0613, 0.1611, ("3.803", "0.061", "0.161")),
+    # 0.00996 rounds to 0.010 (3 places), 0.0021 has 4: four wins
+    (0.02464, 0.00996, 0.0021, ("0.0246", "0.0100", "0.0021")),
+    (2.5, 0.5, 0.5, ("2.50", "0.50", "0.50")),
+    # negative places: 1234 -> 1200 (hundreds), 987 -> 990 (tens)
+    (12345, 1234, 987, ("12350", "1230", "990")),
+    (12345, 1234, 1234, ("12300", "1200", "1200")),
+    (-12345, 1234, 987, ("-12350", "1230", "990")),
+])
+def test_quote_follows_the_rounding_rule(median, plus, minus, want):
+    from turin.plots import quote
+
+    assert quote(median, plus, minus) == want
+
+
+def test_quote_falls_back_when_errors_are_unusable():
+    from turin.plots import quote
+
+    # no usable error at all: four significant figures for the median
+    assert quote(1.234567, 0.0, 0.0) == ("1.235", "0", "0")
+    # one usable error sets the places; the other is shown as it is
+    assert quote(5.0, float("nan"), 0.12) == ("5.00", "NaN", "0.12")
+
+
+@pytest.mark.parametrize("n_epochs,panels,gap", [
+    (8, 13, None), (14, 19, None), (15, 20, 11), (22, 20, 11)])
+def test_corner_shows_all_epochs_or_first_and_last_seven(n_epochs, panels, gap):
+    from turin import pipeline
+
+    names = ["k", "beta", "T14", "q1", "q2"] + [
+        f"dtau_{n}" for n in range(-(n_epochs // 2), n_epochs - n_epochs // 2)]
+    cols, gap_after = pipeline._corner_columns(names)
+    # the "..." adds one row/column when present
+    assert len(cols) + (gap_after is not None) == panels
+    assert gap_after == gap
+    if gap is not None:
+        shown = [names[i] for i in cols[5:]]
+        assert shown == names[5:12] + names[-7:]
+    # LinEph: all seven, never a gap
+    lin = ["dP", "dtau0", "k", "beta", "T14", "q1", "q2"]
+    assert pipeline._corner_columns(lin) == (list(range(7)), None)
