@@ -105,9 +105,8 @@ corruption in `diagnose`, so since 0.1.24 `capabilities.require_anvil()`
 refuses anything older than `capabilities.MIN_ANVIL` (0.3.0) with the
 upgrade command, before touching the disk. **anvil 0.4.2 is current and is
 what turin runs against, but `MIN_ANVIL` stays 0.3.0** (0.4.2's API was
-audited call-by-call unchanged, and the full suite passes at 0.4.2 with
-MetalPlanet 0.9.7: 212 passed, 14 skipped where no hurin clone sits beside
-turin for the parity tests, 2026-10-05): 0.4.0's fix is
+audited call-by-call unchanged, and the full suite passes at 0.4.2,
+last run with MetalPlanet 0.10.7 on 2026-10-08): 0.4.0's fix is
 for a target mutated between `run` calls, and turin's target holds only
 static tensors — grid-Gibbs moves positions, not the target. 0.4.1 and
 0.4.2 are review follow-ups to that fix (`Kernel.retrace(target)` is now
@@ -358,14 +357,35 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
-**Verified against MetalPlanet 0.9.7** (`957eb3a`), turin 0.1.33, 216 tests
-green. 0.8.0 put eccentric orbits on `flux_dev_from_tau` as the
+**Verified against MetalPlanet 0.10.7** (`f69b482`), turin 0.1.53. 0.10.0
+added the hybrid2/4/5 limb-darkening laws as keyword-only `limb_dark=`
+(default `"quadratic"`) and `u=` on `flux_dev_from_tau` and
+`flux_dev_metal`; turin stays quadratic and passes neither, its positional
+calls and the quadratic `ld_basis` (`(C, m, 3)`) are unchanged, and
+MetalPlanet reports the 18 quadratic kernel sources byte-identical and its
+296-array corpus bitwise. 0.10.5-0.10.7 rewrote the data-dtype contract
+(`metalplanet.dtypes`: the data's dtype is the computation's, fp64 re-routed
+to the CPU stream, off-dtype parameters cast); that changes only calls that
+used to raise or that pass numpy/fp64 data on the GPU, and turin passes
+explicitly typed mx arrays and does its fp64 on the CPU stream already. Full
+suite at 0.1.52: 302 passed, 2 failed -- the hurin parity test of
+`segment_epochs`, stale since 0.1.50 and fixed in 0.1.53, not MetalPlanet.
+`MIN_METALPLANET` stays 0.7.0: turin uses nothing newer.
+
+**The hurin parity tests skip silently without a hurin clone** beside turin
+(`tests/test_prep_parity.py`), so a session without one can break them
+unseen: 0.1.50 diverged from hurin's `segment_epochs` on purpose, reported
+"14 skipped", and the stale test was found only when a clone was present.
+Read "N skipped" in a suite result as unverified, not as passing.
+
+Earlier, **verified against MetalPlanet 0.9.7** (`957eb3a`), turin 0.1.33.
+0.8.0 put eccentric orbits on `flux_dev_from_tau` as the
 *keyword-only* `secosw=`/`sesinw=`, so turin's positional
 `(tau, period, a, b, r, u1, u2)` call is untouched; omitted, they change
 nothing, and 0.8.1 states circular output stays bit-identical (40 arrays,
 both precisions, both LD laws). That ordering is the thing to re-check on
 any future bump: inserted positionally before `u1`, turin would have passed
-limb darkening as an eccentricity term, silently.
+limb darkening as an eccentricity term, silently. (0.10.0's `limb_dark=`/`u=` are keyword-only too.)
 
 0.8.1 fixed **NaN gradients on grazing transits, circular included**
 (`0 * inf` where the contact clip collapses the inner pair). No turin

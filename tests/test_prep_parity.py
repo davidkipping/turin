@@ -63,10 +63,21 @@ def test_extract_near_transit_data(hurin_tf, lc):
     assert mine[0].size < lc["time"].size, "windowing should discard points"
 
 
+def _windowed(lc):
+    """The light curve as the pipeline hands it to ``segment_epochs``:
+    already cut to the transit windows by ``extract_near_transit_data``."""
+    t, f, e = prep.extract_near_transit_data(
+        lc["time"], lc["flux"], lc["flux_err"], lc["period"], lc["epoch"],
+        lc["duration_hours"], n_durations=5.0)[:3]
+    return (t, f, e, lc["period"], lc["epoch"], lc["duration_hours"])
+
+
 @pytest.mark.parametrize("tau_shift_max", [0.0, 0.05])
 def test_segment_epochs(hurin_tf, lc, tau_shift_max):
-    args = (lc["time"], lc["flux"], lc["flux_err"], lc["period"],
-            lc["epoch"], lc["duration_hours"])
+    # Windowed input, as in the pipeline. Since 0.1.50 the two segmentations
+    # differ only when a window's own transit is missing from hurin's list
+    # (docs/hurin-differences.md section 4), which this light curve avoids.
+    args = _windowed(lc)
     mine = prep.segment_epochs(*args, tau_shift_max=tau_shift_max)
     theirs = hurin_tf.segment_epochs(*args, tau_shift_max=tau_shift_max)
 
@@ -82,6 +93,37 @@ def test_segment_epochs(hurin_tf, lc, tau_shift_max):
     if pad.any():
         assert np.all(mine["flux_padded"][pad] == 1.0)
         assert np.all(mine["ferr_padded"][pad] == 1e10)
+
+
+def test_segment_epochs_diverges_from_hurin_on_unwindowed_input(hurin_tf, lc):
+    """The intended 0.1.50 divergence, pinned so it stays deliberate.
+
+    Given points outside every transit window, hurin assigns each to its
+    nearest listed transit, so an epoch takes in a whole period of data;
+    turin keeps a point only within its epoch's window, which is what makes
+    the edge-window fix (docs/hurin-differences.md section 4) work. The
+    pipeline always windows first, where the two agree (above). Until 0.1.53
+    this parity test fed raw data and so failed from 0.1.50 on, unseen
+    wherever the hurin clone was absent and the module skipped.
+    """
+    args = (lc["time"], lc["flux"], lc["flux_err"], lc["period"],
+            lc["epoch"], lc["duration_hours"])
+    mine = prep.segment_epochs(*args)
+    theirs = hurin_tf.segment_epochs(*args)
+    windowed = prep.segment_epochs(*_windowed(lc))
+
+    assert mine["n_epochs"] == theirs["n_epochs"] == windowed["n_epochs"]
+    # turin: raw input segments exactly as windowed input does
+    for key in ("times_padded", "flux_padded", "ferr_padded", "mask",
+                "epoch_centers"):
+        np.testing.assert_array_equal(mine[key], windowed[key], err_msg=key)
+    # hurin: an epoch swallows about a period of 29.4-minute cadence
+    per_period = lc["period"] / (29.4 / 1440.0)
+    assert theirs["max_pts"] > 0.9 * per_period > 4 * mine["max_pts"]
+    half = mine["half_window"]
+    kept = mine["mask"] > 0
+    off = mine["times_padded"] - mine["epoch_centers"][:, None]
+    assert np.all(np.abs(off[kept]) <= half)
 
 
 @pytest.mark.parametrize("order", range(6))
