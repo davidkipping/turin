@@ -258,6 +258,26 @@ Two data-handling differences, neither in the model:
   within its epoch's window. Of the first 37 Kepler targets this changed two,
   KOI-5749.01 (22 points) and KOI-5790.01 (38), and no comparison target in
   this document. hurin's `segment_epochs` has the same construction.
+
+  At short periods the same rule acts at both ends of every light curve
+  (measured on synthetic 0.9 d light curves; the 37 Kepler targets above are
+  all long-period): points nearest an edge transit too thin to fit are
+  dropped instead of joining the neighbouring epoch's baseline, and a
+  transit cut by the light curve's start is fitted as its own epoch instead
+  of its in-transit points entering the next epoch's baseline unmodelled.
+  Where every point's nearest transit has its centre inside the data's
+  span, the two packages still segment identically, overlapping windows
+  included (`tests/test_prep_parity.py`).
+
+  **Open, in both packages:** `extract_near_transit_data` lists transits the
+  same way (centres inside the data's span), so the points of a transit cut
+  by the light curve's very start or end are dropped *before* segmentation,
+  in-transit points included -- e.g. a light curve starting 0.01 d after a
+  centre loses its first three points. It only ever discards data, and only
+  around the first and last transits of the whole light curve. Fixing it
+  would change the fitted data for the targets it touches (a `MODEL_REV`
+  bump); `test_segmentation_does_not_depend_on_prewindowing` carries the
+  case as a strict xfail, so a fix will be noticed.
 - **One star.** turin restricts MAST results to the host's KIC/TIC
   (0.1.26). hurin downloads every row of the name search, which for
   KOI-7592.01 includes a neighbouring star; see

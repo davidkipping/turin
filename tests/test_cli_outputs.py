@@ -592,6 +592,44 @@ def test_points_after_an_uncovered_transit_stay_out_of_other_epochs():
                       <= ed["half_window"] + 1e-12)
 
 
+@pytest.mark.parametrize("P,T0,dur_h,span,gap", [
+    (10.0, 5.0, 2.0, (0.0, 40.0), (4.0, 5.1)),     # the case above
+    (9.3456, 120.5, 4.2, (100.0, 168.0), (131.0, 134.5)),
+    (0.9, 100.3, 4.0, (100.0, 108.0), (103.1, 103.6)),  # windows overlap
+    pytest.param(
+        0.9, 100.3, 4.0, (100.31, 108.0), None,    # starts inside a transit
+        marks=pytest.mark.xfail(strict=True, reason=(
+            "extract_near_transit_data, like hurin's, lists only transits "
+            "whose centres lie inside the data's span, so it drops the points "
+            "of a transit cut by the light curve's start or end (here three "
+            "in-transit points) that segment_epochs would keep. Open; fixing "
+            "it changes the fitted data, so MODEL_REV. See "
+            "docs/hurin-differences.md section 4."))),
+])
+def test_segmentation_does_not_depend_on_prewindowing(P, T0, dur_h, span, gap):
+    """Since 0.1.50 a point is kept only inside its own epoch's window, so
+    segmenting the raw light curve gives exactly what segmenting the
+    windowed one does. hurin's segmentation does not have this property (an
+    epoch takes in every point nearest it, about a period of data on raw
+    input), which is why this lives here rather than in the hurin parity
+    tests, where it would also go unrun without a hurin clone. Fails if
+    0.1.50's window check is removed."""
+    from turin import prep
+
+    t = np.arange(*span, 29.4 / 1440)
+    if gap:
+        t = t[(t < gap[0]) | (t > gap[1])]
+    rng = np.random.default_rng(3)
+    f, e = 1 + rng.normal(0, 1e-4, t.size), np.full(t.size, 1e-4)
+    raw = prep.segment_epochs(t, f, e, P, T0, dur_h)
+    win = prep.segment_epochs(
+        *prep.extract_near_transit_data(t, f, e, P, T0, dur_h), P, T0, dur_h)
+    assert raw["n_epochs"] == win["n_epochs"] > 1
+    for key in ("times_padded", "flux_padded", "ferr_padded", "mask",
+                "epoch_centers"):
+        np.testing.assert_array_equal(raw[key], win[key], err_msg=key)
+
+
 def test_binned_errors_come_from_the_formal_errors():
     """The fold plot's bin error is median(formal error)/sqrt(n), not the
     bin's own scatter (which put ~40% noise on 4-point bins and read the

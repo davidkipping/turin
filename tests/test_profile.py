@@ -35,7 +35,9 @@ def hurin_tf():
     try:
         import hurin.transit_fit as tf
     except Exception as exc:  # pragma: no cover
-        pytest.skip(f"cannot import hurin.transit_fit: {exc}")
+        # the clone is there, so this is breakage, not an absent comparison
+        pytest.fail(f"hurin clone found but hurin.transit_fit failed to "
+                    f"import: {exc}")
     return tf
 
 

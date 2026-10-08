@@ -32,7 +32,9 @@ def hurin_tf():
     try:
         import hurin.transit_fit as tf
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"cannot import hurin.transit_fit: {exc}")
+        # the clone is there, so this is breakage, not an absent comparison
+        pytest.fail(f"hurin clone found but hurin.transit_fit failed to "
+                    f"import: {exc}")
     return tf
 
 
@@ -53,6 +55,23 @@ def lc():
                 epoch=epoch, duration_hours=dur_h)
 
 
+@pytest.fixture(scope="module")
+def lc_short():
+    """A short-period light curve whose transit windows overlap
+    (``half_window > P/2``), so nearest-transit assignment decides every
+    point. It starts and ends on a transit centre, so every point's nearest
+    transit is itself fitted: at the light curve's edges turin and hurin
+    segment differently on purpose (docs/hurin-differences.md section 4)."""
+    rng = np.random.default_rng(20261008)
+    period, epoch, dur_h = 0.7, 10.0, 3.0
+    t = np.arange(10.0, 15.0, 29.4 / 1440.0)
+    phase = (t - epoch + 0.5 * period) % period - 0.5 * period
+    flux = 1.0 + rng.normal(0, 2e-4, t.size)
+    flux[np.abs(phase) < 0.5 * dur_h / 24.0] -= 1e-3
+    return dict(time=t, flux=flux, flux_err=np.full(t.size, 2e-4),
+                period=period, epoch=epoch, duration_hours=dur_h)
+
+
 def test_extract_near_transit_data(hurin_tf, lc):
     args = (lc["time"], lc["flux"], lc["flux_err"], lc["period"],
             lc["epoch"], lc["duration_hours"])
@@ -65,21 +84,27 @@ def test_extract_near_transit_data(hurin_tf, lc):
 
 def _windowed(lc):
     """The light curve as the pipeline hands it to ``segment_epochs``:
-    already cut to the transit windows by ``extract_near_transit_data``."""
+    already cut to the transit windows, at the same width."""
     t, f, e = prep.extract_near_transit_data(
         lc["time"], lc["flux"], lc["flux_err"], lc["period"], lc["epoch"],
-        lc["duration_hours"], n_durations=5.0)[:3]
+        lc["duration_hours"], n_durations=prep.N_DURATIONS)
     return (t, f, e, lc["period"], lc["epoch"], lc["duration_hours"])
 
 
+@pytest.mark.parametrize("curve", ["lc", "lc_short"])
 @pytest.mark.parametrize("tau_shift_max", [0.0, 0.05])
-def test_segment_epochs(hurin_tf, lc, tau_shift_max):
+def test_segment_epochs(hurin_tf, request, curve, tau_shift_max):
     # Windowed input, as in the pipeline. Since 0.1.50 the two segmentations
-    # differ only when a window's own transit is missing from hurin's list
-    # (docs/hurin-differences.md section 4), which this light curve avoids.
+    # differ only for a point whose nearest transit is missing from hurin's
+    # list, the transits with centres inside the data's span
+    # (docs/hurin-differences.md section 4); neither curve has one. The
+    # raw-input divergence is pinned hurin-free in test_cli_outputs.
+    lc = request.getfixturevalue(curve)
     args = _windowed(lc)
     mine = prep.segment_epochs(*args, tau_shift_max=tau_shift_max)
     theirs = hurin_tf.segment_epochs(*args, tau_shift_max=tau_shift_max)
+    if curve == "lc_short":
+        assert mine["half_window"] > lc["period"] / 2   # windows overlap
 
     assert mine["n_epochs"] == theirs["n_epochs"] > 1
     assert mine["max_pts"] == theirs["max_pts"]
@@ -93,37 +118,6 @@ def test_segment_epochs(hurin_tf, lc, tau_shift_max):
     if pad.any():
         assert np.all(mine["flux_padded"][pad] == 1.0)
         assert np.all(mine["ferr_padded"][pad] == 1e10)
-
-
-def test_segment_epochs_diverges_from_hurin_on_unwindowed_input(hurin_tf, lc):
-    """The intended 0.1.50 divergence, pinned so it stays deliberate.
-
-    Given points outside every transit window, hurin assigns each to its
-    nearest listed transit, so an epoch takes in a whole period of data;
-    turin keeps a point only within its epoch's window, which is what makes
-    the edge-window fix (docs/hurin-differences.md section 4) work. The
-    pipeline always windows first, where the two agree (above). Until 0.1.53
-    this parity test fed raw data and so failed from 0.1.50 on, unseen
-    wherever the hurin clone was absent and the module skipped.
-    """
-    args = (lc["time"], lc["flux"], lc["flux_err"], lc["period"],
-            lc["epoch"], lc["duration_hours"])
-    mine = prep.segment_epochs(*args)
-    theirs = hurin_tf.segment_epochs(*args)
-    windowed = prep.segment_epochs(*_windowed(lc))
-
-    assert mine["n_epochs"] == theirs["n_epochs"] == windowed["n_epochs"]
-    # turin: raw input segments exactly as windowed input does
-    for key in ("times_padded", "flux_padded", "ferr_padded", "mask",
-                "epoch_centers"):
-        np.testing.assert_array_equal(mine[key], windowed[key], err_msg=key)
-    # hurin: an epoch swallows about a period of 29.4-minute cadence
-    per_period = lc["period"] / (29.4 / 1440.0)
-    assert theirs["max_pts"] > 0.9 * per_period > 4 * mine["max_pts"]
-    half = mine["half_window"]
-    kept = mine["mask"] > 0
-    off = mine["times_padded"] - mine["epoch_centers"][:, None]
-    assert np.all(np.abs(off[kept]) <= half)
 
 
 @pytest.mark.parametrize("order", range(6))
