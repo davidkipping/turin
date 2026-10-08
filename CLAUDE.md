@@ -144,6 +144,22 @@ turin/
 
 ## Load-bearing invariants
 
+### Which epochs are fitted (`prep.segment_epochs`, 0.1.55)
+
+Every predicted transit gets a window of `N_DURATIONS` durations either
+side, whether or not its centre lies inside the light curve (each point's
+*own* nearest transit number, `prep.nearest_transit`; windowing, other-planet
+masking and segmentation all use it). A point belongs to its nearest transit
+and only inside its window. A window spanning a Kepler quarter or TESS
+semi-sector (labels recorded per point at download,
+`data.lightcurve.segment_labels`) keeps only the stretch holding the
+predicted centre. An epoch is fitted with `MIN_PTS` = 2 points **whether or
+not any is in transit**: with TTVs possible that is the fit's call, not the
+segmentation's. Do not reintroduce an in-transit test or an in-span transit
+list -- the latter is the bug class behind 0.1.50 and 0.1.55. The user's
+convention, adopted as is: each TESS semi-sector is treated like a Kepler
+quarter.
+
 ### Epoch-centred time coordinates (float32 safety)
 
 The GPU is float32, whose resolution at absolute BKJD/BTJD magnitudes
@@ -192,7 +208,13 @@ ones that bite:
 ### The profile likelihood
 
 Each epoch's local baseline is `g(t) = 1 + L c` with `L` the Legendre
-design matrix on times mapped to [-1, 1] within the epoch window; the
+design matrix on times mapped to [-1, 1] across *that epoch's own data*
+(`prep.basis_x`, since 0.1.55; it was the window). The polynomial space and
+so the profiled log-density are the same either way (float64 identical to
+1e-12 on KOI-518.02 and KOI-448.02), but a window holding data on one side
+only -- a quarter split, a transit in a gap -- left the normal matrix's
+condition number at 6e5 (K=3, data on x in [0.4, 1]) up to 1e16, beyond
+float32 and float64 alike; over the data's own span it stays under 10. The
 total model is `f_transit * g`. The coefficients `c` are **not sampled**:
 they are solved analytically inside every log-density evaluation (a
 profile likelihood — a plug-in MLE of the nuisance parameters, with no
@@ -371,8 +393,7 @@ explicitly typed mx arrays and does its fp64 on the CPU stream already.
 Full suite at 0.1.52: 302 passed, 2 failed -- the hurin parity test of
 `segment_epochs`, stale since 0.1.50 and fixed in 0.1.53, not MetalPlanet.
 At 0.1.54, with a hurin clone present: 309 passed, 0 skipped, 1 xfailed
-(the open `extract_near_transit_data` edge case, `docs/hurin-differences.md`
-section 4).
+(the then-open `extract_near_transit_data` edge case, fixed in 0.1.55).
 `MIN_METALPLANET` stays 0.7.0: turin uses nothing newer.
 
 **The hurin parity tests skip without a hurin clone** beside turin, so a
@@ -563,8 +584,11 @@ and hurin's documented trapped-mode failure.
 When re-running a hurin comparison: pass `--chains=8`, because hurin's default
 of 2 does not converge on one round and makes the comparison a straw man; run
 the two **sequentially**, since hurin saturates ~5 cores and would otherwise
-contend; and confirm both packages hold the same cached light curve (compare
-byte sizes of `../hurin/cache/<T>.pkl` and `~/.cache/turin/<T>.pkl`).
+contend; and confirm both packages hold the same cached light curve: compare
+the `time`, `flux` and `flux_err` arrays of `../hurin/cache/<T>.pkl` and
+`~/.cache/turin/<T>.pkl` (not byte sizes: since 0.1.55 turin's cache also
+holds per-point `segment` labels). Expect turin to fit more epochs than
+hurin where a transit fell in a gap (`docs/hurin-differences.md` section 4).
 
 ## Conventions inherited from hurin
 

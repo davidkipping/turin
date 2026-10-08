@@ -170,8 +170,17 @@ def replot(args, prepared, outdir, *, log=print):
             log(f"[{target}] {mode}: chains or summary missing; skipped")
             continue
 
-        layout, _ = _mode_layout(mode, args, prepared, centering, ed)
         orders = np.asarray(state.legendre_orders)
+        if orders.size != ed["n_epochs"]:
+            # the epoch selection changed since this fit (0.1.55 fits epochs
+            # whose transit fell in a gap); the replay below cannot even be
+            # built, so say why rather than fail on a shape
+            log(f"[{target}] {mode}: fitted {orders.size} epochs, but this "
+                f"turin selects {ed['n_epochs']} (fitted under MODEL_REV "
+                f"{getattr(state, 'model_rev', 1)}); refit it rather than "
+                "replot")
+            continue
+        layout, _ = _mode_layout(mode, args, prepared, centering, ed)
         target_fn, transform, lp, _ = _likelihood.build_target(
             layout, centering, ed, orders, profile_mode=state.profile_mode,
             ld_mode=layout.ld, num_resample=prepared.num_resample,
@@ -183,6 +192,12 @@ def replot(args, prepared, outdir, *, log=print):
         tf = tarfile.open(chains_path)
         d = pd.read_csv(io.StringIO(
             tf.extractfile(tf.getmembers()[0]).read().decode()), comment="#")
+        missing = [n for n in names if n not in d.columns]
+        if missing:
+            log(f"[{target}] {mode}: the fit has no {', '.join(missing[:3])}"
+                f"{' ...' if len(missing) > 3 else ''} (its epochs differ "
+                "from this turin's selection); refit it rather than replot")
+            continue
         phys = d[names].to_numpy(dtype=np.float64)
         b_draws = d["b"].to_numpy(dtype=np.float64)
         best = int(np.argmax(d["loglike"].to_numpy()))

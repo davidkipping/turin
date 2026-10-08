@@ -417,15 +417,41 @@ def test_replot_rebuilds_figures_without_sampling(tmp_path, fake_target):
     assert after_times[1].startswith("# turin")           # line 2 = provenance
     # the same rows: replot reads the medians and sds back from the summary
     # CSV (10 significant figures), so values derived from them match to
-    # that precision -- the O-C column (minutes, sub-ms) and the errors
+    # that precision -- the O-C column (minutes, sub-ms), the errors, and
+    # the ML-model statistics snr and chi2, which move by up to ~1e-3 and are
+    # written to 3 and 2 decimals, so a value on a rounding boundary flips
+    # its last digit (chi2 39.985339 vs 39.984620; snr 73.496 vs 73.497)
     old = np.array([[float(x) for x in r.split(",")] for r in before_times[2:]])
     new = np.array([[float(x) for x in r.split(",")] for r in after_times[2:]])
-    oc = 3
-    np.testing.assert_allclose(np.delete(new, oc, 1), np.delete(old, oc, 1),
-                               rtol=1e-9)
+    oc, snr, chi2 = 3, 5, 7
+    np.testing.assert_allclose(np.delete(new, [oc, snr, chi2], 1),
+                               np.delete(old, [oc, snr, chi2], 1), rtol=1e-9)
     np.testing.assert_allclose(new[:, oc], old[:, oc], rtol=0, atol=1e-3)
+    np.testing.assert_allclose(new[:, snr], old[:, snr], rtol=0, atol=0.0011)
+    np.testing.assert_allclose(new[:, chi2], old[:, chi2], rtol=0, atol=0.011)
     assert open(summ).read() == before_summary
     assert os.path.getmtime(corner_pdf) > 0               # rewritten
+
+
+def test_replot_refuses_a_fit_whose_epochs_this_turin_would_not_select(
+        tmp_path, fake_target):
+    """A fit made before an epoch-selection change (0.1.55 fits epochs whose
+    transit fell in a gap) has a different epoch count from this turin's
+    segmentation. --replot must refuse it with the reason, not fail
+    building a likelihood whose shapes no longer line up."""
+    assert pipeline.run(_args(tmp_path, modes=("lineph",)),
+                        log=lambda m: None) in FINISHED
+    d = str(tmp_path)
+    st = outputs.load_resume(d, "KOI-1.01", "lineph")
+    n = len(st.legendre_orders)
+    st.legendre_orders = list(st.legendre_orders) + [0]  # one epoch more
+    outputs.save_resume(d, "KOI-1.01", "lineph", st)
+    logs = []
+    args = _args(tmp_path, modes=("lineph",))
+    args.replot = True
+    assert pipeline.run(args, log=logs.append) == 1
+    assert any(f"fitted {n + 1} epochs, but this turin selects {n}" in l
+               for l in logs)
 
 
 def test_replot_refuses_a_fit_its_model_does_not_reproduce(tmp_path,

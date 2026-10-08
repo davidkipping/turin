@@ -84,8 +84,11 @@ def get_lightcurve(target, progress=None, sc_override=False):
             Kepler, 20s/2min for TESS). Default False uses LC for Kepler
             and 2min>10min>30min for TESS.
 
-    Returns dict with keys: time, flux, flux_err, quality (numpy arrays),
-        mission (str), cadence_days (float).
+    Returns dict with keys: time, flux, flux_err, quality, segment (numpy
+        arrays), mission (str), cadence_days (float). ``segment`` labels
+        each point's continuous observing stretch -- the Kepler quarter, or
+        the TESS semi-sector (see :func:`segment_labels`) -- so a transit
+        window spanning a break can keep one side.
     """
     info = parse_target(target)
     cache_file = _cache_path(info, sc_override=sc_override)
@@ -96,9 +99,13 @@ def get_lightcurve(target, progress=None, sc_override=False):
         with open(cache_file, "rb") as f:
             cached = pickle.load(f)
         problem = _mixed_target_problem(cached["time"])
+        if problem is None and "segment" not in cached:
+            problem = ("written before turin recorded quarters and "
+                       "semi-sectors")
         if problem is None:
             return cached
-        # a cache written before the one-star filter existed
+        # a cache written before the one-star filter, or the segment labels,
+        # existed
         if progress:
             progress(f"Cached light curve is invalid ({problem}); "
                      "downloading again")
@@ -384,6 +391,52 @@ def _download_tess(info, star, sc_override=False, progress=None):
     return _stitch_and_pack(lc_list, "tess", progress)
 
 
+#: A TESS sector splits into semi-sectors (its two orbits) at its largest
+#: internal gap, if that gap is at least this long. The orbit gap is 1.1 d
+#: in sector 1 and ~2 d from sector 56 on, where each orbit also carries a
+#: ~0.22 d mid-orbit downlink; splitting only at the largest keeps those
+#: inside their semi-sector, as a Kepler quarter keeps its monthly downlinks.
+SEMI_SECTOR_MIN_GAP = 0.5
+
+
+def segment_labels(lc_list, mission):
+    """One integer label per point: which continuous stretch it came from.
+
+    Kepler: the quarter (``meta["QUARTER"]``), so a quarter's monthly
+    short-cadence files share one label. TESS: ``2 * sector + orbit``, the
+    sector from ``meta["SECTOR"]`` and the orbit from the sector's largest
+    internal gap (:data:`SEMI_SECTOR_MIN_GAP`). A file with no such header
+    keyword gets a label of its own. Flux breaks between these stretches are
+    common; see ``prep.segment_epochs``.
+    """
+    labels = []
+    for i, single_lc in enumerate(lc_list):
+        n = len(single_lc.time)
+        meta = getattr(single_lc, "meta", {}) or {}
+        if mission == "kepler" and meta.get("QUARTER") is not None:
+            labels.append(np.full(n, int(meta["QUARTER"]), dtype=np.int64))
+            continue
+        if mission == "tess" and meta.get("SECTOR") is not None:
+            t = np.asarray(single_lc.time.value, dtype=np.float64)
+            lab = np.full(n, 2 * int(meta["SECTOR"]), dtype=np.int64)
+            good = np.isfinite(t)
+            try:
+                good &= np.isfinite(np.asarray(single_lc.flux.value,
+                                               dtype=np.float64))
+            except (AttributeError, TypeError, ValueError):
+                pass
+            tg = np.sort(t[good])
+            if tg.size > 1:
+                gaps = np.diff(tg)
+                j = int(np.argmax(gaps))
+                if gaps[j] >= SEMI_SECTOR_MIN_GAP:
+                    lab[t > tg[j]] += 1
+            labels.append(lab)
+            continue
+        labels.append(np.full(n, 100_000 + i, dtype=np.int64))
+    return np.concatenate(labels) if labels else np.zeros(0, dtype=np.int64)
+
+
 def _stitch_and_pack(lc_list, mission, progress=None):
     """Stitch light curves and return the standard result dict."""
     if progress:
@@ -397,11 +450,17 @@ def _stitch_and_pack(lc_list, mission, progress=None):
         else:
             quality_arrays.append(np.zeros(len(single_lc.time), dtype=np.int32))
     quality = np.concatenate(quality_arrays)
+    segment = segment_labels(lc_list, mission)
 
     lc_collection = lk.LightCurveCollection(lc_list)
     lc = lc_collection.stitch()
 
     time = np.array(lc.time.value, dtype=np.float64)
+    if not (len(segment) == len(quality) == len(time)):
+        raise ValueError(
+            f"stitching changed the row count ({len(segment)} rows downloaded, "
+            f"{len(time)} stitched), so the per-file quality flags and "
+            "segment labels no longer line up")
     problem = _mixed_target_problem(time)
     if problem is not None:
         raise ValueError(f"stitched light curve is not one star's: {problem}")
@@ -412,6 +471,7 @@ def _stitch_and_pack(lc_list, mission, progress=None):
         "flux": np.array(lc.flux.value, dtype=np.float64),
         "flux_err": np.array(lc.flux_err.value, dtype=np.float64),
         "quality": quality,
+        "segment": segment,
         "mission": mission,
         "cadence_days": cadence_days,
     }

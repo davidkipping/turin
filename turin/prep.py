@@ -31,12 +31,30 @@ N_DURATIONS = 5.0
 MAX_ORDER = 5
 
 
-def _predicted_transit_times(time, period, epoch):
-    """Predicted transit times spanning the data, inclusive of both ends."""
-    t_min, t_max = np.nanmin(time), np.nanmax(time)
-    n_lo = int(np.ceil((t_min - epoch) / period))
-    n_hi = int(np.floor((t_max - epoch) / period))
-    return epoch + np.arange(n_lo, n_hi + 1) * period
+def nearest_transit(time, period, epoch):
+    """Each point's nearest predicted transit: ``(number, centre)``.
+
+    Closed form, since the centres are ``epoch + n P``: O(N), with
+    ``ceil(x - 1/2)`` breaking an exact tie toward the earlier centre. Every
+    predicted transit counts, whether or not its centre lies inside the
+    data's span. Listing only the centres inside the span (hurin's
+    construction, kept until 0.1.55) dropped -- or, for other planets, left
+    unmasked -- the points of a transit cut by the light curve's start or
+    end, and handed points near an uncovered transit to an epoch a period
+    away (KOI-5749.01, fixed for segmentation in 0.1.50).
+    """
+    time = np.asarray(time, dtype=np.float64)
+    n = np.ceil((time - epoch) / period - 0.5).astype(np.int64)
+    return n, epoch + n * period
+
+
+def near_transit_mask(time, period, epoch, duration_hours,
+                      n_durations=N_DURATIONS):
+    """Points within ``n_durations`` transit durations of a predicted
+    transit -- of any transit, which is the same as of the nearest one."""
+    _, centre = nearest_transit(time, period, epoch)
+    return np.abs(np.asarray(time, dtype=np.float64) - centre) <= (
+        n_durations * duration_hours / 24.0)
 
 
 def extract_near_transit_data(time, flux, flux_err, period, epoch,
@@ -44,23 +62,24 @@ def extract_near_transit_data(time, flux, flux_err, period, epoch,
     """Clip data to within ``n_durations`` transit durations of a transit.
 
     Discards out-of-transit baseline far from any transit event, which is
-    what keeps short-cadence data tractable.
+    what keeps short-cadence data tractable. hurin's signature; the mask is
+    :func:`near_transit_mask`.
     """
-    half_window = n_durations * duration_hours / 24.0
-    transit_times = _predicted_transit_times(time, period, epoch)
-
-    keep = np.zeros(len(time), dtype=bool)
-    for tt in transit_times:
-        keep |= np.abs(time - tt) <= half_window
+    keep = near_transit_mask(time, period, epoch, duration_hours, n_durations)
     return time[keep], flux[keep], flux_err[keep]
 
 
-#: An epoch is fitted when at least this many points fall inside its
-#: feasible transit zone (``|t - tc| <= T14/2 + tau_shift_max``). An epoch
-#: with only a point or two in transit is kept on purpose: its timing
-#: posterior comes back close to its prior, which grid-Gibbs samples
-#: correctly, rather than the epoch silently vanishing.
-MIN_IN_TRANSIT = 1
+#: An epoch is fitted when its window holds at least this many points, and
+#: nothing is asked about how many of them are in transit: with TTVs
+#: possible, whether the transit fell in the data is for the fit to decide,
+#: not the segmentation (an epoch whose transit missed the data comes back
+#: with a timing posterior that is its prior minus the times the data rule
+#: out). Two is the fewest that carry information: an epoch this thin always
+#: gets a constant baseline (cv_orders gives order 0 below 2 * n_folds
+#: out-of-transit points), which one point determines exactly, leaving it
+#: nothing to say about the transit. hurin, and turin until 0.1.55, asked
+#: for 4 points and at least one in the feasible transit zone.
+MIN_PTS = 2
 
 
 def window_durations(eph, ttv_max_days=0.0, log=None):
@@ -86,17 +105,46 @@ def window_durations(eph, ttv_max_days=0.0, log=None):
     return n
 
 
+def _one_stretch(t_epoch, seg_epoch, tc):
+    """Which points of one epoch's window to keep when it spans a break.
+
+    A window that straddles a quarter or semi-sector boundary has its two
+    sides on either side of a likely flux break, which one baseline
+    polynomial cannot follow. Keep the one stretch whose time range contains
+    the predicted centre ``tc``; if the centre falls between stretches, the
+    one whose nearest point is closest to it (ties to the earlier).
+    """
+    labels = np.unique(seg_epoch)
+    if labels.size == 1:
+        return np.ones(t_epoch.size, dtype=bool)
+    best, best_key = None, None
+    for lab in labels:
+        tt = t_epoch[seg_epoch == lab]
+        inside = tt.min() <= tc <= tt.max()
+        key = (0.0 if inside else float(np.min(np.abs(tt - tc))), tt.min())
+        if best_key is None or key < best_key:
+            best, best_key = lab, key
+    return seg_epoch == best
+
+
 def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
-                   n_durations=N_DURATIONS, min_pts=4, tau_shift_max=0.0):
+                   n_durations=N_DURATIONS, min_pts=MIN_PTS, tau_shift_max=0.0,
+                   segment=None):
     """Segment windowed data into per-epoch padded 2D arrays.
 
-    Each point is assigned to its *nearest* predicted transit centre, which
-    avoids double-counting when windows overlap for short-period planets.
-    An epoch is kept only if it has at least ``min_pts`` points in the wide
-    window and at least one point inside the feasible transit zone,
-    ``|t - tc| <= 0.5*T14 + tau_shift_max`` — i.e. it actually covers a
-    transit. ``tau_shift_max`` (days) widens that test for declared-TTV
-    systems (--TTVmax), where the transit may sit away from the prediction.
+    Every predicted transit has a window of ``n_durations`` transit durations
+    either side of its centre. Each point belongs to its *nearest* predicted
+    transit, and only if it lies inside that transit's window; the nearest
+    rule matters only where windows overlap (``T14/P > 1/(2 n_durations)``),
+    where it keeps a point from being counted twice. ``segment`` labels each
+    point's quarter or semi-sector (``data.lightcurve.segment_labels``); a
+    window spanning more than one keeps only the stretch around the
+    predicted centre (:func:`_one_stretch`). An epoch is kept if what
+    remains has at least ``min_pts`` points (:data:`MIN_PTS`), in transit or
+    not.
+
+    ``tau_shift_max`` (days) only widens the zone counted as in transit for
+    ``n_in_transit`` (reported, not a criterion), for declared-TTV systems.
 
     Padded slots carry neutral values: flux 1.0, error 1e10, time at the
     epoch centre, mask 0.
@@ -109,40 +157,33 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     dur_days = duration_hours / 24.0
     half_window = n_durations * dur_days
     time = np.asarray(time, dtype=np.float64)
+    flux = np.asarray(flux, dtype=np.float64)
+    flux_err = np.asarray(flux_err, dtype=np.float64)
     if time.size == 0:
         raise ValueError("No epochs with sufficient data points")
+    if segment is None:
+        segment = np.zeros(time.size, dtype=np.int64)
+    segment = np.asarray(segment)
+    if segment.shape != time.shape:
+        raise ValueError("segment needs one label per point")
 
-    # Each point's nearest predicted transit, by number, in closed form (the
-    # centres are epoch + n*P): O(N), with ceil(x - 1/2) breaking an exact tie
-    # toward the earlier centre. The transit list spans every number that
-    # occurs, so every point's own nearest transit is in it. It used to be
-    # the transits whose *centres* fall inside the data's span, with points
-    # clipped to the nearest listed one: a window that starts just after an
-    # uncovered transit then joined the previous epoch, a whole period away
-    # (KOI-5749.01: 22 points 282 d from their epoch's centre, at Legendre
-    # x ~ -490, in the fit). hurin's segment_epochs does the same.
-    n_pt = np.ceil((time - epoch) / period - 0.5).astype(np.int64)
-    n_lo, n_hi = int(n_pt.min()), int(n_pt.max())
-    transit_times = epoch + np.arange(n_lo, n_hi + 1) * period
-    nearest = n_pt - n_lo
-
+    n_pt, centre = nearest_transit(time, period, epoch)
+    inside = np.abs(time - centre) <= half_window
     half_transit = 0.5 * dur_days + tau_shift_max
+
     epoch_groups = []
     epoch_centers = []
     n_in_transit = []
-    for i, tt in enumerate(transit_times):
-        # nearest centre AND inside its window: a point can only belong to
-        # an epoch it is near, whatever produced the input
-        mask_i = (nearest == i) & (np.abs(time - tt) <= half_window)
-        if np.sum(mask_i) < min_pts:
+    for n in np.unique(n_pt[inside]):
+        idx = np.where(inside & (n_pt == n))[0]
+        tt = epoch + n * period
+        idx = idx[_one_stretch(time[idx], segment[idx], tt)]
+        if idx.size < min_pts:
             continue
-        t_epoch = time[mask_i]
-        n_in = int(np.sum(np.abs(t_epoch - tt) <= half_transit))
-        if n_in < MIN_IN_TRANSIT:
-            continue
-        epoch_groups.append((t_epoch, flux[mask_i], flux_err[mask_i]))
+        t_epoch = time[idx]
+        epoch_groups.append((t_epoch, flux[idx], flux_err[idx]))
         epoch_centers.append(tt)
-        n_in_transit.append(n_in)
+        n_in_transit.append(int(np.sum(np.abs(t_epoch - tt) <= half_transit)))
 
     n_epochs = len(epoch_groups)
     if n_epochs == 0:
@@ -155,6 +196,12 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     flux_padded = np.ones((n_epochs, max_pts))
     ferr_padded = np.full((n_epochs, max_pts), 1e10)
     mask = np.zeros((n_epochs, max_pts))
+
+    # each epoch's baseline coordinate spans its own data, not the window
+    # (see basis_x)
+    x_mid = np.array([0.5 * (g[0].min() + g[0].max()) for g in epoch_groups])
+    x_half = np.array([max(0.5 * (g[0].max() - g[0].min()), 1e-6)
+                       for g in epoch_groups])
 
     for i, (t_i, f_i, e_i) in enumerate(epoch_groups):
         n_i = len(t_i)
@@ -171,10 +218,42 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         "mask": mask,
         "epoch_centers": epoch_centers,
         "half_window": half_window,
+        "x_mid": x_mid,
+        "x_half": x_half,
         "n_epochs": n_epochs,
         "max_pts": max_pts,
         "n_in_transit": np.array(n_in_transit, dtype=int),
     }
+
+
+def basis_x(epoch_data, times=None):
+    """The baseline polynomial's coordinate: each epoch's times mapped onto
+    [-1, 1] across *that epoch's own data*, ``(n_epochs, n_pts)``.
+
+    Not across the window. A degree-K polynomial in time spans the same space
+    under any affine map of time, so the profiled baseline and log-density
+    do not depend on this choice -- but the conditioning does. With data on
+    only part of the window (a quarter split keeps one side, a transit fell
+    in a gap, the light curve's edge), the window map leaves the normal
+    matrix's condition number at 6e5 for K=3 on data covering x in [0.4, 1]
+    and 1e16 for K=5 on [0.85, 1], past float64 and far past the float32
+    the likelihood runs in; across the data's own span it is under 10 for
+    every K. Padded slots get x = 0, inside the range, so masked entries of
+    the design never hold large values. ``epoch_data`` without the span
+    (built by hand) falls back to the window map.
+    """
+    t = np.asarray(epoch_data["times_padded"] if times is None else times,
+                   dtype=np.float64)
+    if "x_mid" in epoch_data:
+        mid = np.asarray(epoch_data["x_mid"], dtype=np.float64)[:, None]
+        half = np.asarray(epoch_data["x_half"], dtype=np.float64)[:, None]
+    else:
+        mid = np.asarray(epoch_data["epoch_centers"], dtype=np.float64)[:, None]
+        half = float(epoch_data["half_window"])
+    x = (t - mid) / half
+    if times is None:
+        x = np.where(np.asarray(epoch_data["mask"]) > 0, x, 0.0)
+    return x
 
 
 def legendre_matrix(x, order):
@@ -274,13 +353,13 @@ def cv_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER, n_folds=10,
     log(f"Running CV on {n_epochs} epochs (K=0..{max_order}, "
         f"{n_folds} folds)...")
 
+    x_all = basis_x(epoch_data)
     for i in range(n_epochs):
         m = epoch_data["mask"][i].astype(bool)
         t_i = epoch_data["times_padded"][i][m]
         f_i = epoch_data["flux_padded"][i][m]
         e_i = epoch_data["ferr_padded"][i][m]
         tc = epoch_data["epoch_centers"][i]
-        hw = epoch_data["half_window"]
         epoch_counts[i] = len(t_i)
 
         oot_idx = np.where(np.abs(t_i - tc) > T14_days + tau_shift_max)[0]
@@ -288,7 +367,7 @@ def cv_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER, n_folds=10,
             orders[i] = 0
             continue
 
-        x_i = (t_i - tc) / hw
+        x_i = x_all[i][m]
         folds = np.array_split(oot_idx, n_folds)
 
         logL = np.zeros(max_order + 1)
@@ -392,6 +471,18 @@ class PreparedData:
         return self.epoch_data["n_epochs"]
 
 
+def _labels_of(time, time_src, labels_src):
+    """The labels of the points of ``time``, a subset of ``time_src``
+    (turin refuses repeated timestamps, so a time identifies its point)."""
+    order = np.argsort(time_src, kind="stable")
+    pos = np.searchsorted(time_src[order], time)
+    pos = np.clip(pos, 0, max(len(order) - 1, 0))
+    src = order[pos]
+    if len(time) and not np.array_equal(time_src[src], time):
+        raise ValueError("a filtered point is missing from the light curve")
+    return labels_src[src]
+
+
 def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
     """Download, clean and condition one target's light curve.
 
@@ -417,18 +508,25 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
     time_raw = lc["time"]
     flux_raw = lc["flux"]
     flux_err_raw = lc["flux_err"]
+    # quarter / semi-sector of each point; a light curve without labels
+    # (synthetic, or built by hand) is one continuous stretch
+    seg_raw = lc.get("segment")
+    if seg_raw is None:
+        seg_raw = np.zeros(len(time_raw), dtype=np.int64)
+    seg_raw = np.asarray(seg_raw)
     notes = []
 
     quality = lc.get("quality")
     if quality is not None:
         good = quality == 0
         _log(f"  Quality filter removed {int(np.sum(~good))} points")
-        time_raw, flux_raw, flux_err_raw = (
-            time_raw[good], flux_raw[good], flux_err_raw[good])
+        time_raw, flux_raw, flux_err_raw, seg_raw = (
+            time_raw[good], flux_raw[good], flux_err_raw[good], seg_raw[good])
 
     cadence = float(np.nanmedian(np.diff(time_raw)))
     time, flux, flux_err, n_outliers, clip_skipped = sigma_clip(
         time_raw, flux_raw, flux_err_raw, eph["duration"], cadence)
+    segment = _labels_of(time, time_raw, seg_raw)
     if clip_skipped:
         notes.append(f"sigma clip skipped: {clip_skipped}")
         _log(f"  Sigma clip skipped: {clip_skipped}; "
@@ -439,12 +537,14 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
     if other_ephs:
         keep = np.ones(len(time), dtype=bool)
         for oeph in other_ephs:
-            half_dur = (oeph["duration"] / 24.0) / 2.0
-            for ot in _predicted_transit_times(
-                    time, oeph["period"], oeph["epoch"]):
-                keep &= np.abs(time - ot) > half_dur
+            # every transit of the other planet, including one cut by the
+            # light curve's start or end (its points went unmasked until
+            # 0.1.55, which listed only centres inside the data's span)
+            keep &= ~near_transit_mask(time, oeph["period"], oeph["epoch"],
+                                       oeph["duration"], n_durations=0.5)
         _log(f"  Masked {int(np.sum(~keep))} points from other planets")
-        time, flux, flux_err = time[keep], flux[keep], flux_err[keep]
+        time, flux, flux_err, segment = (
+            time[keep], flux[keep], flux_err[keep], segment[keep])
 
     # The epochs, segmented once here and carried on PreparedData: the CV
     # and every fit mode use this same epoch_data, so the occupied count,
@@ -455,14 +555,14 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
     n_dur = window_durations(eph, ttv_max_days, log=_log)
 
     def epochs_for(ephem):
-        tw, fw, ew = extract_near_transit_data(
-            time, flux, flux_err, ephem["period"], ephem["epoch"],
-            ephem["duration"], n_durations=n_dur)
+        w = near_transit_mask(time, ephem["period"], ephem["epoch"],
+                              ephem["duration"], n_durations=n_dur)
         try:
-            return segment_epochs(tw, fw, ew, ephem["period"],
-                                  ephem["epoch"], ephem["duration"],
-                                  n_durations=n_dur,
-                                  tau_shift_max=ttv_max_days)
+            return segment_epochs(time[w], flux[w], flux_err[w],
+                                  ephem["period"], ephem["epoch"],
+                                  ephem["duration"], n_durations=n_dur,
+                                  tau_shift_max=ttv_max_days,
+                                  segment=segment[w])
         except ValueError:
             raise ValueError(
                 f"{target}: no occupied transit epochs in the data") from None

@@ -94,11 +94,11 @@ def _windowed(lc):
 @pytest.mark.parametrize("curve", ["lc", "lc_short"])
 @pytest.mark.parametrize("tau_shift_max", [0.0, 0.05])
 def test_segment_epochs(hurin_tf, request, curve, tau_shift_max):
-    # Windowed input, as in the pipeline. Since 0.1.50 the two segmentations
-    # differ only for a point whose nearest transit is missing from hurin's
-    # list, the transits with centres inside the data's span
-    # (docs/hurin-differences.md section 4); neither curve has one. The
-    # raw-input divergence is pinned hurin-free in test_cli_outputs.
+    # Windowed input, as in the pipeline. The two segmentations agree when
+    # every point's nearest transit has its centre inside the data's span,
+    # the window holds one quarter, and every epoch has 4 or more points with
+    # one in transit; turin's rule differs from hurin's only outside that
+    # (docs/hurin-differences.md section 4), and neither curve leaves it.
     lc = request.getfixturevalue(curve)
     args = _windowed(lc)
     mine = prep.segment_epochs(*args, tau_shift_max=tau_shift_max)

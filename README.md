@@ -60,9 +60,15 @@ turin --help
    degenerate-window guard, masking of other known planets in the system, then
    recentring the reference epoch on the median occupied transit, which
    decorrelates the period from the epoch.
-2. **Choose a polynomial order per transit** by 10-fold cross-validation on
+2. **Cut one window per transit**, 5 durations either side of every
+   predicted transit time. A window that spans a Kepler quarter or TESS
+   semi-sector boundary, where the flux often jumps, keeps only the side
+   holding the predicted time. Any window with at least 2 points is fitted,
+   whether or not the transit landed in the data: with TTVs possible, that
+   is for the fit to decide.
+3. **Choose a polynomial order per transit** by 10-fold cross-validation on
    the out-of-transit points, K = 0..5.
-3. **Fit the linear ephemeris** (7 parameters), then **fit per-transit
+4. **Fit the linear ephemeris** (7 parameters), then **fit per-transit
    times** (5 shape parameters plus one time per transit), seeded from the
    linear-ephemeris maximum likelihood.
 

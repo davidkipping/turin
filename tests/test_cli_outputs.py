@@ -491,9 +491,9 @@ def test_search_star_queries_by_catalogue_number(monkeypatch):
 def test_occupied_epochs_come_from_the_fitted_segmentation(monkeypatch):
     """prepare_data's occupied epochs (which set the recentred epoch) must be
     exactly the epochs segment_epochs fits, including its minimum-points and
-    nearest-centre rules. Epoch at tc=25 keeps one in-transit point but only
-    3 points in its whole window, so segment_epochs drops it; the occupied
-    count must drop it too."""
+    nearest-centre rules. Epoch at tc=25 keeps one in-transit point and
+    nothing else in its window, below MIN_PTS, so segment_epochs drops it;
+    the occupied count must drop it too."""
     from turin import prep
 
     P, T0, dur_h = 10.0, 5.0, 4.8
@@ -503,7 +503,7 @@ def test_occupied_epochs_come_from_the_fitted_segmentation(monkeypatch):
     near = np.where(np.abs(t - tc) <= 5.0 * dur_h / 24)[0]
     keep = np.ones(t.size, bool)
     keep[near] = False
-    keep[near[len(near) // 2 - 1: len(near) // 2 + 2]] = True  # 3 points
+    keep[near[len(near) // 2]] = True        # 1 point, below MIN_PTS
     t = t[keep]
     lc = {"time": t, "flux": np.ones_like(t), "flux_err": np.full(t.size, 1e-4),
           "quality": np.zeros(t.size, int), "mission": "kepler",
@@ -573,8 +573,10 @@ def test_points_after_an_uncovered_transit_stay_out_of_other_epochs():
     points just after it inside its window. Those points used to join the
     next epoch a whole period away (the transit list was built from centres
     inside the data's span), so a baseline polynomial was evaluated at
-    x ~ -490. Every kept point must lie within its own epoch's window, and
-    a transit with no in-transit points must still not be fitted."""
+    x ~ -490. Every kept point must lie within its own epoch's window. Since
+    0.1.55 that transit is fitted as an epoch of its own: its window holds
+    enough points, and whether the transit itself fell in the data is for
+    the fit to decide (prep.MIN_PTS)."""
     from turin import prep
 
     P, T0, dur_h = 10.0, 5.0, 2.0
@@ -585,7 +587,8 @@ def test_points_after_an_uncovered_transit_stay_out_of_other_epochs():
     tw, fw, ew = prep.extract_near_transit_data(t, f, e, P, T0, dur_h)
     assert np.any((tw > 5.05) & (tw < 5.5))   # the edge points survive windowing
     ed = prep.segment_epochs(tw, fw, ew, P, T0, dur_h)
-    np.testing.assert_allclose(ed["epoch_centers"], [15.0, 25.0, 35.0])
+    np.testing.assert_allclose(ed["epoch_centers"], [5.0, 15.0, 25.0, 35.0])
+    assert ed["n_in_transit"][0] == 0             # the transit fell in the gap
     m = ed["mask"] > 0
     for i, c in enumerate(ed["epoch_centers"]):
         assert np.all(np.abs(ed["times_padded"][i][m[i]] - c)
@@ -596,15 +599,7 @@ def test_points_after_an_uncovered_transit_stay_out_of_other_epochs():
     (10.0, 5.0, 2.0, (0.0, 40.0), (4.0, 5.1)),     # the case above
     (9.3456, 120.5, 4.2, (100.0, 168.0), (131.0, 134.5)),
     (0.9, 100.3, 4.0, (100.0, 108.0), (103.1, 103.6)),  # windows overlap
-    pytest.param(
-        0.9, 100.3, 4.0, (100.31, 108.0), None,    # starts inside a transit
-        marks=pytest.mark.xfail(strict=True, reason=(
-            "extract_near_transit_data, like hurin's, lists only transits "
-            "whose centres lie inside the data's span, so it drops the points "
-            "of a transit cut by the light curve's start or end (here three "
-            "in-transit points) that segment_epochs would keep. Open; fixing "
-            "it changes the fitted data, so MODEL_REV. See "
-            "docs/hurin-differences.md section 4."))),
+    (0.9, 100.3, 4.0, (100.31, 108.0), None),      # starts inside a transit
 ])
 def test_segmentation_does_not_depend_on_prewindowing(P, T0, dur_h, span, gap):
     """Since 0.1.50 a point is kept only inside its own epoch's window, so
@@ -628,6 +623,174 @@ def test_segmentation_does_not_depend_on_prewindowing(P, T0, dur_h, span, gap):
     for key in ("times_padded", "flux_padded", "ferr_padded", "mask",
                 "epoch_centers"):
         np.testing.assert_array_equal(raw[key], win[key], err_msg=key)
+
+
+def _continuous(t0, t1):
+    t = np.arange(t0, t1, 29.4 / 1440)
+    return t, np.ones_like(t), np.full(t.size, 1e-4)
+
+
+@pytest.mark.parametrize("cut,gap,want", [
+    (24.8, None, "after"),      # break before the centre: keep the later side
+    (25.1, None, "before"),     # break after the centre: keep the earlier side
+    (25.0, (24.9, 25.2), "before"),    # centre in the gap: nearer side 0.1 d
+    (24.9, (24.75, 25.05), "after"),   # centre in the gap: nearer side 0.05 d
+])
+def test_a_window_across_a_quarter_break_keeps_one_side(cut, gap, want):
+    """A window spanning a quarter or semi-sector boundary keeps only the
+    stretch whose range contains the predicted centre, or, with the centre
+    in the gap between them, the stretch whose nearest point is closer."""
+    from turin import prep
+
+    P, T0, dur_h, tc = 10.0, 5.0, 2.4, 25.0
+    t, f, e = _continuous(0.0, 40.0)
+    if gap:
+        keep = (t < gap[0]) | (t > gap[1])
+        t, f, e = t[keep], f[keep], e[keep]
+    seg = np.where(t < cut, 7, 8)
+    ed = prep.segment_epochs(t, f, e, P, T0, dur_h, segment=seg)
+    i = int(np.argmin(np.abs(ed["epoch_centers"] - tc)))
+    assert np.isclose(ed["epoch_centers"][i], tc)
+    kept = ed["times_padded"][i][ed["mask"][i] > 0]
+    assert np.all(kept >= cut) if want == "after" else np.all(kept < cut)
+    # epochs whose windows hold one stretch are untouched by the labels
+    plain = prep.segment_epochs(t, f, e, P, T0, dur_h)
+    for j, c in enumerate(ed["epoch_centers"]):
+        if not np.isclose(c, tc):
+            np.testing.assert_array_equal(ed["times_padded"][j],
+                                          plain["times_padded"][j])
+
+
+def test_an_epoch_needs_two_points_and_no_transit():
+    """MIN_PTS = 2, in transit or not: an epoch whose window holds two
+    out-of-transit points is fitted (its transit may have moved, under TTVs);
+    one point is not enough to say anything beyond its own baseline."""
+    from turin import prep
+
+    P, T0, dur_h = 10.0, 5.0, 2.4
+    t, f, e = _continuous(0.0, 40.0)
+    hw = prep.N_DURATIONS * dur_h / 24
+    for n_keep, kept in ((2, True), (1, False)):
+        near = np.where(np.abs(t - 25.0) <= hw)[0]
+        drop = near[:-n_keep]                 # the last n_keep: out of transit
+        keep = np.ones(t.size, bool)
+        keep[drop] = False
+        ed = prep.segment_epochs(t[keep], f[keep], e[keep], P, T0, dur_h)
+        assert np.any(np.isclose(ed["epoch_centers"], 25.0)) == kept
+    assert prep.MIN_PTS == 2
+
+
+def _fake_target(monkeypatch, lc, eph, others=()):
+    from turin import prep
+    monkeypatch.setattr(prep, "get_lightcurve", lambda *a, **k: dict(lc))
+    monkeypatch.setattr(prep, "get_ephemeris", lambda *a, **k: dict(eph))
+    monkeypatch.setattr(prep, "get_other_planet_ephemerides",
+                        lambda *a, **k: [dict(o) for o in others])
+
+
+def test_other_planet_transit_cut_by_the_start_is_masked(monkeypatch):
+    """A sibling planet's transit centred just before the light curve begins
+    still has its in-transit points masked. The old transit list (centres
+    inside the data's span) never listed it, so they stayed in."""
+    from turin import prep
+
+    t, f, e = _continuous(0.0, 45.0)
+    lc = {"time": t, "flux": f, "flux_err": e, "quality": np.zeros(t.size, int),
+          "mission": "kepler", "cadence_days": 29.4 / 1440}
+    eph = {"period": 10.0, "epoch": 5.0, "duration": 2.4, "depth": 1000.0}
+    other = {"period": 7.0, "epoch": -0.02, "duration": 2.0}
+    _fake_target(monkeypatch, lc, eph, [other])
+    prepared = prep.prepare_data("KOI-1.01", log=None)
+    half = 0.5 * 2.0 / 24
+    for c in (-0.02, 6.98, 13.98):       # the cut transit and two inside
+        assert not np.any(np.abs(prepared.time - c) <= half)
+    assert np.any(prepared.time < half)   # just outside it survives
+
+
+def test_prepare_data_carries_segment_labels_through_its_filters(monkeypatch):
+    """Quality flags and the sigma clip remove points; the quarter labels
+    must stay with their points, so the quarter split acts on the epoch
+    whose window spans the boundary and on no other."""
+    from turin import prep
+
+    t, f, e = _continuous(0.0, 45.0)
+    rng = np.random.default_rng(5)
+    f = f + rng.normal(0, 1e-4, t.size)
+    f[::97] += 0.05                                   # outliers to clip
+    quality = np.zeros(t.size, int)
+    quality[::53] = 1                                  # flagged cadences
+    seg = np.where(t < 24.8, 3, 4)                     # Q3 / Q4 at 24.8
+    lc = {"time": t, "flux": f, "flux_err": e, "quality": quality,
+          "segment": seg, "mission": "kepler", "cadence_days": 29.4 / 1440}
+    eph = {"period": 10.0, "epoch": 5.0, "duration": 2.4, "depth": 1000.0}
+    _fake_target(monkeypatch, lc, eph)
+    ed = prep.prepare_data("KOI-1.01", log=None).epoch_data
+    i = int(np.argmin(np.abs(ed["epoch_centers"] - 25.0)))
+    kept = ed["times_padded"][i][ed["mask"][i] > 0]
+    assert kept.size > 10 and np.all(kept >= 24.8)
+    j = int(np.argmin(np.abs(ed["epoch_centers"] - 15.0)))
+    hw = ed["half_window"]
+    k15 = ed["times_padded"][j][ed["mask"][j] > 0]
+    assert k15.min() < 15.0 - 0.9 * hw and k15.max() > 15.0 + 0.9 * hw
+
+
+def _lk_curve(time, meta):
+    import lightkurve as lk
+    lc = lk.LightCurve(time=time, flux=np.ones_like(time),
+                       flux_err=np.full(time.size, 1e-4))
+    lc.meta.update(meta)
+    return lc
+
+
+def test_segment_labels_kepler_quarters_and_tess_semi_sectors():
+    from turin.data import lightcurve as L
+
+    q5 = _lk_curve(np.arange(0.0, 3.0, 0.02), {"QUARTER": 5})
+    q6 = _lk_curve(np.arange(3.5, 6.0, 0.02), {"QUARTER": 6})
+    np.testing.assert_array_equal(
+        L.segment_labels([q5, q6], "kepler"),
+        np.r_[np.full(len(q5.time), 5), np.full(len(q6.time), 6)])
+
+    # a TESS sector splits at its largest gap (the orbit gap, 2 d here),
+    # not at the shorter mid-orbit downlinks (0.22 d)
+    t = np.r_[np.arange(0.0, 5.0, 0.01), np.arange(5.22, 11.0, 0.01),
+              np.arange(13.0, 18.0, 0.01), np.arange(18.22, 24.0, 0.01)]
+    s61 = _lk_curve(t, {"SECTOR": 61})
+    lab = L.segment_labels([s61], "tess")
+    np.testing.assert_array_equal(lab, np.where(t < 12.0, 122, 123))
+    # a sector with no gap long enough stays whole
+    short = _lk_curve(np.arange(0.0, 10.0, 0.01), {"SECTOR": 9})
+    assert set(L.segment_labels([short], "tess")) == {18}
+    # no header keyword: each file is its own stretch
+    a = _lk_curve(np.arange(0.0, 1.0, 0.1), {})
+    b = _lk_curve(np.arange(2.0, 3.0, 0.1), {})
+    lab = L.segment_labels([a, b], "kepler")
+    assert len(set(lab[:len(a.time)])) == 1 and len(set(lab)) == 2
+
+
+def test_a_cache_without_segment_labels_is_downloaded_again(tmp_path,
+                                                            monkeypatch):
+    import pickle
+    from turin.data import lightcurve as L
+
+    monkeypatch.setattr(L, "CACHE_DIR", str(tmp_path))
+    t = np.arange(0.0, 10.0, 0.02)
+    old = {"time": t, "flux": np.ones_like(t), "flux_err": np.ones_like(t),
+           "quality": np.zeros(t.size, int), "mission": "kepler",
+           "cadence_days": 0.02}
+    with open(L._cache_path(L.parse_target("KOI-1.01")), "wb") as fh:
+        pickle.dump(old, fh)
+    fresh = dict(old, segment=np.zeros(t.size, dtype=np.int64))
+    calls = []
+    monkeypatch.setattr(L, "_catalog_id", lambda *a, **k: "KIC 1")
+    monkeypatch.setattr(L, "_download",
+                        lambda *a, **k: calls.append(1) or dict(fresh))
+    msgs = []
+    got = L.get_lightcurve("KOI-1.01", progress=msgs.append)
+    assert calls == [1] and "segment" in got
+    assert any("quarters and semi-sectors" in m for m in msgs)
+    # and the refreshed cache is used as is next time
+    assert "segment" in L.get_lightcurve("KOI-1.01") and calls == [1]
 
 
 def test_binned_errors_come_from_the_formal_errors():

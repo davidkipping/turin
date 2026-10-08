@@ -1,7 +1,7 @@
 """Profile-likelihood Legendre detrending, batched over chains and epochs.
 
 Each epoch's local baseline is ``g(t) = 1 + L c``, with ``L`` the Legendre
-design matrix on times mapped to [-1, 1] across the epoch window, and the
+design matrix on times mapped to [-1, 1] across the epoch's data, and the
 total model is ``f_transit * g``. The coefficients ``c`` are never sampled:
 they are solved analytically at every log-density evaluation. This is a
 profile likelihood -- a plug-in maximum-likelihood estimate of the nuisance
@@ -92,7 +92,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
-from .prep import legendre_matrix
+from .prep import basis_x, legendre_matrix
 
 PROFILE_MODES = ("exact", "hybrid", "ratio")
 
@@ -188,9 +188,6 @@ def build_design(epoch_data, orders, dtype=mx.float32):
     flux = np.asarray(epoch_data["flux_padded"], dtype=np.float64)
     ferr = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
     mask = np.asarray(epoch_data["mask"], dtype=np.float64)
-    centers = np.asarray(epoch_data["epoch_centers"], dtype=np.float64)
-    half_window = float(epoch_data["half_window"])
-
     n_epochs, max_pts = times.shape
     orders = np.asarray(orders, dtype=int).copy()
     if orders.shape != (n_epochs,):
@@ -200,9 +197,10 @@ def build_design(epoch_data, orders, dtype=mx.float32):
     orders = np.clip(orders, 0, np.maximum(n_real_per_epoch - 1, 0))
     n_cols = int(orders.max()) + 1
 
-    # design matrix on times mapped to [-1, 1] within the window; padded
-    # slots sit at the epoch centre, i.e. x = 0, and are killed by the mask
-    x = (times - centers[:, None]) / half_window
+    # design matrix on times mapped to [-1, 1] across each epoch's own data
+    # (prep.basis_x: same polynomial space as the window map, conditioned);
+    # padded slots sit at x = 0 and are killed by the mask
+    x = basis_x(epoch_data)
     L = np.zeros((n_epochs, max_pts, n_cols))
     for i in range(n_epochs):
         Li = legendre_matrix(x[i], n_cols - 1)
@@ -461,8 +459,7 @@ def solve_coefficients_np(epoch_data, orders, f_transit, mode="exact"):
     flux = np.asarray(epoch_data["flux_padded"], dtype=np.float64)
     ferr = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
     mask = np.asarray(epoch_data["mask"], dtype=np.float64)
-    centers = np.asarray(epoch_data["epoch_centers"], dtype=np.float64)
-    hw = float(epoch_data["half_window"])
+    x_all = basis_x(epoch_data)
 
     f_transit = np.atleast_3d(np.asarray(f_transit, dtype=np.float64))
     n_chains, n_epochs, _ = f_transit.shape
@@ -477,7 +474,7 @@ def solve_coefficients_np(epoch_data, orders, f_transit, mode="exact"):
             sel = mask[e] > 0
             if not sel.any():
                 continue
-            Lf = legendre_matrix((times[e][sel] - centers[e]) / hw, k - 1)
+            Lf = legendre_matrix(x_all[e][sel], k - 1)
             w = 1.0 / ferr[e][sel] ** 2
             f = f_transit[ch, e][sel]
             if mode in ("exact", "hybrid"):

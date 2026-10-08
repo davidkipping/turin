@@ -156,7 +156,13 @@ _HURIN_PY = "/Users/dkipping/miniconda3/envs/hurin/bin/python"
 @pytest.mark.skipif(not os.path.exists(_HURIN_PY),
                     reason="hurin conda env not installed")
 def test_ratio_mode_matches_hurin_profile_detrend(segmented, centering, tmp_path):
-    """ratio mode must reproduce hurin's own solve, coefficient for coefficient.
+    """ratio mode must reproduce hurin's own solve, baseline for baseline.
+
+    Compared as fitted baseline values at the data, not coefficients: since
+    0.1.55 turin's polynomial coordinate spans each epoch's own data
+    (``prep.basis_x``) where hurin's spans the window, so the coefficients
+    differ by the change of basis while the polynomial they describe is the
+    same.
 
     hurin's ``profile_detrend_epoch`` is JAX (and float32), so it runs in the
     hurin environment via a subprocess rather than being imported here.
@@ -201,11 +207,19 @@ def test_ratio_mode_matches_hurin_profile_detrend(segmented, centering, tmp_path
     ref = np.load(out)
 
     # hurin solves this in float32 on a normal matrix of scale 1/sigma^2 ~ 1e7,
-    # so its coefficients carry ~1e-8 absolute noise. That, not turin, sets the
+    # so its baseline carries ~1e-8 absolute noise. That, not turin, sets the
     # tolerance; 1e-7 is still four orders below a physically meaningful
-    # baseline coefficient (~1e-3).
-    np.testing.assert_allclose(got, ref["c"], rtol=3e-5, atol=1e-7)
+    # baseline excursion (~1e-3).
     real = segmented["mask"] > 0
+    x_mine = prep.basis_x(segmented)
+    x_hurin = ((segmented["times_padded"] - segmented["epoch_centers"][:, None])
+               / segmented["half_window"])
+    for e in range(n_epochs):
+        r = real[e]
+        mine = prep.legendre_matrix(x_mine[e][r], max_order) @ got[e]
+        theirs = prep.legendre_matrix(x_hurin[e][r], max_order) @ ref["c"][e]
+        np.testing.assert_allclose(mine, theirs, rtol=0, atol=1e-7,
+                                   err_msg=f"epoch {e}")
     np.testing.assert_allclose(model_mine[real], ref["m"][real],
                                rtol=0, atol=2e-7)
 

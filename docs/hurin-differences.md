@@ -61,7 +61,8 @@ needed to obtain it.
 
 One machine (12 cores, 8 performance), runs **sequential** so neither
 contended for CPU, and both reading a byte-identical cached light curve
-(1,821,274 bytes in each package's own cache). 27 occupied epochs, Kepler
+(1,821,274 bytes in each package's own cache). 27 occupied epochs (31 under
+turin >= 0.1.55's epoch rule; see section 4), Kepler
 long cadence, `P = 44.0004 d`, duration 5.11 h.
 
 `--chains=8` rather than hurin's default of 2. At 2 chains hurin needed four
@@ -239,45 +240,57 @@ its hot loop and strictly better where it matters for adjudication.
 
 Two data-handling differences, neither in the model:
 
-- **Occupied epochs.** hurin counts an epoch as occupied with more than one
-  point in its transit zone, and fits epochs chosen by a separate test
-  (at least one point, at least 4 in the window, nearest-centre
-  assignment); the two can disagree, which matters because the occupied
-  list sets the recentred reference epoch. turin takes its occupied epochs
-  from the fitting segmentation itself (0.1.27), so they always agree.
-  For almost every target the epochs, and so the comparison, are
-  identical; they differ only when an epoch has exactly one point in
-  transit or too few points in its window. KOI-518.02 is unaffected.
-- **Edge windows (turin >= 0.1.50).** Both packages segment the windowed
-  data by assigning each point to its nearest predicted transit, from a list
-  of transits whose *centres* lie inside the data's span. A window that
-  starts just after an uncovered transit (centre in a gap or before the
-  light curve) therefore joined the previous listed epoch, a whole period
-  away, and entered its baseline fit at Legendre x ~ -490. turin now builds
-  the list from every point's own nearest transit and keeps a point only
-  within its epoch's window. Of the first 37 Kepler targets this changed two,
-  KOI-5749.01 (22 points) and KOI-5790.01 (38), and no comparison target in
-  this document. hurin's `segment_epochs` has the same construction.
+- **Which epochs are fitted (turin >= 0.1.55).** turin's rule:
+  every predicted transit has a window of `N_DURATIONS` (5) transit
+  durations either side of its centre, whether or not that centre lies
+  inside the light curve; each point belongs to its nearest transit and only
+  inside that transit's window; a window that spans a Kepler quarter or TESS
+  semi-sector boundary keeps only the stretch around the predicted centre
+  (the nearer stretch if the centre falls between them); and an epoch is
+  fitted if what remains holds at least `prep.MIN_PTS` = 2 points, **in
+  transit or not**. hurin lists only transits whose centres lie inside the
+  data's span, ignores quarter boundaries, and fits an epoch with at least
+  4 points in its window and at least one in its transit zone.
 
-  At short periods the same rule acts at both ends of every light curve
-  (measured on synthetic 0.9 d light curves; the 37 Kepler targets above are
-  all long-period): points nearest an edge transit too thin to fit are
-  dropped instead of joining the neighbouring epoch's baseline, and a
-  transit cut by the light curve's start is fitted as its own epoch instead
-  of its in-transit points entering the next epoch's baseline unmodelled.
-  Where every point's nearest transit has its centre inside the data's
-  span, the two packages still segment identically, overlapping windows
-  included (`tests/test_prep_parity.py`).
+  The reasons, in turn. Whether a transit fell in the data is for the fit to
+  decide, not the segmentation, once TTVs are possible: an epoch whose
+  transit missed the data returns a timing posterior equal to its prior
+  minus the times the data rule out. Two points is the fewest that carry
+  information, since an epoch that thin gets a constant baseline, which one
+  point would fit exactly. Quarter and semi-sector boundaries (labels from
+  each file's `QUARTER`/`SECTOR` header, semi-sectors split at the sector's
+  largest internal gap) commonly carry flux breaks that one baseline
+  polynomial cannot follow. The in-span transit list had three effects, all
+  at transits whose centre fell outside the data: windowing dropped the
+  points of a transit cut by the light curve's start or end, in-transit
+  points included; segmentation handed points near such a transit to an
+  epoch a period away (KOI-5749.01: 22 points at Legendre x ~ -490; fixed in
+  0.1.50, with KOI-5790.01 the only other of 37 targets affected); and a
+  sibling planet's transit cut by the start or end was never masked. Every
+  predicted transit now counts in all three.
 
-  **Open, in both packages:** `extract_near_transit_data` lists transits the
-  same way (centres inside the data's span), so the points of a transit cut
-  by the light curve's very start or end are dropped *before* segmentation,
-  in-transit points included -- e.g. a light curve starting 0.01 d after a
-  centre loses its first three points. It only ever discards data, and only
-  around the first and last transits of the whole light curve. Fixing it
-  would change the fitted data for the targets it touches (a `MODEL_REV`
-  bump); `test_segmentation_does_not_depend_on_prewindowing` carries the
-  case as a strict xfail, so a fix will be noticed.
+  Measured, old rule against new, on the three cached Kepler targets:
+  KOI-518.02 gains 4 epochs (27 -> 31) and KOI-448.02 2 (30 -> 32), each a
+  transit that fell in a data gap, with 36-80 window points and none in
+  transit; KOI-5162.01 is unchanged; no existing epoch's points changed, and
+  no window crossed a quarter boundary. In LinEph such epochs add baseline
+  only; in TTV each brings a prior-dominated timing. **This makes turin's
+  KOI-518.02 TTV fit 31 epochs against hurin's 27**: the primary comparison
+  above predates it, and a rerun would differ by those four times.
+
+  The occupied epochs that set the recentred reference epoch come from this
+  same segmentation (0.1.27); hurin counts them by a separate test, and the
+  two can disagree. Where every point's nearest transit has its centre
+  inside the data's span, one quarter label per window, and every epoch has
+  4 or more points with one in transit, the two packages still segment
+  identically, overlapping windows included (`tests/test_prep_parity.py`).
+
+  One numerical consequence: one-sided windows (a quarter split keeps one
+  side; a transit in a gap) make a baseline polynomial on the *window's*
+  [-1, 1] ill-conditioned, so since 0.1.55 turin maps each epoch's
+  coordinate across its own data (`prep.basis_x`). Same polynomials, same
+  profile likelihood (float64 identical to 1e-12); only the coefficients
+  differ from hurin's, by a change of basis.
 - **One star.** turin restricts MAST results to the host's KIC/TIC
   (0.1.26). hurin downloads every row of the name search, which for
   KOI-7592.01 includes a neighbouring star; see
