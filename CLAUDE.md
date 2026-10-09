@@ -394,6 +394,7 @@ Full suite at 0.1.52: 302 passed, 2 failed -- the hurin parity test of
 `segment_epochs`, stale since 0.1.50 and fixed in 0.1.53, not MetalPlanet.
 At 0.1.54, with a hurin clone present: 309 passed, 0 skipped, 1 xfailed
 (the then-open `extract_near_transit_data` edge case, fixed in 0.1.55).
+At 0.1.55: 320 passed, 0 skipped.
 `MIN_METALPLANET` stays 0.7.0: turin uses nothing newer.
 
 **The hurin parity tests skip without a hurin clone** beside turin, so a
