@@ -470,6 +470,27 @@ stream (that fallback is turin's `log_prob_hi`). Similarly turin writes its
 own likelihood rather than using `ChunkedGaussianLogLike`, which chunks the
 data axis across epoch boundaries and so cannot hold a per-epoch solve.
 
+### The per-transit SNR gate (`--TTVsnr`, default 3)
+
+Before a TTV fit, `pipeline.transit_snrs` computes each epoch's expected
+single-transit SNR, `sqrt(sum (d/sigma)^2)` with `d` the LinEph best fit's
+transit depth at each real point (the matched-filter SNR on noiseless data,
+so gaps and window edges count). If the median over epochs with data in
+transit is below the threshold, the TTV fit is skipped and
+`<target>_ttv_skipped.csv` says why. Epochs whose transit fell in a gap
+score exactly 0 and are excluded from the median: 0.1.55's epoch rule fits
+them, and counting them would bias the gate toward skipping.
+
+Why: KOI-4926.01 (19 transits, median 2.6) spent 10.4 h on a TTV fit that
+ended unconverged at the cap, with timing errors of 1.5-20 h, and freeing
+19 times let the shape fit noise (T14 12.3 h against LinEph's 6.8 h; the
+best log-likelihood improved 12 nats for 17 extra parameters). Of the
+first 59 Kepler targets, 4 fall below 3 (KOI-5870.01 2.96, 5879.01 2.72,
+3283.03 2.27, 4926.01 2.61), about 17 h of batch time, two unconverged.
+The gate runs before the resume checks (an unfinished TTV lineage from an
+older MODEL_REV would refuse first); a converged TTV lineage still reports
+as converged.
+
 ### Grid-Gibbs on the epoch times
 
 ChEES does not cross between separated timing modes of a weak transit, and

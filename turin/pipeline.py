@@ -281,6 +281,99 @@ def _mode_layout(mode, args, prepared, centering, epoch_data):
                                  ld=getattr(args, "ld", "sampled")), None
 
 
+def transit_snrs(prepared, centering, shape, *, b_prior="transiting"):
+    """Expected detection SNR of each epoch's transit, ``sqrt(sum (d/sigma)^2)``.
+
+    ``d`` is the transit's own depth at each real point (the model with its
+    baseline divided out) for ``shape`` -- a dict of ``k, beta, T14, q1,
+    q2`` -- on the input ephemeris, and ``sigma`` the point's error. This is
+    the matched-filter SNR the epoch would have on noiseless data: it counts
+    the data actually present, so a transit cut by a gap or a window edge
+    scores lower, and one that fell in a gap scores 0. Returns
+    ``(n_epochs,)``.
+    """
+    ed = prepared.epoch_data
+    layout = _params.lineph_layout(prepared.eph, b_prior=b_prior)
+    # the baseline is divided out, so its order is irrelevant: constant
+    orders = np.zeros(ed["n_epochs"], dtype=int)
+    _, _, lp, _ = _likelihood.build_target(
+        layout, centering, ed, orders, profile_mode="exact",
+        num_resample=prepared.num_resample,
+        exposure_time=prepared.exposure_time, n_chains_hint=4, fp64=False)
+    v = np.array([0.0, 0.0] + [float(shape[n]) for n in
+                               ("k", "beta", "T14", "q1", "q2")])
+    model, base, _ = _ml_model(lp, v, False)
+    mask = np.asarray(ed["mask"]) > 0
+    dev = np.where(mask, model / np.where(base != 0, base, 1.0) - 1.0, 0.0)
+    err = np.asarray(ed["ferr_padded"], dtype=np.float64)
+    return np.sqrt(np.sum(np.where(mask, (dev / err) ** 2, 0.0), axis=1))
+
+
+def _ttv_snr_gate(args, prepared, centering, outdir, lineph_ml, *, log,
+                  outcome):
+    """Skip the TTV fit when a single transit is too weak to time.
+
+    The statistic is the median of :func:`transit_snrs` over epochs with
+    data in transit, at the LinEph best fit (this run's, or the saved
+    lineage's). Below ``--TTVsnr`` (default 3) the per-epoch times come back
+    close to their priors, the sampler spends hours on near-prior multimodal
+    timing (KOI-4926.01: median 2.6, 10.4 h, unconverged at the cap), and
+    the freed times let the shape fit noise (its T14 came back 12.3 h
+    against LinEph's 6.8 h). Writes ``<target>_ttv_skipped.csv`` and records
+    the reason as the mode's outcome. Returns True when skipping.
+    """
+    target = prepared.target
+    note = _outputs.ttv_skipped_path(outdir, target)
+    threshold = float(getattr(args, "ttv_snr_min", TTV_SNR_MIN) or 0.0)
+    if threshold <= 0:
+        return False
+    shape = lineph_ml
+    if not shape:
+        saved = _outputs.load_resume(outdir, target, "lineph")
+        shape = saved.ml_params if saved is not None else None
+    if not shape or not all(n in shape for n in
+                            ("k", "beta", "T14", "q1", "q2")):
+        log("  per-transit SNR gate not evaluated: no LinEph best fit for "
+            "this lineage (run --modes=lineph first, or --TTVsnr=0 to "
+            "silence this)")
+        return False
+    snr = transit_snrs(prepared, centering, shape, b_prior=args.b_prior)
+    covered = snr[snr > _SNR_COVERED]
+    if covered.size == 0:
+        typical = 0.0
+    else:
+        typical = float(np.median(covered))
+    n_arr = np.asarray(centering["n_arr"], dtype=int)
+    summary = (f"median expected SNR of a single transit {typical:.2f} over "
+               f"{covered.size} of {snr.size} epochs with data in transit "
+               f"(range {covered.min() if covered.size else 0:.2f}-"
+               f"{covered.max() if covered.size else 0:.2f}; all transits "
+               f"together {float(np.sqrt(np.sum(snr ** 2))):.1f})")
+    if typical >= threshold:
+        log(f"  per-transit SNR: {summary}; >= {threshold:g}, fitting")
+        if os.path.exists(note):
+            os.remove(note)               # a stale note from a skipped run
+        return False
+    reason = (f"skipped: {summary}, below --TTVsnr={threshold:g}; the "
+              "transit times would be close to their priors. LinEph is the "
+              "result for this target; --TTVsnr=0 fits TTVs anyway")
+    log(f"  per-transit SNR: {summary}")
+    log(f"  TTV fit SKIPPED: below --TTVsnr={threshold:g}. The LinEph fit "
+        "is this target's result; --TTVsnr=0 fits anyway")
+    _outputs.export_ttv_skipped(outdir, target, reason, n_arr, snr, log=log)
+    outcome["ttv"] = reason
+    return True
+
+
+#: --TTVsnr's default. A single transit at SNR 3 times to roughly a third of
+#: its duration; below it the timing posteriors are close to their priors.
+TTV_SNR_MIN = 3.0
+
+#: An epoch counts as having data in transit above this expected SNR (a
+#: transit that fell entirely in a gap scores exactly 0).
+_SNR_COVERED = 1e-3
+
+
 def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
               lineph_ml=None):
     """Run one fit mode. Returns the ML shape dict for LinEph, else None."""
@@ -297,6 +390,15 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
     # resume state and its guards
     prior_state = None if args.fresh else _outputs.load_resume(
         outdir, target, mode)
+    # before the resume checks: a fit that will not run needs none of them
+    # (an unfinished TTV lineage from an older MODEL_REV would refuse first).
+    # A converged one still reports as converged below.
+    finished = (prior_state is not None and prior_state.done
+                and not args.extend2)
+    if mode == "ttv" and not finished and _ttv_snr_gate(
+            args, prepared, centering, outdir, lineph_ml, log=log,
+            outcome=outcome):
+        return None
     if prior_state is not None:
         prior_state.check_model_rev(log=log)
         prior_state.check(

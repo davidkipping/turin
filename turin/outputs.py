@@ -199,6 +199,18 @@ def export_lcdata(outdir, target, mode, epoch_data, model, *, log=None):
                       "time,flux,flux_err,model_flux", rows, log)
 
 
+def export_ttv_skipped(outdir, target, reason, epochs, snrs, *, log=None):
+    """Why the TTV fit was skipped (``--TTVsnr``), with each epoch's expected
+    single-transit SNR. The reason is a ``#`` line, which readers skip."""
+    rows = [f"# {reason}"] + [f"{int(n)},{s:.3f}" for n, s in zip(epochs, snrs)]
+    return _write_csv(ttv_skipped_path(outdir, target), "epoch,expected_snr",
+                      rows, log)
+
+
+def ttv_skipped_path(outdir, target):
+    return product_path(outdir, target, "ttv", "skipped", "csv")
+
+
 def export_ttv_times(outdir, target, mode, rows, *, log=None):
     """(viii) Per-epoch transit times and their O-C, with fit diagnostics."""
     out = []

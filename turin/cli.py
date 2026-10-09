@@ -51,6 +51,7 @@ _VALUE_FLAGS = {
     "--chains": "chains",
     "--bprior": "b_prior",
     "--TTVmax": "ttv_max_min",
+    "--TTVsnr": "ttv_snr_min",
     "--tag": "tag",
     "--sampler": "sampler",
     "--PL": "profile_mode",
@@ -94,6 +95,11 @@ usage: turin --KOI-448.02 [options]
   --bprior=transiting|nongrazing|box   (b, k) prior (default transiting)
   --nongrazing            alias for --bprior=nongrazing
   --TTVmax=MINUTES        declared TTV amplitude; sets the timing priors
+  --TTVsnr=X              skip the TTV fit when the median expected SNR of
+                          a single transit is below X (default 3): its
+                          times would be little more than their priors.
+                          Computed from the LinEph best fit over epochs
+                          with data in transit; 0 always fits
   --PL=auto|exact|hybrid|ratio
                           how the profile likelihood solves for the baseline
                           coefficients. The default, auto, measures all three
@@ -148,6 +154,7 @@ class Args:
     chains: int = 512
     b_prior: str = "transiting"
     ttv_max_min: float | None = None
+    ttv_snr_min: float = 3.0
     tag: str | None = None
     sampler: str = "chees"
     profile_mode: str = "auto"
@@ -266,6 +273,10 @@ def _assign(args, field_name, flag, raw):
             value = float(raw)
             if value <= 0:
                 raise ValueError
+        elif field_name == "ttv_snr_min":
+            value = float(raw)
+            if not value >= 0:
+                raise ValueError
         elif field_name == "modes_raw":
             value = tuple(m.strip() for m in raw.split(",") if m.strip())
             if not value:
@@ -277,7 +288,8 @@ def _assign(args, field_name, flag, raw):
             if not value:
                 raise ValueError
     except ValueError:
-        _fail(f"{flag} needs a {'non-negative' if least == 0 else 'positive'} "
+        nonneg = least == 0 or field_name == "ttv_snr_min"
+        _fail(f"{flag} needs a {'non-negative' if nonneg else 'positive'} "
               f"{'integer' if field_name in ints else 'value'}, got {raw!r}")
     setattr(args, field_name, value)
 

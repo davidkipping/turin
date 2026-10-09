@@ -501,3 +501,59 @@ def test_replot_refuses_a_fit_its_model_does_not_reproduce(tmp_path,
     assert pipeline.run(args, log=logs.append) == 1
     assert any("does not reproduce" in l for l in logs)
     assert os.path.getmtime(fold) == 0
+
+
+def test_ttv_is_skipped_below_the_per_transit_snr_gate(tmp_path, fake_target):
+    """--TTVsnr: with the median single-transit SNR below the threshold the
+    TTV fit is skipped -- no sampling, no TTV products, a skipped CSV with
+    the reason and each epoch's SNR, exit 0 -- and a later run that passes
+    the gate fits TTVs and removes the stale note."""
+    logs = []
+    args = _args(tmp_path, modes=("lineph", "ttv"), ttv_snr_min=1e6)
+    assert pipeline.run(args, log=logs.append) in FINISHED   # LinEph's verdict
+    d = str(tmp_path)
+    names = os.listdir(d)
+    assert "KOI-1.01_ttv_skipped.csv" in names
+    assert not any(n.startswith("KOI-1.01_ttv_") and n != "KOI-1.01_ttv_skipped.csv"
+                   for n in names), names
+    assert any("TTV fit SKIPPED" in l for l in logs)
+    assert any("ttv: skipped: median expected SNR" in l for l in logs)
+    lines = open(os.path.join(d, "KOI-1.01_ttv_skipped.csv")).read().splitlines()
+    assert lines[0] == "epoch,expected_snr" and lines[1].startswith("# turin")
+    assert lines[2].startswith("# skipped:")
+    snr = np.array([float(r.split(",")[1]) for r in lines[3:]])
+    assert np.sum(snr > 0) >= 10        # (an epoch whose transit fell in a gap
+                                        # is listed at exactly 0)
+
+    logs = []
+    args = _args(tmp_path, modes=("lineph", "ttv"), ttv_snr_min=0.5)
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    assert any("fitting" in l and "per-transit SNR" in l for l in logs)
+    assert "KOI-1.01_ttv_skipped.csv" not in os.listdir(d)
+    assert "KOI-1.01_ttv_summary.csv" in os.listdir(d)
+
+
+def test_transit_snrs_follow_the_data_present(fake_target):
+    """Expected SNR scales as 1/sigma, and a transit with its in-transit
+    points removed scores lower; one with none scores 0."""
+    pr = prep.prepare_data("KOI-1.01", log=lambda *a: None)
+    cen = prep.centering_constants(pr.epoch_data, pr.eph)
+    shape = dict(k=K_TRUE, beta=0.3, T14=T14_TRUE, q1=Q1_TRUE, q2=Q2_TRUE)
+    s1 = pipeline.transit_snrs(pr, cen, shape)
+    covered = s1 > 1e-3                 # the fixture has one transit in a gap
+    assert covered.sum() >= 10 and np.all(s1[~covered] == 0)
+    i = int(np.argmax(covered))
+
+    ed = pr.epoch_data
+    ed["ferr_padded"] = ed["ferr_padded"] * 2.0
+    s2 = pipeline.transit_snrs(pr, cen, shape)
+    np.testing.assert_allclose(s2, s1 / 2.0, rtol=1e-5)
+
+    # drop a covered epoch's points within T14/2 of its centre: no data in
+    # transit, and the other epochs are unchanged
+    t = ed["times_padded"][i] - ed["epoch_centers"][i]
+    ed["mask"][i, np.abs(t) < 0.6 * T14_TRUE] = 0
+    s3 = pipeline.transit_snrs(pr, cen, shape)
+    others = np.arange(s3.size) != i
+    assert s3[i] < 1e-3
+    np.testing.assert_allclose(s3[others], s2[others], rtol=1e-5)

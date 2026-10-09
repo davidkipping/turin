@@ -283,6 +283,11 @@ cannot pool chains drawn both ways.
 --bprior=transiting|nongrazing|box      (b, k) prior, see above; --nongrazing
                              is an alias for --bprior=nongrazing
 --TTVmax=MINUTES             declared TTV amplitude; sets the timing priors
+--TTVsnr=X                   skip the TTV fit when the median expected SNR of a
+                             single transit (LinEph best fit, epochs with data
+                             in transit) is below X; default 3, 0 always fits.
+                             A skip writes <target>_ttv_skipped.csv (reason and
+                             each epoch's SNR) and exits 0 on LinEph's verdict
 --PL=auto|exact|hybrid|ratio how the baseline coefficients are solved
                              (default auto: measured per target)
 --geometry=circular|chord    true circular orbit (default) or hurin's chord
