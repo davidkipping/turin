@@ -379,7 +379,18 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
-**Checked against MetalPlanet 0.10.7** (`f69b482`). 0.10.0
+**Checked against MetalPlanet 0.12.2** (`e507941`), turin 0.1.58. 0.11.0
+added occultors larger than the star (`rp > 1`, a total-occultation regime)
+and rewrote kernel sources for it, but states `rp < 1` outputs and VJPs
+bitwise unchanged; turin bounds `k <= 1`, and its float32 log-density and
+gradient and float64 log-density on KOI-518.02 (64 vectors) are bitwise
+identical under 0.10.7 and 0.12.2. 0.11.0 also moved
+`orbit.separation_circular`'s far-side push (points behind the star), which
+turin's supersampled route calls; those points are out of transit either
+way. 0.12.x touches only the hybrid laws, which turin does not use. No
+signature turin calls changed. Full suite: 322 passed, 0 skipped.
+
+Before that, **checked against MetalPlanet 0.10.7** (`f69b482`). 0.10.0
 added the hybrid2/4/5 limb-darkening laws as keyword-only `limb_dark=`
 (default `"quadratic"`) and `u=` on `flux_dev_from_tau` and
 `flux_dev_metal`; turin stays quadratic and passes neither, its positional
