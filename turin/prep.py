@@ -75,9 +75,9 @@ def extract_near_transit_data(time, flux, flux_err, period, epoch,
 #: not the segmentation (an epoch whose transit missed the data comes back
 #: with a timing posterior that is its prior minus the times the data rule
 #: out). Two is the fewest that carry information: an epoch this thin always
-#: gets a constant baseline (cv_orders gives order 0 below 2 * n_folds
-#: out-of-transit points), which one point determines exactly, leaving it
-#: nothing to say about the transit. hurin, and turin until 0.1.55, asked
+#: gets a constant baseline (cv_orders cross-validates with fewer folds on a
+#: short epoch, and takes order 0 below 4 out-of-transit points), which one
+#: point determines exactly, leaving it nothing to say about the transit. hurin, and turin until 0.1.55, asked
 #: for 4 points and at least one in the feasible transit zone.
 MIN_PTS = 2
 
@@ -310,8 +310,11 @@ def optimize_legendre_orders(time, flux, flux_err, period, epoch,
     than the half-duration used for epoch inclusion) are split into
     ``n_folds`` *contiguous* segments; for each order K the held-out
     log-likelihood is accumulated over folds, and the order maximising it
-    relative to K=0 wins. Epochs with fewer than ``2*n_folds`` OOT points
-    take order 0.
+    relative to K=0 wins. An epoch with fewer than ``2*n_folds`` OOT points
+    uses ``n_oot // MIN_FOLD_POINTS`` folds instead (so it is still
+    cross-validated), and one with fewer than ``2*MIN_FOLD_POINTS`` takes
+    order 0. An order the training folds cannot determine (``K + 1`` more
+    than the training points) is excluded.
 
     Returns ``orders``, ``scores`` (delta-logL per epoch per order),
     ``total_scores`` (median over epochs) and ``epoch_counts``.
@@ -333,6 +336,10 @@ def optimize_legendre_orders(time, flux, flux_err, period, epoch,
     )
     return cv_orders(epoch_data, duration_hours, max_order=max_order,
                      n_folds=n_folds, log=log, tau_shift_max=tau_shift_max)
+
+
+#: Fewest points in a cross-validation fold; see :func:`cv_orders`.
+MIN_FOLD_POINTS = 2
 
 
 def cv_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER, n_folds=10,
@@ -363,21 +370,35 @@ def cv_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER, n_folds=10,
         epoch_counts[i] = len(t_i)
 
         oot_idx = np.where(np.abs(t_i - tc) > T14_days + tau_shift_max)[0]
-        if len(oot_idx) < n_folds * 2:
+        # Fewer folds when the epoch is short, so that it is still
+        # cross-validated: each validation fold keeps >= MIN_FOLD_POINTS
+        # points, and an epoch with >= 2*n_folds out-of-transit points gets
+        # exactly the n_folds it always did. It used to take K=0 outright
+        # below 2*n_folds, which is a constant baseline for the one-sided
+        # and gap-cut epochs that the 0.1.55 epoch rule now fits: on
+        # KOI-7706.01 four such epochs (7-25 points, 1-2% ramps) sat at
+        # logL -47 to -1698 each, ~3,300 below an adequate order.
+        n_folds_i = min(n_folds, len(oot_idx) // MIN_FOLD_POINTS)
+        if n_folds_i < 2:
             orders[i] = 0
             continue
 
         x_i = x_all[i][m]
-        folds = np.array_split(oot_idx, n_folds)
+        folds = np.array_split(oot_idx, n_folds_i)
 
         logL = np.zeros(max_order + 1)
         for K in range(max_order + 1):
-            for fold_m in range(n_folds):
+            for fold_m in range(n_folds_i):
                 val_idx = folds[fold_m]
                 train_idx = np.concatenate(
-                    [folds[j] for j in range(n_folds) if j != fold_m])
+                    [folds[j] for j in range(n_folds_i) if j != fold_m])
                 if len(train_idx) < K + 1 or len(val_idx) == 0:
-                    continue
+                    # an order the training points cannot determine is not
+                    # a candidate. Skipping the fold instead left its score
+                    # at 0, which beats every real (negative) score: a
+                    # 7-point epoch came back with K=5.
+                    logL[K] = -np.inf
+                    break
 
                 L_train = legendre_matrix(x_i[train_idx], K)
                 w_train = 1.0 / e_i[train_idx] ** 2

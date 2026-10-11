@@ -806,3 +806,77 @@ def test_binned_errors_come_from_the_formal_errors():
     np.testing.assert_allclose(bt, [1.5, 5.5])
     np.testing.assert_allclose(by, [2.5, 1.0])
     np.testing.assert_allclose(be, [2 / 2, 3 / 2])
+
+
+def _ramp_light_curve():
+    """Four transits (P = 10 d) on a star with a ~1% ramp across each window;
+    the third window keeps only its far side (21 points, none in transit) and
+    the fourth a sliver of 7 points."""
+    from turin import prep
+
+    P, T0, dur_h, cad = 10.0, 100.0, 3.0, 29.4 / 1440.0
+    rng = np.random.default_rng(7)
+    t = np.arange(95.0, 135.0, cad)
+    t = t[~((t > 118.0) & (t < 120.3)) & ~((t > 128.0) & (t < 130.5))
+          & ~((t > 130.67) & (t < 132.0))]
+    x = (t - T0 + 0.5 * P) % P - 0.5 * P                  # time from its transit
+    flux = 1.0 + 0.01 * x + 0.012 * x ** 2 + rng.normal(0.0, 4e-4, t.size)
+    flux[np.abs(x) < 0.5 * dur_h / 24.0] -= 6e-4
+    tw, fw, ew = prep.extract_near_transit_data(
+        t, flux, np.full(t.size, 4e-4), P, T0, dur_h)
+    return prep.segment_epochs(tw, fw, ew, P, T0, dur_h), dur_h
+
+
+def _reference_cv_scores(ed, i, dur_h, n_folds=10, max_order=5):
+    """The pre-0.1.59 cross-validation of one epoch, written out: ten
+    contiguous out-of-transit folds, nothing else."""
+    from turin import prep
+
+    m = ed["mask"][i].astype(bool)
+    t, f, e = (ed[k][i][m] for k in ("times_padded", "flux_padded",
+                                     "ferr_padded"))
+    x = prep.basis_x(ed)[i][m]
+    oot = np.where(np.abs(t - ed["epoch_centers"][i]) > dur_h / 24.0)[0]
+    folds = np.array_split(oot, n_folds)
+    logL = np.zeros(max_order + 1)
+    for K in range(max_order + 1):
+        for k in range(n_folds):
+            tr = np.concatenate([folds[j] for j in range(n_folds) if j != k])
+            L = prep.legendre_matrix(x[tr], K)
+            w = 1.0 / e[tr] ** 2
+            c = np.linalg.solve((L.T * w) @ L + 1e-10 * np.eye(K + 1),
+                                (L.T * w) @ (f[tr] - 1.0))
+            r = (f[folds[k]] - 1.0 - prep.legendre_matrix(x[folds[k]], K) @ c) \
+                / e[folds[k]]
+            logL[K] += -0.5 * np.sum(r ** 2)
+    return logL - logL[0]
+
+
+def test_short_epochs_are_cross_validated_not_given_a_constant_baseline():
+    """An epoch with fewer than 2*n_folds out-of-transit points used to take
+    K=0 outright. On KOI-7706.01 that left four one-sided epochs with 1-2%
+    ramps ~3,300 log-likelihood units short, and the TTV fit read the ramps
+    as transits (SNR 27 for a 0.07%-deep planet). They are cross-validated
+    now, with fewer folds; epochs with >= 20 points are untouched."""
+    from turin import prep
+
+    ed, dur_h = _ramp_light_curve()
+    cv = prep.cv_orders(ed, dur_h)
+    m = ed["mask"] > 0
+    d = np.abs(ed["times_padded"] - ed["epoch_centers"][:, None])
+    n_oot = ((d > dur_h / 24.0) & m).sum(axis=1)
+    short = np.where(n_oot < 20)[0]
+    assert list(short) == [2, 3], n_oot
+    assert np.all(cv["orders"][short] >= 1), (n_oot, cv["orders"])
+
+    # an order the training folds cannot determine is excluded, not scored
+    # 0 (which beats every real score and once gave a 7-point epoch K=5)
+    sliver = int(np.argmin(n_oot))
+    assert n_oot[sliver] < 8
+    assert np.all(np.isinf(cv["scores"][sliver, 4:]))
+    assert cv["orders"][sliver] <= 3
+
+    # >= 20 out-of-transit points: the same ten folds as before, to the bit
+    for i in np.where(n_oot >= 20)[0]:
+        np.testing.assert_allclose(
+            cv["scores"][i], _reference_cv_scores(ed, i, dur_h), rtol=1e-12)

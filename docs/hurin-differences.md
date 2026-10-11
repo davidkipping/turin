@@ -291,6 +291,28 @@ Two data-handling differences, neither in the model:
   coordinate across its own data (`prep.basis_x`). Same polynomials, same
   profile likelihood (float64 identical to 1e-12); only the coefficients
   differ from hurin's, by a change of basis.
+- **Baseline order on short epochs (turin >= 0.1.59).** hurin's
+  `optimize_legendre_orders` gives an epoch with fewer than `2 * n_folds` = 20
+  out-of-transit points order 0, a constant baseline, without
+  cross-validating it; turin did the same through 0.1.58. With the epoch rule
+  above that is no longer rare: one-sided windows (a quarter split, a transit
+  at the light curve's edge) and gap-cut ones are fitted with as few as 2
+  points. On KOI-7706.01, a variable star with 1-2% ramps across a window,
+  four such epochs (6-25 points) sat at log-likelihoods of -47 to -1698
+  against ~0 for an adequate order: 3,324 units in all, LinEph unconverged at
+  the draw cap, and the TTV fit reading the ramps as transits (SNR 27 and 21
+  for a 0.07%-deep planet). turin now cross-validates such an epoch with
+  `n_oot // 2` folds (at least 2 points each; below 4 points, order 0), and
+  excludes any order its training folds cannot determine (a 6-point epoch
+  would otherwise have scored order 5 best: an unscored order counted as 0,
+  which beats every real, negative, score). Epochs with 20 or more points
+  use the same ten folds as before, to the bit
+  (`test_short_epochs_are_cross_validated_not_given_a_constant_baseline`).
+  The hurin parity fixtures have no epoch that short, so
+  `test_optimize_legendre_orders` still compares like with like. Of the first
+  91 Kepler targets six were affected (KOI-7706.01, 3444.02, 719.03, 250.04,
+  854.01, 3283.03; log-likelihood changes of +3324, +298, +282, +15 and +6 at
+  the stored ML shape, the last not replayable). MODEL_REV 7 -> 8.
 - **One star.** turin restricts MAST results to the host's KIC/TIC
   (0.1.26). hurin downloads every row of the name search, which for
   KOI-7592.01 includes a neighbouring star; see
