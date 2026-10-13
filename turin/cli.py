@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 
 from . import __version__
-from .model import B_PRIORS, GEOMETRIES
+from .model import B_PRIORS, GEOMETRIES, LAWS
 from .params import LD_MODES
 from .profile import PROFILE_MODES
 
@@ -32,6 +32,7 @@ MODES = ("lineph", "ttv")
 SAMPLERS = ("chees", "ensemble")
 GIBBSGRID = ("on", "off")
 LD_CHOICES = tuple(LD_MODES)
+LAW_CHOICES = tuple(LAWS)
 
 _BOOL_FLAGS = {
     "--version": "show_version",
@@ -66,6 +67,7 @@ _VALUE_FLAGS = {
     "--seed": "seed",
     "--gibbsgrid": "gibbsgrid",
     "--ld": "ld",
+    "--law": "law",
 }
 
 USAGE = f"""turin {__version__} — GPU transit fitting for Kepler and TESS
@@ -118,7 +120,17 @@ usage: turin --KOI-448.02 [options]
                           (collapsed Gibbs): same posterior, two fewer
                           sampled dimensions, ~2.2x the per-evaluation
                           memory. LinEph only (--modes=lineph); needs
-                          --PL=exact or auto and circular geometry
+                          --PL=exact or auto, circular geometry and the
+                          quadratic law
+  --law=quadratic|hybrid4 limb-darkening law. quadratic (default) samples
+                          Kipping's q1, q2. hybrid4 is elome's four-weight
+                          rational law (LDhybrid v1.0; SquishierPlanet
+                          measures a worst-case light-curve error of 1.0 ppm
+                          on PHOENIX J-band stars, against 65 for quadratic),
+                          sampled through q1..q4 in the unit cube, mapped
+                          uniformly onto its weight simplex (SquishierPlanet's
+                          stick-breaking); the weights w1..w4 are reported as
+                          derived. Needs circular geometry and --ld=sampled
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -165,6 +177,7 @@ class Args:
     seed: int = 0
     gibbsgrid: str = "on"
     ld: str = "sampled"
+    law: str = "quadratic"
     modes: tuple = MODES
     cache_dir: str | None = None
     outdir: str | None = None
@@ -224,14 +237,33 @@ def parse_args(argv=None):
     _choice("geometry", args.geometry, GEOMETRIES)
     _choice("gibbsgrid", args.gibbsgrid, GIBBSGRID)
     _choice("ld", args.ld, LD_CHOICES)
+    _choice("law", args.law, LAW_CHOICES)
     for mode in args.modes:
         _choice("modes", mode, MODES)
-    problem = collapsed_ld_problem(args)
+    problem = law_problem(args) or collapsed_ld_problem(args)
     if problem:
         _fail(problem)
     if args.tag is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
         _fail(f"--tag={args.tag!r} must match [A-Za-z0-9_-]+")
     return args
+
+
+def law_problem(args):
+    """Why this combination cannot run with a non-quadratic ``--law``, or
+    None. Checked here and again by the pipeline, as
+    :func:`collapsed_ld_problem` is."""
+    law = getattr(args, "law", "quadratic")
+    if law == "quadratic":
+        return None
+    if getattr(args, "ld", "sampled") == "collapsed":
+        return (f"--law={law} needs --ld=sampled: collapsed limb darkening is "
+                "implemented for the quadratic law only (its hybrid4 form "
+                "needs a simplex integral turin does not have yet)")
+    if args.geometry != "circular":
+        return (f"--law={law} needs --geometry=circular: chord is for hurin "
+                "parity, and hurin has only the quadratic law; the hybrid "
+                "laws run on elome's tau kernel")
+    return None
 
 
 def collapsed_ld_problem(args):

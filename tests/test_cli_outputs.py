@@ -81,6 +81,10 @@ def test_modes_subset():
     (["--KOI-1.01", "--KOI-2.01"], "more than one target"),
     (["KOI-1.01"], "unrecognized"),
     (["--KOI-1.01", "--ld=profile"], "not one of"),
+    (["--KOI-1.01", "--law=hybrid5"], "not one of"),
+    (["--KOI-1.01", "--law=hybrid4", "--ld=collapsed", "--modes=lineph"],
+     "--ld=sampled"),
+    (["--KOI-1.01", "--law=hybrid4", "--geometry=chord"], "circular"),
     # collapsed limb darkening: each refusal names its reason
     (["--KOI-1.01", "--ld=collapsed", "--modes=lineph", "--PL=ratio"],
      "envelope theorem"),
@@ -101,6 +105,14 @@ def test_seed_accepts_zero_its_own_default(seed):
     # could not be named explicitly (0.1.45)
     assert cli.parse_args(["--KOI-1.01", f"--seed={seed}"]).seed == seed
     assert cli.parse_args(["--KOI-1.01"]).seed == 0
+
+
+def test_law_flag_defaults_to_quadratic_and_accepts_hybrid4():
+    assert cli.parse_args(["--KOI-1.01"]).law == "quadratic"
+    a = cli.parse_args(["--KOI-1.01", "--law=hybrid4"])
+    assert a.law == "hybrid4" and a.modes == ("lineph", "ttv")
+    assert outputs.ResumeState.law == "quadratic"
+    assert "law" in outputs.ResumeState.GUARDS
 
 
 @pytest.mark.parametrize("pl", ["auto", "exact"])

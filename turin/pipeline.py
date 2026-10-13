@@ -39,9 +39,16 @@ HEAVY_EVERY_S = 1200
 PARAM_LABELS = {
     "dP": "$P$ (d)", "dtau0": r"$\tau_0$", "k": "$k = R_p/R_\\star$",
     "b": "$b$", "T14": "$T_{14}$ (d)", "q1": "$q_1$",
-    "q2": "$q_2$",
+    "q2": "$q_2$", "q3": "$q_3$", "q4": "$q_4$",
+    "w1": "$w_1$", "w2": "$w_2$", "w3": "$w_3$", "w4": "$w_4$",
 }
 
+
+
+def _model_ld_names(law):
+    from .model import ld_names
+
+    return ld_names(law)
 
 def _label(name):
     if name in PARAM_LABELS:
@@ -65,12 +72,11 @@ def _gibbsgrid(mode, args):
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
-    if getattr(args, "ld", "sampled") == "collapsed":
-        from .cli import collapsed_ld_problem
+    from .cli import collapsed_ld_problem, law_problem
 
-        problem = collapsed_ld_problem(args)
-        if problem:
-            raise SystemExit(f"turin: {problem}")
+    problem = law_problem(args) or collapsed_ld_problem(args)
+    if problem:
+        raise SystemExit(f"turin: {problem}")
     _outputs.set_run_status("")
     _outputs.set_run_tag(args.tag)
     target = args.target
@@ -160,7 +166,8 @@ def replot(args, prepared, outdir, *, log=print):
             continue
         state.check(b_prior=args.b_prior, geometry=args.geometry,
                     ttv_max=args.ttv_max_days, gibbsgrid=_gibbsgrid(mode, args),
-                    ld=getattr(args, "ld", "sampled"))
+                    ld=getattr(args, "ld", "sampled"),
+                    law=getattr(args, "law", "quadratic"))
         chains_path = _outputs.product_path(outdir, target, mode, "chains",
                                             "csv.tar.gz")
         summary_path = _outputs.product_path(outdir, target, mode, "summary",
@@ -275,32 +282,34 @@ def _mode_layout(mode, args, prepared, centering, epoch_data):
                 np.minimum(-lo, hi) - 0.55 * (prepared.eph["duration"] / 24.0),
                 2.0 * prepared.cadence_days)
         return _params.ttv_layout(prepared.eph, centering, tau_half,
-                                  b_prior=args.b_prior), tau_half
+                                  b_prior=args.b_prior,
+                                  law=getattr(args, "law", "quadratic")), tau_half
     return _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
-                                 ld=getattr(args, "ld", "sampled")), None
+                                 ld=getattr(args, "ld", "sampled"),
+                                 law=getattr(args, "law", "quadratic")), None
 
 
-def transit_snrs(prepared, centering, shape, *, b_prior="transiting"):
+def transit_snrs(prepared, centering, shape, *, b_prior="transiting",
+                 law="quadratic"):
     """Expected detection SNR of each epoch's transit, ``sqrt(sum (d/sigma)^2)``.
 
     ``d`` is the transit's own depth at each real point (the model with its
-    baseline divided out) for ``shape`` -- a dict of ``k, beta, T14, q1,
-    q2`` -- on the input ephemeris, and ``sigma`` the point's error. This is
+    baseline divided out) for ``shape`` -- a dict of ``k, beta, T14`` and
+    ``law``'s limb-darkening coordinates -- on the input ephemeris, and ``sigma`` the point's error. This is
     the matched-filter SNR the epoch would have on noiseless data: it counts
     the data actually present, so a transit cut by a gap or a window edge
     scores lower, and one that fell in a gap scores 0. Returns
     ``(n_epochs,)``.
     """
     ed = prepared.epoch_data
-    layout = _params.lineph_layout(prepared.eph, b_prior=b_prior)
+    layout = _params.lineph_layout(prepared.eph, b_prior=b_prior, law=law)
     # the baseline is divided out, so its order is irrelevant: constant
     orders = np.zeros(ed["n_epochs"], dtype=int)
     _, _, lp, _ = _likelihood.build_target(
         layout, centering, ed, orders, profile_mode="exact",
         num_resample=prepared.num_resample,
         exposure_time=prepared.exposure_time, n_chains_hint=4, fp64=False)
-    v = np.array([0.0, 0.0] + [float(shape[n]) for n in
-                               ("k", "beta", "T14", "q1", "q2")])
+    v = np.array([0.0, 0.0] + [float(shape[n]) for n in layout.names[2:]])
     model, base, _ = _ml_model(lp, v, False)
     mask = np.asarray(ed["mask"]) > 0
     dev = np.where(mask, model / np.where(base != 0, base, 1.0) - 1.0, 0.0)
@@ -330,13 +339,15 @@ def _ttv_snr_gate(args, prepared, centering, outdir, lineph_ml, *, log,
     if not shape:
         saved = _outputs.load_resume(outdir, target, "lineph")
         shape = saved.ml_params if saved is not None else None
-    if not shape or not all(n in shape for n in
-                            ("k", "beta", "T14", "q1", "q2")):
+    law = getattr(args, "law", "quadratic")
+    need = ("k", "beta", "T14") + _model_ld_names(law)
+    if not shape or not all(n in shape for n in need):
         log("  per-transit SNR gate not evaluated: no LinEph best fit for "
             "this lineage (run --modes=lineph first, or --TTVsnr=0 to "
             "silence this)")
         return False
-    snr = transit_snrs(prepared, centering, shape, b_prior=args.b_prior)
+    snr = transit_snrs(prepared, centering, shape, b_prior=args.b_prior,
+                       law=law)
     covered = snr[snr > _SNR_COVERED]
     if covered.size == 0:
         typical = 0.0
@@ -408,7 +419,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             profile_mode=(None if args.profile_mode == "auto"
                           else args.profile_mode),
             gibbsgrid=_gibbsgrid(mode, args),
-            ld=getattr(args, "ld", "sampled"))
+            ld=getattr(args, "ld", "sampled"),
+            law=getattr(args, "law", "quadratic"))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -481,7 +493,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         log("  seeding transit times by template sweep...")
         seeds, rival_gap, _, _ = _seeding.template_sweep_taus(
             epoch_data, centering, lp.design, tau_half=tau_half,
-            k=s["k"], b=b0, T14=s["T14"], q1=s["q1"], q2=s["q2"],
+            k=s["k"], b=b0, T14=s["T14"],
+            q=tuple(s[n] for n in layout.ld_names), law=layout.law,
             period=layout.P_ref, num_resample=prepared.num_resample,
             exposure_time=prepared.exposure_time,
             profile_mode=provisional, geometry=args.geometry)
@@ -720,6 +733,19 @@ def _ml_model(lp, v_ml, collapsed):
     return model, baseline, q_ml
 
 
+
+def _ld_weight_draws(layout, phys, names):
+    """``(w names, (n, n_w) draws)`` of a non-quadratic law's physical
+    weights, from its sampled ``q``; ``([], None)`` for the quadratic law,
+    whose ``q1, q2`` are the reported coordinates as in hurin."""
+    if layout.law == "quadratic":
+        return [], None
+    from .model import ld_names, ld_weights_np
+
+    qn = ld_names(layout.law)
+    q = np.column_stack([phys[:, names.index(n)] for n in qn])
+    return [f"w{j + 1}" for j in range(len(qn))], ld_weights_np(q, layout.law)
+
 def _ml_row(results, lp, transform):
     """The maximum-likelihood draw over every draw, in model space.
 
@@ -786,14 +812,19 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     derived = _outputs.summarize(
         np.column_stack([b_draws, rho]), ["b", "log10_rho"])
     summary.update(derived)
+    # hybrid4: the physical shape weights w, derived from the sampled q
+    # (uniform on the cube -> uniform on the simplex), reported beside them
+    w_names, w_draws = _ld_weight_draws(layout, phys, names)
+    if w_names:
+        summary.update(_outputs.summarize(w_draws, w_names))
 
     _outputs.export_summary(outdir, target, mode, summary, log=log)
     _outputs.export_logrho(outdir, target, mode, rho, log=log)
 
     if heavy:
-        cols = list(names) + ["b", "log10_rho", "loglike"]
+        cols = list(names) + ["b", "log10_rho"] + w_names + ["loglike"]
         arrays = [phys[:, i] for i in range(phys.shape[1])] + [
-            b_draws, rho,
+            b_draws, rho] + [w_draws[:, j] for j in range(len(w_names))] + [
             np.asarray(results.get_log_prob(thin=thin, flat=True),
                        dtype=np.float64) + lp.log_const]
         _outputs.export_chains(outdir, target, mode, cols, arrays, thin=thin,
@@ -805,9 +836,9 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     v_ml_named = v_ml if q_ml is None else np.concatenate([v_ml, q_ml])
     _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
 
+    keep = ("k", "beta", "T14") + _model_ld_names(layout.law)
     state_holder["ml_params"] = {
-        n: float(v_ml_named[i]) for i, n in enumerate(names)
-        if n in ("k", "beta", "T14", "q1", "q2")}
+        n: float(v_ml_named[i]) for i, n in enumerate(names) if n in keep}
 
     # ---- figures
     if heavy:
@@ -837,7 +868,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         b_prior=layout.b_prior, profile_mode=pl_mode,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
-        ld=layout.ld,
+        ld=layout.ld, law=layout.law,
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
         n_durations=float(prepared.n_durations),
         legendre_orders=np.asarray(orders), exposure_time=prepared.exposure_time,
@@ -867,7 +898,7 @@ def _mid_times_absolute(mode, v_ml, layout, centering):
     d_arr = np.asarray(centering["d_arr"], dtype=np.float64)
     if mode == "lineph":
         return centers + (v_ml[1] + n_arr * v_ml[0] + d_arr)
-    return centers + (v_ml[5:] + d_arr)
+    return centers + (v_ml[layout.n_shape:] + d_arr)
 
 
 def _epoch_snr(lp, layout, v_ml):

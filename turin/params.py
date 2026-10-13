@@ -17,6 +17,11 @@ TTV (5 + one per epoch)
     an offset from that epoch's predicted time. The period is held at the
     recentred ephemeris value, as in hurin.
 
+Under ``--law=hybrid4`` the limb darkening is ``q1 .. q4`` instead of
+``q1, q2`` (:func:`turin.model.ld_names`), so LinEph samples 9 and TTV
+``7 + one per epoch``; :attr:`ParamLayout.n_shape` is where the epoch times
+start.
+
 ``b`` is sampled as a fraction of its k-dependent upper bound rather than
 directly, which is how a fixed box in model space can represent hurin's
 conditional-uniform (b, k) construction. The area and taper terms that make
@@ -31,7 +36,7 @@ from dataclasses import dataclass, field
 import mlx.core as mx
 import numpy as np
 
-from .model import B_PRIORS
+from .model import B_PRIORS, LAWS, ld_names
 
 #: Half-width of the dP and dtau0 priors, in days. hurin's values; kept
 #: because a uniform prior shifted with its bounds has identical
@@ -77,6 +82,21 @@ class ParamLayout:
     #: the likelihood class, so a 5-column layout can never reach the default
     #: class (whose ``unpack`` would slice an empty column, not raise).
     ld: str = "sampled"
+    #: limb-darkening law (:data:`turin.model.LAWS`); it sets which
+    #: coordinates the layout carries (:func:`turin.model.ld_names`)
+    law: str = "quadratic"
+
+    @property
+    def ld_names(self) -> tuple:
+        """The law's sampled limb-darkening coordinates in this layout
+        (none under ``--ld=collapsed``)."""
+        return tuple(n for n in ld_names(self.law) if n in self.names)
+
+    @property
+    def n_shape(self) -> int:
+        """Columns before the epoch times: ``k, beta, T14`` plus the limb
+        darkening (5 quadratic, 7 hybrid4); a TTV vector's ``dtau`` start."""
+        return 3 + len(self.ld_names)
 
     @property
     def dim(self) -> int:
@@ -106,8 +126,10 @@ class ParamLayout:
         return anvil.Transform(self.specs())
 
 
-def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None):
-    """Bounds for the five shape parameters, in hurin's order after (dP, dtau0)."""
+def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None, law="quadratic"):
+    """Bounds for the shape parameters, in hurin's order after (dP, dtau0):
+    ``k, beta, T14`` and the law's limb-darkening coordinates, each uniform
+    on [0, 1] (Kipping's ``q1, q2``; hybrid4's stick-breaking ``q1..q4``)."""
     if T14_max is None:
         # hurin: three times the archive duration, which is generous but
         # finite; callers may override from a physical density limit
@@ -116,26 +138,30 @@ def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None):
         ("k", k_min, k_max),
         ("beta", 0.0, 1.0),
         ("T14", 0.0, float(T14_max)),
-        ("q1", 0.0, 1.0),
-        ("q2", 0.0, 1.0),
-    )
+    ) + tuple((n, 0.0, 1.0) for n in ld_names(law))
 
 
-def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled"):
+def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
+                  law="quadratic"):
     """Parameter layout for the linear-ephemeris fit.
 
     ``ld="collapsed"`` drops ``q1, q2`` from the sampled vector: the limb
     darkening is integrated out of the log-density instead
-    (:class:`turin.ldmarg.MarginalLDLogProb`).
+    (:class:`turin.ldmarg.MarginalLDLogProb`). Quadratic law only.
     """
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
     if ld not in LD_MODES:
         raise ValueError(f"unknown ld mode {ld!r}; expected {LD_MODES}")
+    if law not in LAWS:
+        raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
+    if ld == "collapsed" and law != "quadratic":
+        raise ValueError("--ld=collapsed is implemented for the quadratic "
+                         f"law only, not {law}")
     rows = [("dP", -DP_HALF, DP_HALF), ("dtau0", -DTAU0_HALF, DTAU0_HALF)]
-    rows += list(_shape_bounds(eph, T14_max=T14_max))
+    rows += list(_shape_bounds(eph, T14_max=T14_max, law=law))
     if ld == "collapsed":
-        rows = [r for r in rows if r[0] not in ("q1", "q2")]
+        rows = [r for r in rows if r[0] not in ld_names(law)]
     names = tuple(r[0] for r in rows)
     lo = np.array([r[1] for r in rows], dtype=np.float64)
     hi = np.array([r[2] for r in rows], dtype=np.float64)
@@ -145,10 +171,11 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled"):
     return ParamLayout(mode="lineph", names=names, lo=lo, hi=hi,
                        report_offset=off, b_prior=b_prior,
                        P_ref=float(eph["period"]),
-                       tau0_ref=float(eph["epoch"]), ld=ld)
+                       tau0_ref=float(eph["epoch"]), ld=ld, law=law)
 
 
-def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None):
+def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
+               law="quadratic"):
     """Parameter layout for the per-epoch-timing fit.
 
     ``tau_half`` is the half-width of each epoch's timing prior, in days:
@@ -156,7 +183,9 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None):
     """
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
-    rows = list(_shape_bounds(eph, T14_max=T14_max))
+    if law not in LAWS:
+        raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
+    rows = list(_shape_bounds(eph, T14_max=T14_max, law=law))
     n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
     centers = np.asarray(centering["centers_abs"], dtype=np.float64)
     tau_half = np.broadcast_to(np.asarray(tau_half, dtype=np.float64),
@@ -180,7 +209,7 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None):
         mode="ttv", names=names, lo=np.array(lo), hi=np.array(hi),
         report_offset=np.array(off), b_prior=b_prior,
         P_ref=float(eph["period"]), tau0_ref=float(eph["epoch"]),
-        n_arr=n_arr, centers_abs=centers)
+        n_arr=n_arr, centers_abs=centers, law=law)
 
 
 def bk_log_prior(beta, k, b_prior="transiting"):

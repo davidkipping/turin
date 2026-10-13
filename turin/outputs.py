@@ -338,9 +338,13 @@ class ResumeState:
     #: The two are different targets in different dimensions, so a lineage
     #: can never switch between them.
     ld: str = "sampled"
+    #: the limb-darkening law (``--law``). Defaulted to "quadratic" because
+    #: every state written before it existed used that law; a lineage can
+    #: never switch law (different parameters, different model).
+    law: str = "quadratic"
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
-              "gibbsgrid", "ld")
+              "gibbsgrid", "ld", "law")
 
     def check_model_rev(self, log=None):
         """Refuse to continue chains sampled under an older likelihood.

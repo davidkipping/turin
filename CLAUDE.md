@@ -298,6 +298,44 @@ interior split of a continuous integrand cancels), so an FD that recomputes
 them measures the quadrature's parameter sensitivity instead — and an FD
 straddling a contact is wrong at any step size.
 
+### The limb-darkening law (`--law`, 0.1.61)
+
+`--law=quadratic` (default, Kipping `q1, q2`) or `--law=hybrid4`: the
+four-weight rational law of LDhybrid v1.0 as elome and SquishierPlanet
+define it, sampled as SquishierPlanet does, through `q1..q4` uniform on
+[0, 1] and stick-broken onto the simplex `w_j >= 0, sum w_j <= 1`
+(`model.ld_weights` -> `elome.ld.simplex_from_q`; `ld_weights_np` is the
+float64 replica). Uniform `q` gives uniform `w` (a flat 5-component
+Dirichlet; checked by moments). The law lives on the layout (`ParamLayout.law`,
+`.ld_names`, `.n_shape` = 3 + number of LD coordinates), and everything
+downstream reads it from there: `likelihood.unpack` takes columns **by
+name**, and every former hard-coded `5:` (TTV times, grid-Gibbs, seeding,
+ML mid-times) is `layout.n_shape`. `transit_flux_dev(q=, law=)` keeps its
+`q1=`/`q2=` form for the quadratic law, whose path is untouched: the
+refactor left KOI-518.02's LinEph (sampled and collapsed) and TTV
+log-density, gradient and per-epoch terms **bitwise identical**, hence no
+`MODEL_REV` bump; hybrid4 is a new model behind the `law` resume guard.
+
+Verified against references that do not share turin's route: elome's
+`TransitModel` frontend with the contact rule (fp64 1e-13, fp32 2e-6,
+grazing included); the stick-breaking written out in the test and
+SquishierPlanet's `simplex_from_q` (1e-15); float32 log-density and
+gradient against float64; the per-epoch factorisation and a grid-Gibbs
+sweep that leaves all 7 shape columns untouched; and a slow 256-chain
+injection-recovery of a hybrid4 truth (every parameter within 3 sigma).
+elome's and SquishierPlanet's hybrid4 light curves agree to 1e-16 (same
+poles, eps = 0.0286, 0.3858).
+
+Products: `q1..q4` are sampled rows (R-hat, ESS); `w1..w4` are derived rows
+and chain columns, placed before `loglike`. Refused, CLI and pipeline:
+`--ld=collapsed` (quadratic only -- hybrid4's needs the 4-simplex integral,
+GHK in SquishierPlanet's prototype) and `--geometry=chord` (hurin parity;
+hurin has only quadratic). This is **Step 1 of SquishierPlanet's
+`docs/upstream/turin_oblate_prompt.md`**, for hybrid4 only, built on the
+user's request; Step 2 (collapsed hybrid LD, which that brief recommends as
+hybrid4's default) and Step 3 (oblate planets) are not done, and hybrid2/5
+are not exposed.
+
 ### Collapsed limb darkening (`--ld=collapsed`, `ldmarg.py`)
 
 Opt-in, LinEph only. It is **collapsed Gibbs sampling**: the sampler targets

@@ -113,6 +113,81 @@ def test_lineph_pipeline_writes_every_product(tmp_path, fake_target):
     assert len(body) == 2 + 32 * 40
 
 
+def _summary_rows(path):
+    rows = {}
+    with open(path) as fh:
+        header = fh.readline().strip().split(",")
+        for line in fh:
+            if not line.startswith("#"):
+                f = line.rstrip("\n").split(",")
+                rows[f[0]] = dict(zip(header, f))
+    return rows
+
+
+def test_hybrid4_writes_its_weights_in_both_modes(tmp_path, fake_target):
+    """--law=hybrid4 samples q1..q4 and reports the physical weights
+    w1..w4 as derived rows and columns, in LinEph and TTV; the TTV epoch
+    times start after the four LD columns."""
+    logs = []
+    assert pipeline.run(_args(tmp_path, modes=("lineph", "ttv"),
+                              law="hybrid4"), log=logs.append) in FINISHED
+    out = str(tmp_path)
+    for mode, first in (("lineph", ["dP", "dtau0", "k", "beta", "T14"]),
+                        ("ttv", ["k", "beta", "T14"])):
+        rows = _summary_rows(os.path.join(out, f"KOI-1.01_{mode}_summary.csv"))
+        names = list(rows)
+        assert names[:len(first) + 4] == first + ["q1", "q2", "q3", "q4"]
+        for q in ("q1", "q2", "q3", "q4"):
+            assert rows[q]["R-hat"] != "" and 0 < float(rows[q]["Median"]) < 1
+        w = [float(rows[f"w{j}"]["Median"]) for j in range(1, 5)]
+        assert all(rows[f"w{j}"]["R-hat"] == "" for j in range(1, 5))
+        assert all(x >= 0 for x in w)
+
+        with tarfile.open(os.path.join(out, f"KOI-1.01_{mode}_chains.csv.tar.gz")) as tar:
+            body = tar.extractfile(tar.getmembers()[0]).read().decode().splitlines()
+        cols = body[0].split(",")
+        assert cols[-7:] == ["b", "log10_rho", "w1", "w2", "w3", "w4",
+                             "loglike"]
+        d = np.array([[float(x) for x in r.split(",")] for r in body[2:]])
+        q = d[:, [cols.index(f"q{j}") for j in range(1, 5)]]
+        wd = d[:, [cols.index(f"w{j}") for j in range(1, 5)]]
+        np.testing.assert_allclose(wd, M.ld_weights_np(q), rtol=1e-9)
+        assert np.all(wd >= 0) and np.all(wd.sum(axis=1) <= 1 + 1e-12)
+        if mode == "ttv":
+            assert cols[7].startswith("dtau_")
+
+        state = outputs.load_resume(out, "KOI-1.01", mode)
+        assert state.law == "hybrid4"
+        assert {"q1", "q2", "q3", "q4"} <= set(state.ml_params)
+    # the transit-time product has every epoch
+    assert os.path.exists(os.path.join(out, "KOI-1.01_ttv_times.csv"))
+
+    # --replot rebuilds the hybrid4 layout and replays its best log-density
+    logs = []
+    args = _args(tmp_path, modes=("lineph", "ttv"), law="hybrid4")
+    args.replot = True
+    assert pipeline.run(args, log=logs.append) == 0
+    assert sum("replotting" in l for l in logs) == 2, logs
+
+
+def test_a_lineage_never_switches_law(tmp_path, fake_target):
+    assert pipeline.run(_args(tmp_path), log=lambda m: None) in FINISHED
+    with pytest.raises(SystemExit, match="law='quadratic'"):
+        pipeline.run(_args(tmp_path, law="hybrid4", extend1=True),
+                     log=lambda m: None)
+
+
+@pytest.mark.parametrize("over,pattern", [
+    (dict(law="hybrid4", ld="collapsed"), "--ld=sampled"),
+    (dict(law="hybrid4", geometry="chord"), "circular"),
+])
+def test_hybrid4_refusals_reach_the_pipeline(tmp_path, fake_target, over,
+                                            pattern):
+    with pytest.raises(SystemExit, match=pattern):
+        pipeline.run(_args(tmp_path, **over), log=lambda m: None)
+    assert not any(tmp_path.iterdir())
+
+
 def test_collapsed_lineph_writes_hurin_products(tmp_path, fake_target):
     """--ld=collapsed samples 5 parameters but writes hurin's products
     unchanged: q1, q2 rows and columns come from exact conditional draws."""

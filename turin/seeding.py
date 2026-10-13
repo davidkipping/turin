@@ -65,7 +65,8 @@ def _epoch_time_extent(epoch_data):
 
 
 def template_sweep_taus(epoch_data, centering, design, *, tau_half,
-                        k, b, T14, q1, q2, period, num_resample=1,
+                        k, b, T14, period, q1=None, q2=None, q=None,
+                        law="quadratic", num_resample=1,
                         exposure_time=0.0, n_grid=N_SWEEP_GRID,
                         profile_mode="exact", geometry="circular",
                         dtype=mx.float32):
@@ -117,9 +118,12 @@ def template_sweep_taus(epoch_data, centering, design, *, tau_half,
     col = lambda v: mx.full((n_grid, 1), float(v), dtype=dtype)
     dtau = mx.array(np.ascontiguousarray(grids.T), dtype=dtype)  # (n_grid, E)
     mid = dtau + mx.array(np.ascontiguousarray(d_arr), dtype=dtype)[None, :]
+    if q is None:
+        q = (q1, q2)
     f_dev = _model.transit_flux_dev(
-        grid, mid=mid, k=col(k), b=col(b), T14=col(T14), q1=col(q1),
-        q2=col(q2), period=col(period), geometry=geometry)
+        grid, mid=mid, k=col(k), b=col(b), T14=col(T14),
+        q=tuple(col(x) for x in q), law=law, period=col(period),
+        geometry=geometry)
     c = _profile.solve_coefficients(design, f_dev, profile_mode)
     resid = _profile.residual_dev(design, f_dev, c)
     # (n_grid, n_epochs) -> per-epoch rows
@@ -260,9 +264,11 @@ def default_shape_start(eph, layout):
     else:
         beta0 = b0 / (1.0 + k0)
     T14_hi = float(layout.hi[layout.index("T14")])
+    # every limb-darkening coordinate starts mid-box: Kipping's (0.5, 0.5),
+    # and for hybrid4 a point well inside the weight simplex
     return {"k": k0, "beta": float(np.clip(beta0, 0.01, 0.95)),
             "T14": float(np.clip(T14_0, 1e-4, 0.95 * T14_hi)),
-            "q1": 0.5, "q2": 0.5}
+            **{n: 0.5 for n in _model.ld_names(layout.law)}}
 
 
 def initial_model_vector(layout, eph, *, shape=None, dtau=None, dP=0.0,
@@ -275,7 +281,7 @@ def initial_model_vector(layout, eph, *, shape=None, dtau=None, dP=0.0,
         # by name, so a layout without q1, q2 (--ld=collapsed) needs no case
         vals = dict(s, dP=dP, dtau0=dtau0)
         return np.array([vals[n] for n in layout.names], dtype=np.float64)
-    base = np.array([s["k"], s["beta"], s["T14"], s["q1"], s["q2"]],
+    base = np.array([s[n] for n in layout.names[:layout.n_shape]],
                     dtype=np.float64)
     n_ep = layout.n_epochs
     taus = np.zeros(n_ep) if dtau is None else np.asarray(dtau, dtype=np.float64)
@@ -283,6 +289,6 @@ def initial_model_vector(layout, eph, *, shape=None, dtau=None, dP=0.0,
         raise ValueError(f"dtau has shape {taus.shape}, expected ({n_ep},)")
     # keep strictly inside the box: the transform maps the open interval, and
     # a value exactly on the bound is +-inf in unconstrained space
-    lo, hi = layout.lo[5:], layout.hi[5:]
+    lo, hi = layout.lo[layout.n_shape:], layout.hi[layout.n_shape:]
     taus = np.clip(taus, 0.98 * lo, 0.98 * hi)
     return np.concatenate([base, taus])

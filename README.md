@@ -88,6 +88,7 @@ analytically inside every log-density evaluation — a profile likelihood — so
 | `lineph` | `dP, dtau0, k, beta, T14, q1, q2` | period and epoch as offsets from the recentred ephemeris |
 | `ttv` | `k, beta, T14, q1, q2` + one `dtau` per transit | period fixed; timings seeded by a template sweep |
 | `lineph --ld=collapsed` | `dP, dtau0, k, beta, T14` | limb darkening integrated out; `q1, q2` drawn from their conditional (see below) |
+| either, `--law=hybrid4` | `q1, q2, q3, q4` in place of `q1, q2` | the hybrid4 law; weights `w1..w4` derived (see below) |
 
 `beta` is the impact parameter as a fraction of its k-dependent bound, which
 is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
@@ -156,6 +157,34 @@ The calibration to the posterior width is the part that matters. Judged on a
 ball much wider than the posterior, `ratio` looks catastrophic; judged on one
 much narrower, everything passes. Only at the posterior's own scale does the
 verdict mean "this would distort the answer".
+
+### The limb-darkening law (`--law`)
+
+`--law=quadratic`, the default, is the quadratic law sampled through
+Kipping's (2013) `q1, q2`. `--law=hybrid4` is the four-weight rational law
+of LDhybrid v1.0, as defined in [Elómë](https://github.com/davidkipping/elome)
+and SquishierPlanet: even powers of μ plus two double poles,
+`I/I(1) = 1 - sum_j w_j T_j(mu)`. On PHOENIX J-band stars SquishierPlanet
+measures its worst-case light-curve error at 1.0 ppm, against 65 ppm for
+the quadratic law. Elómë evaluates it on the same tau kernel, with the same
+in-kernel exposure integration.
+
+It is sampled the way SquishierPlanet samples it, and the way turin samples
+the quadratic law: four coordinates `q1..q4`, each uniform on [0, 1], mapped
+by stick-breaking onto the weight simplex `w_j >= 0, sum w_j <= 1`.
+A uniform cube gives a uniform simplex, as Kipping's map gives a uniform
+quadratic triangle. The summary and chains carry `q1..q4` (sampled, with
+R-hat and ESS) and the physical weights `w1..w4` (derived, like `b`).
+
+- **Works in both fit modes**, `lineph` and `ttv`, with grid-Gibbs.
+- **Needs `--ld=sampled`.** Collapsed limb darkening exists for the
+  quadratic law only; for hybrid4 it needs an integral over a 4-simplex that
+  turin does not have yet.
+- **Needs circular geometry** (`chord` exists for hurin parity, and hurin
+  has only the quadratic law).
+- A lineage never changes law: resuming with another `--law` is refused.
+- Weights fitted with older hybrid4 definitions (Elómë < 0.15's pole
+  ladder) are not interchangeable with these.
 
 ### Collapsed limb darkening (`--ld=collapsed`)
 
@@ -293,6 +322,7 @@ cannot pool chains drawn both ways.
 --geometry=circular|chord    true circular orbit (default) or hurin's chord
 --ld=sampled|collapsed       sample q1, q2 (default), or integrate the limb
                              darkening out (LinEph only), see above
+--law=quadratic|hybrid4      limb-darkening law (default quadratic), see above
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache
@@ -307,6 +337,7 @@ working. Seven products per LinEph fit, nine per TTV fit:
 ```
 <T>_<mode>_summary.csv        parameters, percentiles, R-hat, bulk/tail ESS
 <T>_<mode>_chains.csv.tar.gz  the full joint posterior, plus b, log10_rho, loglike
+                              (and w1..w4 before loglike under --law=hybrid4)
 <T>_<mode>_logrho.csv         the stellar-density posterior
 <T>_<mode>_lcdata.csv         time, flux, flux_err, model_flux
 <T>_<mode>_fold.pdf           phase-folded transit, baseline divided out

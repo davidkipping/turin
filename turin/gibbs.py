@@ -74,7 +74,9 @@ class GridGibbs:
         self.T14 = float(T14)
         self.batch = int(batch)
         self.rng = np.random.default_rng(seed)
-        lo, hi = layout.lo[5:], layout.hi[5:]
+        s = layout.n_shape              # epoch times start here
+        self._s = s
+        lo, hi = layout.lo[s:], layout.hi[s:]
         self.lo, self.hi = lo, hi
         self.edges = lo[:, None] + (hi - lo)[:, None] * np.linspace(
             0.0, 1.0, n_grid + 1)[None, :]                    # (E, G+1)
@@ -97,7 +99,7 @@ class GridGibbs:
         """Per-epoch log conditional at given times, ``(C, E)``."""
         return (self._epoch_terms(v_dtau)
                 + _params.ttv_log_prior_np(
-                    v_dtau[:, 5:, None], self.layout.P_ref))
+                    v_dtau[:, self._s:, None], self.layout.P_ref))
 
     def sweep(self, u):
         """One sweep over every epoch time of every chain.
@@ -111,7 +113,7 @@ class GridGibbs:
         # score every grid point of every epoch for every chain: row (c, g)
         # sets epoch i to its own grid point g, for all i at once
         V = np.repeat(v, G, axis=0)
-        V[:, 5:] = np.tile(self.mids.T, (C, 1))
+        V[:, self._s:] = np.tile(self.mids.T, (C, 1))
         L = (self._epoch_terms(V).reshape(C, G, E).transpose(0, 2, 1)
              + self.prior_grid[None, :, :])                   # (C, E, G)
         logq = L - L.max(axis=2, keepdims=True)
@@ -125,18 +127,18 @@ class GridGibbs:
                + self.width[None, :] * self.rng.uniform(size=(C, E)))
         span = self.hi - self.lo
         new = np.clip(new, self.lo + 1e-9 * span, self.hi - 1e-9 * span)
-        old = v[:, 5:].copy()          # v is overwritten below
+        old = v[:, self._s:].copy()    # v is overwritten below
         j_old = np.clip(((old - self.lo) // self.width).astype(int), 0, G - 1)
 
         # MH correction against the exact per-epoch conditional; epochs are
         # independent given shape, so each is accepted on its own
         v_new = v.copy()
-        v_new[:, 5:] = new
+        v_new[:, self._s:] = new
         rows, cols = np.arange(C)[:, None], np.arange(E)[None, :]
         log_a = (self._conditional(v_new) - self._conditional(v)
                  + logq[rows, cols, j_old] - logq[rows, cols, j])
         acc = np.log(self.rng.uniform(size=(C, E))) < log_a
-        v[:, 5:] = np.where(acc, new, old)
+        v[:, self._s:] = np.where(acc, new, old)
 
         stats = SweepStats(
             accept=acc.mean(axis=0),

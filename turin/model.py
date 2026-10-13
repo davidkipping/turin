@@ -55,7 +55,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 import elome
-from elome.ld import q_to_u
+from elome.ld import q_to_u, simplex_from_q
 from elome.metal import flux_dev_metal
 from elome.orbit import separation_circular
 from elome.trig import sincos
@@ -116,6 +116,56 @@ VERTEX_FSTAR = (math.pi, math.pi / 2.0, 5.0 * math.pi / 6.0)
 #: sampled fraction in [0, 1] to the impact parameter.
 B_PRIORS = ("transiting", "nongrazing", "box")
 GEOMETRIES = ("circular", "chord")
+
+#: Limb-darkening laws (``--law``). ``quadratic``, the default, is sampled
+#: through Kipping's (2013) ``q1, q2``. ``hybrid4`` is elome's (and
+#: SquishierPlanet's, LDhybrid v1.0's) rational law: even powers of mu plus
+#: double poles on the alpha = 25/16 ladder, written in its shape basis,
+#: ``I/I(1) = 1 - sum_j w_j T_j(mu)``. Its physical region used here is the
+#: simplex ``w_j >= 0, sum w_j <= 1``, sampled through ``q1..q4`` in the
+#: unit cube by stick-breaking (:func:`ld_weights`), uniform in ``w`` as
+#: Kipping's map is uniform in the quadratic triangle.
+LAWS = ("quadratic", "hybrid4")
+_N_LD = {"quadratic": 2, "hybrid4": 4}
+
+
+def ld_names(law="quadratic"):
+    """The sampled limb-darkening coordinates of ``law``: ``q1 .. qn``."""
+    if law not in _N_LD:
+        raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
+    return tuple(f"q{j + 1}" for j in range(_N_LD[law]))
+
+
+def ld_weights(q, law="hybrid4"):
+    """``q`` -> the law's coefficients, MLX, differentiable.
+
+    ``q`` is a sequence of ``(n_chains, 1)`` columns. For ``hybrid4`` the
+    result is ``w``, ``(n_chains, 4)``: SquishierPlanet's ``simplex_from_q``
+    (``w_j = (1 - q_j^(1/(n-j))) prod_{i<j} q_i^(1/(n-i))``), as elome ships
+    it, matching to 7e-18 in float64. A uniform ``q`` gives a uniform ``w``
+    on the simplex.
+    """
+    if law == "quadratic":
+        raise ValueError("the quadratic law's coefficients are "
+                         "limb_dark_coeffs(q1, q2)")
+    ld_names(law)
+    return simplex_from_q(mx.concatenate(list(q), axis=-1))
+
+
+def ld_weights_np(q, law="hybrid4"):
+    """Float64 host replica of :func:`ld_weights`: ``q`` ``(..., n)`` ->
+    ``w`` ``(..., n)``, for reporting the physical weights."""
+    q = np.maximum(np.asarray(q, dtype=np.float64), 1e-12)
+    n = q.shape[-1]
+    if n != _N_LD[law]:
+        raise ValueError(f"{law} has {_N_LD[law]} coordinates, not {n}")
+    w = np.empty_like(q)
+    stick = np.ones(q.shape[:-1])
+    for j in range(n):
+        f = q[..., j] ** (1.0 / (n - j))
+        w[..., j] = (1.0 - f) * stick
+        stick = stick * f
+    return w
 
 
 def limb_dark_coeffs(q1, q2):
@@ -379,13 +429,18 @@ def _expanded_flux_dev(grid, tau, *, k, b, T14, q1, q2, period, geometry):
     return mx.mean(dev, axis=-1)
 
 
-def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
-                     geometry="circular"):
+def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
+                     q=None, law="quadratic", geometry="circular"):
     """Exposure-averaged transit flux **deviation**, ``f - 1``.
 
     Shape ``(n_chains, n_epochs, max_pts)``. Scalar-per-chain parameters
-    (``k``, ``b``, ``T14``, ``q1``, ``q2``, ``period``) have shape
-    ``(n_chains, 1)``; ``mid`` is ``(n_chains, n_epochs)``.
+    (``k``, ``b``, ``T14``, ``period`` and each limb-darkening coordinate)
+    have shape ``(n_chains, 1)``; ``mid`` is ``(n_chains, n_epochs)``.
+
+    The limb darkening is ``law``'s coordinates (:func:`ld_names`), either as
+    ``q`` -- a sequence of columns -- or, for the quadratic law, as
+    ``q1``/``q2``. The quadratic path is exactly what it was before
+    ``law`` existed; ``hybrid4`` needs the tau kernel (``circular``).
 
     The deviation, not the flux, is the primary quantity: it is what
     elome computes natively, and everything downstream works in
@@ -401,9 +456,31 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
     if geometry not in GEOMETRIES:
         raise ValueError(
             f"unknown geometry {geometry!r}; expected one of {GEOMETRIES}")
+    if q is None:
+        q = (q1, q2)
+    if len(q) != len(ld_names(law)):
+        raise ValueError(f"{law} takes {len(ld_names(law))} limb-darkening "
+                         f"coordinates, got {len(q)}")
     n_chains = mid.shape[0]
     tau = time_from_mid(grid, mid)
 
+    if law != "quadratic":
+        if not (HAS_TAU_KERNEL and geometry == "circular"):
+            raise ValueError(f"--law={law} needs elome's tau kernel and "
+                             "geometry='circular'")
+        flat = tau.reshape(n_chains, -1)
+        if grid.order is not None:
+            flat = mx.take(flat, grid.order, axis=1)
+        dev = elome.flux_dev_from_tau(
+            flat, period, a_over_rstar(T14, period, k, b), b, k,
+            exp_time=grid.exp_time,
+            integration="contact" if grid.exp_time > 0 else "none",
+            n_gl=grid.n_gl, limb_dark=law, u=ld_weights(q, law))
+        if grid.order is not None:
+            dev = mx.take(dev, grid.unorder, axis=1)
+        return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
+
+    q1, q2 = q
     if not (HAS_TAU_KERNEL and geometry == "circular"):
         return _expanded_flux_dev(grid, tau, k=k, b=b, T14=T14, q1=q1, q2=q2,
                                   period=period, geometry=geometry)

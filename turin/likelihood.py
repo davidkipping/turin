@@ -128,6 +128,7 @@ class ProfiledTransitLogProb:
         self.dtype = dtype
         self.dim = layout.dim
         self.ld = layout.ld
+        self.law = layout.law
 
         sub_offsets = _prep_offsets(exposure_time, num_resample)
         full_grid = _model.build_grid(centering, sub_offsets, dtype=dtype,
@@ -173,19 +174,24 @@ class ProfiledTransitLogProb:
         they broadcast against the per-epoch and per-point axes, and so
         elome's fp64 fallback broadcasts them against ``z``.
         """
-        col = lambda i: v[:, i:i + 1]
+        lay = self.layout
+        col = lambda name: v[:, lay.index(name):lay.index(name) + 1]
+        k, beta, T14 = col("k"), col("beta"), col("T14")
+        # by name: the quadratic layouts' (q1, q2) are columns 5-6 (LinEph)
+        # and 3-4 (TTV), exactly as the positional unpack took them
+        q = tuple(col(n) for n in lay.ld_names)
         if self.mode == "lineph":
-            dP, dtau0 = col(0), col(1)
-            k, beta, T14, q1, q2 = (col(i) for i in range(2, 7))
+            dP, dtau0 = col("dP"), col("dtau0")
             dtau = None
         else:
-            k, beta, T14, q1, q2 = (col(i) for i in range(5))
             dP = mx.zeros_like(k)
             dtau0 = None
-            dtau = v[:, 5:]
-        b = _model.impact_parameter(beta, k, self.layout.b_prior)
-        return dict(dP=dP, dtau0=dtau0, dtau=dtau, k=k, beta=beta, b=b,
-                    T14=T14, q1=q1, q2=q2, period=self.layout.P_ref + dP)
+            dtau = v[:, lay.n_shape:]
+        b = _model.impact_parameter(beta, k, lay.b_prior)
+        p = dict(dP=dP, dtau0=dtau0, dtau=dtau, k=k, beta=beta, b=b,
+                 T14=T14, q=q, period=lay.P_ref + dP)
+        p.update(zip(lay.ld_names, q))
+        return p
 
     def mid_times(self, grid, p, lo, hi):
         """Per-epoch mid-transit offsets for epochs [lo, hi)."""
@@ -208,7 +214,7 @@ class ProfiledTransitLogProb:
         for blk in self.blocks:
             f_dev = _model.transit_flux_dev(
                 blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
-                k=p["k"], b=p["b"], T14=p["T14"], q1=p["q1"], q2=p["q2"],
+                k=p["k"], b=p["b"], T14=p["T14"], q=p["q"], law=self.law,
                 period=p["period"], geometry=self.geometry)
             c = _profile.solve_coefficients(blk.design, f_dev,
                                             self.profile_mode)
@@ -233,7 +239,7 @@ class ProfiledTransitLogProb:
         for blk in self.blocks:
             f_dev = _model.transit_flux_dev(
                 blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
-                k=p["k"], b=p["b"], T14=p["T14"], q1=p["q1"], q2=p["q2"],
+                k=p["k"], b=p["b"], T14=p["T14"], q=p["q"], law=self.law,
                 period=p["period"], geometry=self.geometry)
             c = _profile.solve_coefficients(blk.design, f_dev,
                                             self.profile_mode)
@@ -254,19 +260,19 @@ class ProfiledTransitLogProb:
         max_pts)`` and ``(n_chains, n_epochs, n_cols)``. Not used on the
         sampling path -- it deliberately skips the block chunking.
 
-        ``ld=(q1, q2)``, host floats, overrides the limb darkening in ``v``;
-        it is how a layout without ``q1, q2`` (``--ld=collapsed``) still gets
-        a light curve. ``None`` reads them from ``v`` as before.
+        ``ld=(q1, q2, ...)``, host floats, overrides the limb darkening in
+        ``v``; it is how a layout without them (``--ld=collapsed``) still
+        gets a light curve. ``None`` reads them from ``v`` as before.
         """
         p = self.unpack(v)
         if ld is None:
-            q1, q2 = p["q1"], p["q2"]
+            q = p["q"]
         else:
-            q1 = mx.full(p["k"].shape, float(ld[0]), dtype=self.dtype)
-            q2 = mx.full(p["k"].shape, float(ld[1]), dtype=self.dtype)
+            q = tuple(mx.full(p["k"].shape, float(x), dtype=self.dtype)
+                      for x in ld)
         f_dev = _model.transit_flux_dev(
             self.grid, mid=self.mid_times(self.grid, p, 0, self.n_epochs),
-            k=p["k"], b=p["b"], T14=p["T14"], q1=q1, q2=q2,
+            k=p["k"], b=p["b"], T14=p["T14"], q=q, law=self.law,
             period=p["period"], geometry=self.geometry)
         return _profile.detrended_model(self.design, f_dev, self.profile_mode)
 
