@@ -13,7 +13,7 @@ replacing the two compute-bound halves:
 
 | | hurin (CPU) | turin (GPU) |
 |---|---|---|
-| forward model | jaxoplanet | **MetalPlanet** (`../MetalPlanet`, MLX/Metal) |
+| forward model | jaxoplanet | **Elómë** (`elome`, `../elome`, MLX/Metal; formerly MetalPlanet) |
 | sampler | NumPyro NUTS, 2 chains | **anvil** (`../anvil`): ChEES-HMC, hundreds of chains |
 
 Correlated-noise (GP) likelihoods via `anvil-gp` (`../anvil-gp`) are a
@@ -26,7 +26,7 @@ per-epoch times), GPs, eccentricity, the Flask web frontend.
 
 ## The external packages
 
-MetalPlanet, anvil and anvil-gp are **strictly external**, and so is
+elome (formerly MetalPlanet), anvil and anvil-gp are **strictly external**, and so is
 **hurin** — turin is its successor, not its owner. Never edit any of them
 from this repo. Where turin needs something they lack, or spots something
 wrong in them, the workflow is to write a brief in `docs/upstream/` for
@@ -48,7 +48,7 @@ in a matching `*_reply.md`. Existing briefs:
   run was in the affected window). Dim 105 at the cap: ~130 s -> 12.8 s per
   round. turin now makes one `diagnose` call with a 256 MiB budget (0.55 GB
   peak, as fast as its old per-parameter loop, which 0.1.24 removed).
-- `docs/upstream/metalplanet_prompt.md` — optional: a `tau`-input fused
+- `docs/upstream/metalplanet_prompt.md` (MetalPlanet, now elome) — optional: a `tau`-input fused
   kernel with in-kernel exposure integration. **Landed**; turin uses it.
   MetalPlanet 0.7.0 later added `ld_basis=True` for another downstream
   package; turin uses it *only* for `--ld=collapsed` (see "Collapsed limb
@@ -100,28 +100,37 @@ its turin commit unpushed, and anvil could not find the files it cited.
 
 **turin requires a minimum anvil instead of carrying fallbacks.** It used
 to feature-detect each anvil capability and fall back without it; every one
-of those landed upstream, and anvil < 0.3.0 also carries a silent rank
-corruption in `diagnose`, so since 0.1.24 `capabilities.require_anvil()`
-refuses anything older than `capabilities.MIN_ANVIL` (0.3.0) with the
-upgrade command, before touching the disk. **anvil 0.4.2 is current and is
-what turin runs against, but `MIN_ANVIL` stays 0.3.0** (0.4.2's API was
-audited call-by-call unchanged; for the latest full-suite result see the
-MetalPlanet 0.10.7 note below): 0.4.0's fix is
-for a target mutated between `run` calls, and turin's target holds only
-static tensors — grid-Gibbs moves positions, not the target. 0.4.1 and
-0.4.2 are review follow-ups to that fix (`Kernel.retrace(target)` is now
-the first thing `run` does, before `init` and `attach`); they change no
-signature turin calls, and the ordering is inert for a static target.
-The first turin change that *does* mutate the target between segments must
-raise `MIN_ANVIL` to 0.4.0 in the same commit, because that failure is
-silent and passes every convergence check (see `capabilities.MIN_ANVIL`). **turin must always run against
-the packages as currently published on GitHub.** When turin starts relying
-on a new upstream feature, raise `MIN_ANVIL` in the same change; do not add
-detection plus a fallback. `MIN_METALPLANET` (0.7.0, for `ld_basis`) is
-checked **only** when `--ld=collapsed` is asked for
-(`capabilities.require_metalplanet`); the default path uses nothing newer
-than 0.6.1 and stays ungated. That is the general rule for a feature-scoped
-minimum: gate the feature, not the package.
+of those landed upstream, so `capabilities.require_anvil()` refuses anything
+older than `capabilities.MIN_ANVIL` with the upgrade command, before
+touching the disk. **`MIN_ANVIL` is 0.7.1 since turin 0.1.60**, because
+`sampling.chain_health` now reads `results.extras["lost_chains"]`: anvil's
+end-of-run judgement of lost chains, made on an eager re-evaluation of the
+target as well as the kernel's record (the two can disagree at a float32
+feasibility edge; anvil measured -17,000 recorded vs -6.8e30 eager on a GP
+target). The same range brings two protections turin gets for free: since
+0.7.0 one chain at a non-finite or failure-sentinel log-density no longer
+drags ChEES's shared step size to zero for all chains, and since 0.5.0 an
+MLX compile refusal makes `run` continue uncompiled (turin logs a note)
+instead of aborting. Measured before raising it: a KOI-518.02 ChEES run (64
+chains, 150 warmup, 100 + 100 draws resumed, 50 after a `with_positions`
+move) is **bitwise identical** under anvil 0.4.2 and 0.7.1, chains and
+log-probabilities. Earlier floors: 0.3.0 for `diagnose`'s rank-corruption
+fix; 0.4.0's fix for a target mutated between `run` calls never applied
+(turin's target is static -- grid-Gibbs moves positions); any turin change
+that does mutate the target between segments relies on it and is covered
+by 0.7.1 already. **turin must always run against the packages as
+currently published on GitHub.** When turin starts relying on a new
+upstream feature, raise `MIN_ANVIL` in the same change; do not add
+detection plus a fallback.
+
+**elome has no runtime gate.** MetalPlanet was renamed Elómë (package
+`elome`, `../elome`, on PyPI) in its 0.14.0, and the old `metalplanet`
+import alias was removed in 0.16.0. Every elome release has everything
+turin uses, `ld_basis` included, so the `MIN_METALPLANET` (0.7.0) check
+that `--ld=collapsed` used to make became vacuous and was removed in
+0.1.60; `pyproject.toml` pins `elome>=0.16.2`, the version verified. Should
+turin need a newer elome feature, gate the feature that needs it, not the
+package (the rule `MIN_METALPLANET` followed).
 
 ## Architecture
 
@@ -163,9 +172,9 @@ quarter.
 ### Epoch-centred time coordinates (float32 safety)
 
 The GPU is float32, whose resolution at absolute BKJD/BTJD magnitudes
-(~1500 d) is 5-10 s — a hard floor on timing precision, and MetalPlanet
+(~1500 d) is 5-10 s — a hard floor on timing precision, and elome
 measures 1.7e-4 in flux after 1,000 orbits without this. So, exactly as in
-hurin and as `metalplanet.orbit.epoch_center_times` prescribes:
+hurin and as `elome.orbit.epoch_center_times` prescribes:
 
 - All large-minus-large subtraction happens **once, in float64 NumPy**, on
   the host. Times reaching MLX are per-epoch residuals; epoch numbers are
@@ -246,7 +255,7 @@ differentiable, GPU-resident).
 ### Exposure integration
 
 Kepler long cadence (29.4 min) is comparable to a short transit's ingress, so
-finite-exposure integration is mandatory. turin uses MetalPlanet's
+finite-exposure integration is mandatory. turin uses elome's
 `flux_dev_from_tau` with the **contact rule** (`model.N_GL` Gauss-Legendre
 nodes per contact sub-interval), which integrates inside the kernel so the
 sub-exposure axis never reaches MLX.
@@ -304,7 +313,7 @@ sampling `L(x*) + prior` at the best-fit LD (0.38 sigma bias on k, b, T14,
 theta | omega and omega | theta (5x slower, and it would mutate the target
 between segments, which needs `MIN_ANVIL` 0.4.0).
 
-The mechanism: MetalPlanet's `ld_basis=True` (>= 0.7.0) gives the three
+The mechanism: elome's `ld_basis=True` (MetalPlanet >= 0.7.0; every elome) gives the three
 vertex laws of the Kipping triangle from one kernel launch
 (`model.vertex_flux_devs`, phase order kept), and every quadratic law's
 light curve is the convex mix `sum omega_j F_j`, linear in
@@ -379,7 +388,18 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
-**Checked against MetalPlanet 0.12.2** (`e507941`), turin 0.1.58. 0.11.0
+**Checked against elome 0.16.2** (`476cb45`), turin 0.1.60, after the
+rename. 0.13.x added oblate planets (keyword-only `f=`, `theta=`, hybrid
+laws only; spherical paths bitwise unchanged); 0.14.0 renamed the package
+with outputs and kernel sources bitwise 0.13.2; 0.15.0 moved hybrid4's
+poles; 0.16.x is a public release and review fixes to the frontend and
+priors, none on a path turin calls. Measured: turin at 0.1.59 on
+MetalPlanet 0.12.2 against turin 0.1.60 on elome 0.16.2, KOI-518.02, 64
+vectors: float32 and float64 log-density and float32 gradient **bitwise
+identical**, for `--ld=sampled` and `--ld=collapsed` (`ld_basis`) alike.
+Signatures unchanged. Full suite: 318 passed, 0 skipped.
+
+Before that, **checked against MetalPlanet 0.12.2** (`e507941`), turin 0.1.58. 0.11.0
 added occultors larger than the star (`rp > 1`, a total-occultation regime)
 and rewrote kernel sources for it, but states `rp < 1` outputs and VJPs
 bitwise unchanged; turin bounds `k <= 1`, and its float32 log-density and
@@ -406,7 +426,7 @@ Full suite at 0.1.52: 302 passed, 2 failed -- the hurin parity test of
 At 0.1.54, with a hurin clone present: 309 passed, 0 skipped, 1 xfailed
 (the then-open `extract_near_transit_data` edge case, fixed in 0.1.55).
 At 0.1.55: 320 passed, 0 skipped.
-`MIN_METALPLANET` stays 0.7.0: turin uses nothing newer.
+`MIN_METALPLANET` stayed 0.7.0 (removed in 0.1.60 with the rename).
 
 **The hurin parity tests skip without a hurin clone** beside turin, so a
 session without one can break them unseen: 0.1.50 diverged from hurin's
@@ -438,7 +458,7 @@ of `b = 1 - k`; remove the guard and its three collapsed-pair cases go NaN
 `test_gradients_are_finite_and_nonzero_in_fp32_at_awkward_geometry` runs
 at `exp_time=0` and never builds a contact, so it cannot see this.
 
-The same test checks gradient *accuracy* against MetalPlanet's frontend at
+The same test checks gradient *accuracy* against elome's frontend at
 `n_gl=32`, central-differenced in float64. Be precise about what that
 reference is: it is the **same contact rule**, differenced with its split
 points free to move -- not an independent geometry -- so a bug in the
@@ -460,7 +480,7 @@ First, that test does **not** pin `flux_dev_from_tau`'s detachment of the
 split points (`metal.py`), and no accuracy test can: splits that move
 track the kink, so a moving-split gradient agrees with the truth *better*
 at finite `n_gl` than the frozen one -- review measured that removing the
-detachment passes every case. That detachment is MetalPlanet's internal
+detachment passes every case. That detachment is elome's internal
 choice and turin should not pin it. Second, the 1.9e-6 "hard regime" figure
 was turin's own finite-`n_gl` error, not the reference's. The FD warning
 above is about *turin's* path: finite-differencing it recomputes the splits
@@ -468,14 +488,14 @@ and so measures a different quantity from its autodiff (1.5e-5 apart at
 `N_GL = 5` wherever the inner pair exists) -- which is why the reference
 is the frontend and not turin.
 
-### Why turin does not use MetalPlanet's sampler-facing API
+### Why turin does not use elome's sampler-facing API
 
-`metalplanet.anvil.make_quad_transit_flux` and `make_transit_target` bake
+`elome.anvil.make_quad_transit_flux` and `make_transit_target` bake
 in a linear ephemeris, offer no exposure integration, carry only a scalar
 `df0` baseline, and parametrize by a/R*. turin needs per-epoch mid-times,
 long-cadence integration, per-epoch polynomials, and hurin's
 `T14` parametrization. So turin builds `tau` and `z` itself and calls
-**`metalplanet.metal.flux_dev_metal(z, r, u1, u2)`** — a fused fp32 kernel
+**`elome.metal.flux_dev_metal(z, r, u1, u2)`** — a fused fp32 kernel
 with a VJP in `z`, which falls back to the analytic fp64 path on the CPU
 stream (that fallback is turin's `log_prob_hi`). Similarly turin writes its
 own likelihood rather than using `ChunkedGaussianLogLike`, which chunks the
@@ -653,11 +673,11 @@ hurin where a transit fell in a gap (`docs/hurin-differences.md` section 4).
 
 ## Environment
 
-Dev environment is `turin/.venv` (Python 3.11), with MetalPlanet and anvil
+Dev environment is `turin/.venv` (Python 3.11), with elome and anvil
 installed editable from the sibling clones:
 
 ```bash
-.venv/bin/python -m pip install -e ../MetalPlanet -e ../anvil
+.venv/bin/python -m pip install -e ../elome -e ../anvil
 .venv/bin/python -m pip install -e . --no-deps
 .venv/bin/python -m pytest
 ```

@@ -1,13 +1,13 @@
 """The MLX forward model: parameters -> per-epoch mid-times -> z -> flux.
 
-turin does not use MetalPlanet's sampler-facing API
-(``metalplanet.anvil.make_quad_transit_flux``): that bakes in a linear
+turin does not use elome's sampler-facing API
+(``elome.anvil.make_quad_transit_flux``): that bakes in a linear
 ephemeris, offers no exposure integration, carries only a scalar baseline,
 and parametrizes by a/R*. turin needs per-epoch mid-transit times, Kepler
 long-cadence integration, per-epoch Legendre baselines, and hurin's ``T14``
 parametrization. So turin builds the sky-projected separation ``z`` itself
-and calls ``metalplanet.metal.flux_dev_metal``, a fused fp32 Metal kernel
-with an analytic VJP in ``z`` that falls back to MetalPlanet's fp64 analytic
+and calls ``elome.metal.flux_dev_metal``, a fused fp32 Metal kernel
+with an analytic VJP in ``z`` that falls back to elome's fp64 analytic
 path on the CPU stream. That fallback is what gives anvil its
 ``log_prob_hi`` for free.
 
@@ -15,7 +15,7 @@ Two orbit geometries are available, because hurin's was an approximation:
 
 ``circular`` (default)
     The true circular projection, ``z^2 = a^2 sin^2(phi) + b^2 cos^2(phi)``
-    with ``phi = 2 pi tau / P``, via ``metalplanet.orbit.separation_circular``.
+    with ``phi = 2 pi tau / P``, via ``elome.orbit.separation_circular``.
     a/R* comes from T14 by the Seager & Mallen-Ornelas Eq. 8 inversion, the
     same relation turin reports ``log10_rho`` through, so the fitted model
     and the derived stellar density are mutually consistent.
@@ -28,21 +28,21 @@ Two orbit geometries are available, because hurin's was an approximation:
     4.6e-6 in flux at T14/P = 0.019.
 
 Limb darkening is Kipping (2013) throughout, via
-``metalplanet.ld.q_to_u``: ``u1 = 2 sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - 2 q2)``,
+``elome.ld.q_to_u``: ``u1 = 2 sqrt(q1) q2``, ``u2 = sqrt(q1) (1 - 2 q2)``,
 whose unit square in (q1, q2) maps onto the whole physically-allowed (u1, u2)
 triangle. hurin used a variant missing both factors of two until turin's port
 surfaced it; hurin 0.1.68 adopted the correct map, so both packages now agree
 and turin carries no alternative.
 
 Note the quadratic law is exactly the N=2 case of the polynomial law
-MetalPlanet implements (``I(mu)/I0 = 1 - sum u_n (1-mu)^n``), so Kipping's
+elome implements (``I(mu)/I0 = 1 - sum u_n (1-mu)^n``), so Kipping's
 reparameterization applies directly; verified in tests/test_model.py. The
-Green's basis MetalPlanet uses internally is an affine change of basis for
+Green's basis elome uses internally is an affine change of basis for
 the integration, not a different law.
 
 Validated against three independent references (see tests/test_model.py):
-fp64 circular agrees with MetalPlanet's batman-style frontend to 3.3e-16,
-fp32 to 1.6e-7 (MetalPlanet's documented fp32 floor), and ``chord`` reproduces
+fp64 circular agrees with elome's batman-style frontend to 3.3e-16,
+fp32 to 1.6e-7 (elome's documented fp32 floor), and ``chord`` reproduces
 hurin/jaxoplanet to 2.2e-7, which is hurin's own float32 floor. Against
 hurin >= 0.1.68 the orbit model is the only remaining difference.
 """
@@ -54,21 +54,21 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 import numpy as np
-import metalplanet
-from metalplanet.ld import q_to_u
-from metalplanet.metal import flux_dev_metal
-from metalplanet.orbit import separation_circular
-from metalplanet.trig import sincos
+import elome
+from elome.ld import q_to_u
+from elome.metal import flux_dev_metal
+from elome.orbit import separation_circular
+from elome.trig import sincos
 
-#: MetalPlanet's tau-input kernel integrates the exposure *inside* the kernel,
+#: elome's tau-input kernel integrates the exposure *inside* the kernel,
 #: by the contact rule, so the sub-exposure axis never reaches MLX. turin
-#: asked for it in ``docs/upstream/metalplanet_prompt.md``; it landed on
+#: asked for it in ``docs/upstream/elome_prompt.md``; it landed on
 #: 2026-09-29. Tests set this to False to exercise the fallback.
 #:
 #: **turin adopted it for accuracy, not speed**, and the distinction matters
 #: because the brief expected the opposite. At turin's sizes (~2,500 points,
 #: 8 sub-exposures) it measured *2x slower* than expanding the axis --
-#: MetalPlanet's 2.3x win was at 15 sub-exposures, where materializing the
+#: elome's 2.3x win was at 15 sub-exposures, where materializing the
 #: expansion dominates. What it buys instead:
 #:
 #: * flux error 6.4e-8 against 1.5e-4, i.e. the old route was wrong by 2.3%
@@ -83,7 +83,7 @@ from metalplanet.trig import sincos
 #: Metropolis step uses the log-density, not the gradient, so a poor force
 #: field costs trajectory efficiency rather than correctness -- but there is
 #: no reason to keep paying for it.
-HAS_TAU_KERNEL = hasattr(metalplanet, "flux_dev_from_tau")
+HAS_TAU_KERNEL = hasattr(elome, "flux_dev_from_tau")
 #: Gauss-Legendre nodes per contact sub-interval.
 #:
 #: Judged on the log-likelihood, which is what the sampler sees. The kernel's
@@ -155,7 +155,7 @@ def a_over_rstar(T14, period, k, b):
     The same relation turin reports ``log10_rho`` through, so the fitted
     geometry and the derived density are consistent.
 
-    Uses MetalPlanet's Cody-Waite ``sincos`` rather than ``mx.sin``: MLX's
+    Uses elome's Cody-Waite ``sincos`` rather than ``mx.sin``: MLX's
     fp64 trigonometry is only float32-accurate (measured 2.6e-8 relative),
     which would put a staircase of that size into the fp64 reference path
     that ``validate_precision`` and ``certify`` are supposed to adjudicate.
@@ -251,7 +251,7 @@ class EpochGrid:
 def phase_order(times, d_arr):
     """Permutation sorting flattened points by time from predicted mid-transit.
 
-    MetalPlanet's kernel runs one point per GPU thread, and threads execute
+    elome's kernel runs one point per GPU thread, and threads execute
     in SIMD groups of 32 that take every branch any member takes. A point in
     transit costs ~8x one out of transit (the contact rule, the occultation
     integrals), so storage order -- every epoch's window in turn, ~10% of it
@@ -353,7 +353,7 @@ def time_from_mid(grid, mid):
 def _expanded_flux_dev(grid, tau, *, k, b, T14, q1, q2, period, geometry):
     """Fallback: materialize the sub-exposure axis and average it in MLX.
 
-    What turin did before MetalPlanet's tau kernel existed, and still the only
+    What turin did before elome's tau kernel existed, and still the only
     route for ``geometry="chord"``, which the kernel does not implement. Costs
     ``n_sub`` times the memory -- measured 2.78 GB against 51 MB at 512 chains
     x 5,000 points x 15 sub-exposures -- and, more importantly, integrates by
@@ -388,7 +388,7 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
     ``(n_chains, 1)``; ``mid`` is ``(n_chains, n_epochs)``.
 
     The deviation, not the flux, is the primary quantity: it is what
-    MetalPlanet computes natively, and everything downstream works in
+    elome computes natively, and everything downstream works in
     deviation space so that no float32 subtraction ever cancels two numbers
     near 1 to recover something near 1e-4. That is anvil's rule 3, and
     ignoring it cost a measured 1.6% on ``dlogL/dk``.
@@ -410,14 +410,14 @@ def transit_flux_dev(grid, *, mid, k, b, T14, q1, q2, period,
 
     # The tau kernel: exposure integrated in registers by the contact rule,
     # so no sub-exposure axis exists to hold. Parameters stay (n_chains, 1);
-    # MetalPlanet canonicalizes that per chain itself.
+    # elome canonicalizes that per chain itself.
     # Points go through in phase order (see phase_order) and come back out;
     # the two gathers cost well under a millisecond.
     u1, u2 = limb_dark_coeffs(q1, q2)
     flat = tau.reshape(n_chains, -1)
     if grid.order is not None:
         flat = mx.take(flat, grid.order, axis=1)
-    dev = metalplanet.flux_dev_from_tau(
+    dev = elome.flux_dev_from_tau(
         flat, period,
         a_over_rstar(T14, period, k, b), b, k, u1, u2,
         exp_time=grid.exp_time,
@@ -437,24 +437,24 @@ def vertex_flux_devs(grid, *, mid, k, b, T14, period):
     combination ``sum_j omega_j (F_j - 1)`` with ``omega`` on the 2-simplex,
     which is what lets :mod:`turin.ldmarg` integrate the limb darkening out.
 
-    One kernel launch: MetalPlanet's ``ld_basis=True`` (>= 0.7.0) returns the
+    One kernel launch: elome's ``ld_basis=True`` (every elome release;
+    MetalPlanet >= 0.7.0 under the old name) returns the
     unnormalised deficits ``B`` for intensities ``mu^0, mu^1, mu^2``, and
     ``F0 - 1 = B0/pi``, ``F1 - 1 = B2/(pi/2)``, ``F2 - 1 = (2 B1 - B2)/(5 pi/6)``
     (verified to 3.5e-18 in float64 against three scalar calls). Same route as
     :func:`transit_flux_dev`'s tau-kernel branch, including the phase-order
     gathers, which act on axis 1 and so carry the trailing basis axis through
-    unchanged. There is deliberately no fallback: the caller is gated on
-    ``capabilities.MIN_METALPLANET``, and ``geometry="chord"`` has no tau
-    kernel to ask.
+    unchanged. There is deliberately no fallback: ``geometry="chord"`` has
+    no tau kernel to ask.
     """
     if not HAS_TAU_KERNEL:
-        raise RuntimeError("vertex_flux_devs needs MetalPlanet's tau kernel "
+        raise RuntimeError("vertex_flux_devs needs elome's tau kernel "
                            "(flux_dev_from_tau)")
     n_chains = mid.shape[0]
     flat = time_from_mid(grid, mid).reshape(n_chains, -1)
     if grid.order is not None:
         flat = mx.take(flat, grid.order, axis=1)
-    basis = metalplanet.flux_dev_from_tau(
+    basis = elome.flux_dev_from_tau(
         flat, period, a_over_rstar(T14, period, k, b), b, k,
         exp_time=grid.exp_time,
         integration="contact" if grid.exp_time > 0 else "none",

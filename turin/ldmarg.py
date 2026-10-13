@@ -370,9 +370,9 @@ class MarginalLDLogProb(ProfiledTransitLogProb):
         if geometry != "circular":
             raise ValueError("collapsed limb darkening needs "
                              "geometry='circular' (ld_basis exists only on "
-                             "MetalPlanet's tau kernel)")
+                             "elome's tau kernel)")
         if not _model.HAS_TAU_KERNEL:
-            raise ValueError("collapsed limb darkening needs MetalPlanet's "
+            raise ValueError("collapsed limb darkening needs elome's "
                              "tau kernel")
         kw.setdefault("bytes_per_point", COLLAPSED_BYTES_PER_POINT)
         super().__init__(layout, centering, epoch_data, orders,

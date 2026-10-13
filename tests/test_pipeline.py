@@ -188,17 +188,6 @@ def test_pipeline_refuses_collapsed_combinations_the_cli_would(
     assert not any(tmp_path.iterdir())
 
 
-def test_collapsed_refuses_an_old_metalplanet(tmp_path, fake_target,
-                                              monkeypatch):
-    import metalplanet
-
-    monkeypatch.setattr(metalplanet, "__version__", "0.6.1")
-    with pytest.raises(SystemExit, match="MetalPlanet >= 0.7.0"):
-        pipeline.run(_args(tmp_path, ld="collapsed"), log=lambda m: None)
-    # the default path is not gated on it
-    assert pipeline.run(_args(tmp_path), log=lambda m: None) in FINISHED
-
-
 def test_recovered_parameters_are_in_the_right_region(tmp_path, fake_target):
     """A cheap fit, but it must still land near the injected truth."""
     assert pipeline.run(_args(tmp_path, chains=64, warmup=150, samples=100,

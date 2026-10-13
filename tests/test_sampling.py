@@ -93,60 +93,47 @@ def test_ess_floor_is_lower_for_timing_parameters():
 
 def test_capabilities_detect_and_summarize():
     caps = capabilities.detect()
-    assert isinstance(caps.metalplanet_flux_dev_from_tau, bool)
+    assert isinstance(caps.elome_flux_dev_from_tau, bool)
     text = caps.summary()
-    assert "anvil" in text and "MetalPlanet" in text
-    assert "yes  anvil >= 0.3.0" in text
+    assert "anvil" in text and "elome" in text
+    assert "yes  anvil >= 0.7.1" in text
 
 
 def test_capability_summary_does_not_claim_the_tau_kernel_is_unused():
     """It said "available but not yet used" from 0.1.6 to 0.1.28, after turin
     had made the kernel its primary route -- user-visible wrong output from
     --capabilities. The present-branch text must describe it as used, and the
-    missing-branch text must point at MetalPlanet rather than anvil."""
+    missing-branch text must point at elome rather than anvil."""
     import dataclasses
 
     caps = capabilities.detect()
-    assert caps.metalplanet_flux_dev_from_tau, "kernel absent in this env"
-    assert M.HAS_TAU_KERNEL is caps.metalplanet_flux_dev_from_tau
+    assert caps.elome_flux_dev_from_tau, "kernel absent in this env"
+    assert M.HAS_TAU_KERNEL is caps.elome_flux_dev_from_tau
     line = [ln for ln in caps.summary().splitlines() if "tau-input" in ln][0]
     assert "not yet used" not in line and "used for geometry=circular" in line
 
-    missing = dataclasses.replace(caps, metalplanet_flux_dev_from_tau=False)
+    missing = dataclasses.replace(caps, elome_flux_dev_from_tau=False)
     gone = [ln for ln in missing.summary().splitlines()
             if "tau-input" in ln][0]
-    assert "MISSING" in gone and "MetalPlanet.git" in gone
+    assert "MISSING" in gone and "pip install -U elome" in gone
     assert "anvil.git" not in gone, "points at the wrong package"
 
 
 @pytest.mark.parametrize("version,ok", [
-    ("0.3.0", True), ("0.3.0.dev2", True), ("0.3.1", True), ("1.0", True),
-    ("0.2.0", False), ("0.1.0.dev0", False), ("unknown", False)])
+    ("0.7.1", True), ("0.7.1.dev2", True), ("0.7.2", True), ("0.8", True),
+    ("1.0", True), ("0.7.0", False), ("0.6.2", False), ("0.4.2", False),
+    ("unknown", False)])
 def test_anvil_version_gate(version, ok):
     assert capabilities.anvil_ok(version) is ok
 
 
-@pytest.mark.parametrize("version,ok", [
-    ("0.7.0", True), ("0.9.7", True), ("1.0", True), ("0.7.0.dev1", True),
-    ("0.6.1", False), ("0.4.1", False), ("unknown", False)])
-def test_metalplanet_version_gate(version, ok):
-    assert capabilities.metalplanet_ok(version) is ok
-
-
-def test_require_metalplanet_names_the_upgrade_command(monkeypatch):
-    """--ld=collapsed needs ld_basis (MetalPlanet >= 0.7.0); the gate must
-    name the MetalPlanet command, not anvil's, and must not touch the
-    default path (it is only called for that mode)."""
-    import metalplanet
-
-    assert capabilities.require_metalplanet() == metalplanet.__version__
-    monkeypatch.setattr(metalplanet, "__version__", "0.6.1")
-    with pytest.raises(SystemExit, match="metalplanet @") as exc:
-        capabilities.require_metalplanet()
-    assert "anvil.git" not in str(exc.value), "points at the wrong package"
-    line = [ln for ln in capabilities.detect().summary().splitlines()
-            if "ld_basis" in ln][0]
-    assert line.lstrip().startswith("NO") and "MetalPlanet.git" in line
+def test_there_is_no_elome_gate():
+    """Every elome release (0.14.0 on) has ld_basis, so the old
+    MetalPlanet >= 0.7.0 check for --ld=collapsed is gone rather than kept
+    vacuous: no gate function, no ld_basis line asking for an upgrade."""
+    assert not hasattr(capabilities, "require_elome")
+    assert not hasattr(capabilities, "MIN_METALPLANET")
+    assert "MetalPlanet" not in capabilities.detect().summary()
 
 
 def test_require_anvil_names_the_upgrade_command(monkeypatch):
@@ -156,7 +143,7 @@ def test_require_anvil_names_the_upgrade_command(monkeypatch):
     monkeypatch.setattr(anvil, "__version__", "0.2.0")
     with pytest.raises(SystemExit, match="pip install -U"):
         capabilities.require_anvil()
-    assert "NO   anvil >= 0.3.0" in capabilities.detect().summary()
+    assert "NO   anvil >= 0.7.1" in capabilities.detect().summary()
 
 
 def test_assess_matches_a_per_parameter_diagnose_reference():
@@ -253,6 +240,28 @@ def test_chain_health_passes_a_clean_ensemble():
     health = sampling.chain_health(_FakeResults(lp, np.full(64, 0.65)))
     assert not health.any_trapped
     assert "healthy" in health.describe()
+
+
+def test_chain_health_takes_anvils_lost_chains():
+    """anvil (>= 0.6.1) judges lost chains at the end of a run on an eager
+    re-evaluation as well as the record; a chain whose *recorded* log-prob
+    looks healthy but which anvil names (a compiled/eager disagreement at a
+    float32 feasibility edge) must still be flagged, and one both checks
+    flag says so."""
+    rng = np.random.default_rng(3)
+    lp = rng.normal(-700.0, 1.0, (200, 32))
+    lp[:, 9] -= 1500.0                     # flagged by turin and anvil
+    acc = np.full(32, 0.6)
+    health = sampling.chain_health(
+        _FakeResults(lp, acc, extras={"lost_chains": np.array([4, 9])}))
+    assert set(health.trapped) == {4, 9}
+    assert set(health.lost) == {4, 9}
+    assert health.reason[4] == "anvil judges it lost at the end of the run"
+    assert health.reason[9].endswith("; anvil judges it lost")
+    assert "chain    4" in health.describe()
+    # absent or empty: nothing changes
+    clean = sampling.chain_health(_FakeResults(lp, acc))
+    assert set(clean.trapped) == {9} and clean.lost.size == 0
 
 
 def test_width_breakdown_exposes_inflation_from_trapped_chains():

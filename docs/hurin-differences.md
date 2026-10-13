@@ -5,6 +5,11 @@ MetalPlanet 0.6.1, and hurin in its own conda env. The per-difference
 measurements are reproduced by `tests/test_model.py`; the real-data sections
 record whole fits and are reproduced by re-running the commands they quote.
 
+MetalPlanet has since been renamed Elómë (package `elome`, from its
+0.14.0); this document keeps the name in use when each comparison was run.
+turin 0.1.60 on elome 0.16.2 reproduces turin 0.1.59 on MetalPlanet 0.12.2
+bitwise on KOI-518.02.
+
 turin is not bit-compatible with hurin, and all the differences are
 switchable, so any hurin result can be reproduced for comparison.
 

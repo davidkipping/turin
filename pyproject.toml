@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turin"
-version = "0.1.59"
-description = "GPU transit fitting for Kepler and TESS: profile-likelihood polynomial detrending with MetalPlanet and anvil on Apple Silicon"
+version = "0.1.60"
+description = "GPU transit fitting for Kepler and TESS: profile-likelihood polynomial detrending with elome and anvil on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -18,7 +18,7 @@ dependencies = [
     "requests>=2.31",
     "matplotlib>=3.7",
     "corner>=2.2",
-    "metalplanet @ git+https://github.com/davidkipping/MetalPlanet.git",
+    "elome>=0.16.2",
     "anvil-mcmc @ git+https://github.com/davidkipping/anvil.git",
 ]
 

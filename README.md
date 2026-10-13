@@ -13,7 +13,7 @@ compute-bound halves:
 
 | | hurin (CPU) | turin (GPU) |
 |---|---|---|
-| forward model | jaxoplanet | [MetalPlanet](https://github.com/davidkipping/MetalPlanet) |
+| forward model | jaxoplanet | [Elómë](https://github.com/davidkipping/elome) (`elome`, formerly MetalPlanet) |
 | sampler | NumPyro NUTS, 2 chains | [anvil](https://github.com/davidkipping/anvil) ChEES-HMC, 512 chains |
 | precision | float32 (JAX x64 off) | float32 GPU with an exact float64 reference path |
 
@@ -33,7 +33,7 @@ python3.11 -m venv .venv
 For development against local clones of the sibling packages:
 
 ```bash
-.venv/bin/python -m pip install -e ../MetalPlanet -e ../anvil
+.venv/bin/python -m pip install -e ../elome -e ../anvil
 .venv/bin/python -m pip install -e . --no-deps
 .venv/bin/python -m pytest              # add -m slow for injection-recovery
 ```
@@ -50,7 +50,7 @@ interrupted: products are re-exported after every sampling round, and
 re-running the same command resumes where it stopped.
 
 ```bash
-turin --capabilities        # what the installed anvil/MetalPlanet support
+turin --capabilities        # what the installed anvil/elome support
 turin --help
 ```
 
@@ -72,7 +72,7 @@ turin --help
    times** (5 shape parameters plus one time per transit), seeded from the
    linear-ephemeris maximum likelihood.
 
-Finite exposures are integrated by the contact rule inside MetalPlanet's
+Finite exposures are integrated by the contact rule inside elome's
 kernel, which matters more than it sounds: the supersampling it replaced was
 wrong by ~2% of a transit depth at a typical sub-exposure count, and got
 `dF/d(period)` wrong by ~100x with the wrong sign.
@@ -211,7 +211,7 @@ Restrictions, each refused up front with the reason:
 - **`--PL=exact`** (`auto` resolves to it without probing). The integral's
   gradient comes from the envelope theorem, which holds only for the exact
   flux-space baseline; under `ratio` the formulas would be wrong.
-- **Circular geometry**, and **MetalPlanet ≥ 0.7.0** (`ld_basis`).
+- **Circular geometry** (elome's `ld_basis` exists only on its tau kernel).
 
 In the summary, the `q1`/`q2` rows leave R-hat and ESS blank: they are exact
 conditional draws, not sampler output. The ML-row light curve (lcdata, fold
@@ -370,9 +370,9 @@ hurin 0.1.68 adopted the correct map, so both packages now agree. It mattered:
 on a grazing system the truncated prior was quietly tightening `k` and `b`.
 
 Limb darkening is Kipping (2013) throughout. That is compatible with the
-polynomial (Agol et al.) formulation MetalPlanet implements, because the
+polynomial (Agol et al.) formulation elome implements, because the
 quadratic law is exactly that law's `N=2` case
-(`I(mu)/I0 = 1 - sum u_n (1-mu)^n`); the Green's basis MetalPlanet uses
+(`I(mu)/I0 = 1 - sum u_n (1-mu)^n`); the Green's basis elome uses
 internally is an affine change of basis, not a different law. Both are pinned
 by tests.
 
@@ -405,9 +405,9 @@ Pinned by the test suite, against independent references:
 
 | check | tolerance | measured |
 |---|---|---|
-| float64 model vs MetalPlanet's verified frontend | 1e-14 | 3.3e-16 |
+| float64 model vs elome's verified frontend | 1e-14 | 3.3e-16 |
 | float32 model vs the same | 5e-7 | 1.6e-7 |
-| exposure integration vs MetalPlanet's contact rule | 1e-14 | <1e-14 |
+| exposure integration vs elome's contact rule | 1e-14 | <1e-14 |
 | exposure integration vs a high-order float64 reference | 1e-7 | 6.4e-8 |
 | profile solve vs `np.linalg.solve`, float64 | 1e-9 | ~1e-12 |
 | `ratio` mode vs hurin's own solve | hurin's float32 floor | 1e-8 |
@@ -448,9 +448,9 @@ hundreds of chains is what the GPU buys, and it yields two to three orders of
 magnitude more independent draws per second. The cost is memory — 512 chains
 peaked at 17.3 GB here, so a 16 GB machine needs `--chains` lowered.
 
-Almost all of what is left is MetalPlanet's kernel; turin's own profile solve,
+Almost all of what is left is elome's kernel; turin's own profile solve,
 residual and priors are 0.7 ms of the 9.1. Two things got it there, and both
-are turin's responsibility rather than MetalPlanet's:
+are turin's responsibility rather than elome's:
 
 - **Points go to the kernel in phase order** (`model.phase_order`). The
   kernel runs one point per GPU thread in SIMD groups of 32, a group pays for
@@ -488,7 +488,10 @@ log-units below the global optimum. turin carries three defences:
   10 log-units of the seed.
 - **A trapped-chain check** after every round, from per-chain log-probability
   and acceptance, which reports posterior widths both with and without the
-  flagged chains. No chain is ever silently dropped.
+  flagged chains. Chains anvil judges lost at the end of a run (checked on
+  an eager re-evaluation of the target too, which can disagree with the
+  compiled one at a float32 edge) are flagged as well. No chain is ever
+  silently dropped.
 
 ## Not in this version
 
@@ -500,7 +503,7 @@ with no adapter.
 
 ## Citation
 
-If turin contributes to a publication, please cite it along with MetalPlanet
+If turin contributes to a publication, please cite it along with elome
 and anvil.
 
 ## License

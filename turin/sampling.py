@@ -114,6 +114,9 @@ class ChainHealth:
     divergences: np.ndarray | None  # (n_chains,) if anvil reports them
     bulk_logp: float
     reason: dict = field(default_factory=dict)
+    #: chains anvil judges lost at the end of the run (its record *and* an
+    #: eager re-evaluation; ``extras["lost_chains"]``, anvil >= 0.6.1)
+    lost: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
 
     @property
     def any_trapped(self) -> bool:
@@ -148,6 +151,14 @@ def chain_health(results):
     in log-probability *and* diverging is stuck against a bounded parameter's
     edge (anvil's ChEES boundary trap). One low in log-probability with healthy
     acceptance is in a secondary mode, which is the stretch-move failure.
+
+    A third, anvil's own: ``extras["lost_chains"]``, its end-of-run judgement
+    of chains that are lost rather than exploring. It differs from the two
+    above in one way that matters: it also re-evaluates the target eagerly at
+    each chain's final position, because at a float32 feasibility edge a
+    compiled graph and its eager twin can disagree between an ordinary value
+    and a failure, and a check that reads only the recorded log-probability
+    (as the ones above do) is blind to that. Any chain it names is flagged.
     """
     lp = np.asarray(results.get_log_prob(), dtype=np.float64)   # (draws, chains)
     med = np.median(lp, axis=0)
@@ -162,10 +173,16 @@ def chain_health(results):
 
     low_lp = med < bulk - drop
     low_acc = accept < TRAPPED_ACCEPT_RATIO * acc_bulk
-    flagged = np.where(low_lp | low_acc)[0]
+    lost = np.asarray((results.extras or {}).get("lost_chains", ()), dtype=int)
+    anvil_lost = np.zeros(lp.shape[1], dtype=bool)
+    anvil_lost[lost[(lost >= 0) & (lost < lp.shape[1])]] = True
+    flagged = np.where(low_lp | low_acc | anvil_lost)[0]
 
     reason = {}
     for i in flagged:
+        if not (low_lp[i] or low_acc[i]):
+            reason[int(i)] = "anvil judges it lost at the end of the run"
+            continue
         if low_lp[i] and (div is not None and div[i] > 0.5 * len(lp)):
             reason[int(i)] = "low log-prob and diverging: boundary trap"
         elif low_lp[i] and low_acc[i]:
@@ -174,10 +191,12 @@ def chain_health(results):
             reason[int(i)] = "low log-prob, healthy acceptance: secondary mode"
         else:
             reason[int(i)] = "low acceptance only"
+        if anvil_lost[i]:
+            reason[int(i)] += "; anvil judges it lost"
 
     return ChainHealth(n_chains=lp.shape[1], trapped=flagged, logp_median=med,
                        accept=accept, divergences=div, bulk_logp=bulk,
-                       reason=reason)
+                       reason=reason, lost=np.flatnonzero(anvil_lost))
 
 
 @dataclass
@@ -380,6 +399,7 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     kernel = make_kernel(target, cfg, log=log)
     total = 0
     segments = []
+    warned = False                  # compile refusal logged once
     results = None
     verdict = None
 
@@ -432,6 +452,10 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                 results = anvil.run(kernel, target, resume=rs, n_warmup=0,
                                     **kw)
             round_segs.append(results)
+            if (results.extras or {}).get("compile_refused") and not warned:
+                warned = True
+                log("  note: MLX refused to compile the sampler step; anvil "
+                    "is running it uncompiled (same distribution, slower)")
         el = time.perf_counter() - t0
         total += n_samples
         segments.extend(round_segs)

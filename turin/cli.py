@@ -118,14 +118,13 @@ usage: turin --KOI-448.02 [options]
                           (collapsed Gibbs): same posterior, two fewer
                           sampled dimensions, ~2.2x the per-evaluation
                           memory. LinEph only (--modes=lineph); needs
-                          --PL=exact or auto, circular geometry, and
-                          MetalPlanet >= 0.7.0
+                          --PL=exact or auto and circular geometry
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
   --cache-dir=PATH --outdir=PATH
   --clear-cache           delete cached light curves and exit
-  --capabilities          report what the installed anvil/MetalPlanet can do
+  --capabilities          report what the installed anvil/elome can do
   --version --help
 
 Exit codes: 0 every fit converged; 3 finished, but a fit stopped at the
@@ -255,7 +254,7 @@ def collapsed_ld_problem(args):
                 "per-epoch factorisation the TTV fit's grid-Gibbs relies on")
     if args.geometry != "circular":
         return ("--ld=collapsed needs --geometry=circular: it uses "
-                "MetalPlanet's ld_basis, which exists only on the tau kernel")
+                "elome's ld_basis, which exists only on the tau kernel")
     return None
 
 

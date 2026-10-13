@@ -1,21 +1,22 @@
 """The external packages turin depends on: a minimum anvil, and what it reports.
 
-MetalPlanet, anvil and anvil-gp are developed separately. turin used to
-feature-detect each anvil capability it wanted and carry a fallback for
-installs that lacked it. Every one of those has since landed upstream, and
-anvil 0.3.0 also fixed a silent rank corruption in ``diagnose`` that older
-versions carry, so turin now **requires anvil >= 0.3.0** and uses its API
-directly: resumable runs, state save/load, the survivable prior boundary,
-per-chain divergence counts, ``ResumeState.with_positions`` and the
-memory-bounded ``diagnose``. :func:`require_anvil` is the one check, and it
-names the upgrade command rather than letting an old install fail somewhere
-deep in a fit.
+elome (formerly MetalPlanet), anvil and anvil-gp are developed separately.
+turin used to feature-detect each anvil capability it wanted and carry a
+fallback for installs that lacked it. Every one of those has since landed
+upstream, so turin **requires a minimum anvil** (:data:`MIN_ANVIL`) and uses
+its API directly: resumable runs, state save/load, the survivable prior
+boundary, per-chain divergence counts, ``ResumeState.with_positions``, the
+memory-bounded ``diagnose`` and the end-of-run lost-chain judgement.
+:func:`require_anvil` is the one check, and it names the upgrade command
+rather than letting an old install fail somewhere deep in a fit.
 
 When turin starts relying on a new upstream feature, raise
-:data:`MIN_ANVIL` or :data:`MIN_METALPLANET` in the same change, rather than
-adding detection plus a fallback. :data:`MIN_METALPLANET` is checked only by
-the feature that needs it (``--ld=collapsed``), via
-:func:`require_metalplanet`.
+:data:`MIN_ANVIL` in the same change, rather than adding detection plus a
+fallback. elome has no runtime gate: every release under that name (0.14.0
+on) has everything turin uses, ``ld_basis`` for ``--ld=collapsed``
+included, and ``pyproject.toml`` pins the version turin was verified
+against. (Under its old name, MetalPlanet >= 0.7.0 was checked for
+``--ld=collapsed`` alone; that gate became vacuous with the rename.)
 """
 
 from __future__ import annotations
@@ -23,43 +24,29 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-#: The oldest anvil turin runs against. 0.3.0 is the first with everything
-#: turin uses, and the first whose ``diagnose`` ranks correctly between
-#: 2,095,104 and 2^21 rows.
+#: The oldest anvil turin runs against.
 #:
-#: **Not raised to 0.4.x, deliberately** (0.4.2 is current and is what
-#: turin runs against). anvil 0.4.0 fixes a silent
-#: correctness bug -- ``mx.compile`` froze whatever a kernel's traced graph
-#: read from the *target*, so a target mutated between ``run`` calls kept
-#: being sampled as it was at the first trace, giving a healthy-looking run
-#: of the old posterior. turin cannot hit it: its target holds only static
-#: tensors, and grid-Gibbs moves *positions* through
-#: ``ResumeState.with_positions`` without touching the target, which anvil
-#: documents as bit-identical. Per the rule below, the minimum rises with
-#: the first call that needs it.
-#:
-#: **The first change that mutates the target between segments must raise
-#: this to (0, 4, 0)** -- a Gibbs block held on the target, a tempering
-#: beta, a swapped dataset, a retrained surrogate. The failure is silent and
-#: survives every convergence check, so it will not be caught downstream.
-MIN_ANVIL = (0, 3, 0)
-
-#: The oldest MetalPlanet ``--ld=collapsed`` runs against, and checked only
-#: when that mode is asked for: 0.7.0 is the first with
-#: ``flux_dev_from_tau(..., ld_basis=True)``, which returns the three
-#: vertex-law light curves from one kernel launch. The default path uses
-#: nothing newer than 0.6.1 and is not gated. This is the module docstring's
-#: rule applied: a minimum, not detection plus a fallback (the reference
-#: implementation silently fell back to three kernel launches).
-MIN_METALPLANET = (0, 7, 0)
+#: 0.7.1, because turin reads ``results.extras["lost_chains"]`` -- anvil's
+#: end-of-run judgement of chains that are lost rather than exploring, made
+#: on an eager re-evaluation of the target as well as the kernel's record
+#: (0.6.0-0.6.1), which can disagree at a float32 feasibility edge -- and
+#: folds it into its own trapped-chain report (``sampling.chain_health``).
+#: Two further fixes come with it: since 0.7.0 a chain at a non-finite or
+#: failure-sentinel log-density no longer drags ChEES's shared step size to
+#: zero for every chain (healthy runs bit-identical), and since 0.5.0 an MLX
+#: compile refusal makes ``run`` continue uncompiled rather than abort.
+#: 0.3.0 was the first whose ``diagnose`` ranks correctly between 2,095,104
+#: and 2^21 rows; 0.4.0 fixed a silent bug for a target mutated between
+#: ``run`` calls, which turin's static target never hit (grid-Gibbs moves
+#: *positions* through ``ResumeState.with_positions``).
+MIN_ANVIL = (0, 7, 1)
 
 UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
                 'git+https://github.com/davidkipping/anvil.git"')
-#: The same, for MetalPlanet. Separate constant on purpose: pointing a
-#: missing-MetalPlanet message at the anvil command sends the reader to the
-#: wrong package.
-MP_UPGRADE_HINT = ('pip install -U "metalplanet @ '
-                   'git+https://github.com/davidkipping/MetalPlanet.git"')
+#: The install command for elome. Separate constant on purpose: pointing a
+#: missing-elome message at the anvil command sends the reader to the wrong
+#: package.
+ELOME_HINT = "pip install -U elome"
 
 
 def version_tuple(version):
@@ -70,24 +57,6 @@ def version_tuple(version):
 
 def anvil_ok(version):
     return version_tuple(version) >= MIN_ANVIL
-
-
-def metalplanet_ok(version):
-    return version_tuple(version) >= MIN_METALPLANET
-
-
-def require_metalplanet():
-    """Exit with the upgrade command if MetalPlanet is too old for
-    ``--ld=collapsed``. Not called on the default path."""
-    import metalplanet
-
-    have = getattr(metalplanet, "__version__", "unknown")
-    if not metalplanet_ok(have):
-        need = ".".join(map(str, MIN_METALPLANET))
-        raise SystemExit(
-            f"--ld=collapsed needs MetalPlanet >= {need} (ld_basis), but "
-            f"{have} is installed. Upgrade with:\n  {MP_UPGRADE_HINT}")
-    return have
 
 
 def require_anvil():
@@ -107,7 +76,7 @@ def require_anvil():
 class Capabilities:
     """The installed versions, and the one optional feature turin reports."""
 
-    #: MetalPlanet exposes a tau-input fused kernel with in-kernel exposure
+    #: elome exposes a tau-input fused kernel with in-kernel exposure
     #: integration. **Used as the primary route** since 0.1.6, for the default
     #: ``geometry="circular"``; ``model.HAS_TAU_KERNEL`` is the same test.
     #: Without it turin falls back to building ``z`` itself and supersampling
@@ -115,32 +84,27 @@ class Capabilities:
     #: ``geometry="chord"`` and is *less accurate*: supersampling costs ~2% of
     #: a transit depth and gets ``dF/d(period)`` ~100x wrong with the wrong
     #: sign. So this line reports whether exposures are integrated correctly,
-    #: not an unused extra.
-    metalplanet_flux_dev_from_tau: bool
+    #: not an unused extra. Every elome release has it.
+    elome_flux_dev_from_tau: bool
     anvil_version: str = ""
-    metalplanet_version: str = ""
+    elome_version: str = ""
 
     def summary(self):
         """The run-log header: versions, and whether anvil is new enough."""
         need = ".".join(map(str, MIN_ANVIL))
         ok = anvil_ok(self.anvil_version)
-        mp_need = ".".join(map(str, MIN_METALPLANET))
-        mp_ok = metalplanet_ok(self.metalplanet_version)
         return "\n".join([
-            f"  anvil {self.anvil_version}, "
-            f"MetalPlanet {self.metalplanet_version}",
+            f"  anvil {self.anvil_version}, elome {self.elome_version}",
             f"  {'yes' if ok else 'NO ':3s}  anvil >= {need} (resume, state "
             "save/load, per-chain divergences, with_positions, bounded "
-            "diagnose)" + ("" if ok else f"  ->  {UPGRADE_HINT}"),
-            f"  {'yes' if self.metalplanet_flux_dev_from_tau else 'no ':3s}  "
-            "MetalPlanet tau-input kernel"
-            + (" (in-kernel contact-rule exposure integration; used for "
-               "geometry=circular)" if self.metalplanet_flux_dev_from_tau else
-               " MISSING: exposures would be supersampled, ~2% of a depth and "
-               "dF/dP ~100x wrong  ->  " + MP_UPGRADE_HINT),
-            f"  {'yes' if mp_ok else 'NO ':3s}  MetalPlanet >= {mp_need} "
-            "(ld_basis, needed only by --ld=collapsed)"
-            + ("" if mp_ok else f"  ->  {MP_UPGRADE_HINT}"),
+            "diagnose, lost-chain judgement)"
+            + ("" if ok else f"  ->  {UPGRADE_HINT}"),
+            f"  {'yes' if self.elome_flux_dev_from_tau else 'no ':3s}  "
+            "elome tau-input kernel"
+            + (" (in-kernel contact-rule exposure integration and ld_basis; "
+               "used for geometry=circular)" if self.elome_flux_dev_from_tau
+               else " MISSING: exposures would be supersampled, ~2% of a "
+               "depth and dF/dP ~100x wrong  ->  " + ELOME_HINT),
         ])
 
 
@@ -148,13 +112,12 @@ def detect():
     """Report the installed packages. Cheap; never raises on an old anvil,
     so ``turin --capabilities`` can say what is wrong."""
     import anvil
-    import metalplanet
+    import elome
 
     return Capabilities(
-        metalplanet_flux_dev_from_tau=hasattr(metalplanet,
-                                              "flux_dev_from_tau"),
+        elome_flux_dev_from_tau=hasattr(elome, "flux_dev_from_tau"),
         anvil_version=getattr(anvil, "__version__", "unknown"),
-        metalplanet_version=getattr(metalplanet, "__version__", "unknown"),
+        elome_version=getattr(elome, "__version__", "unknown"),
     )
 
 

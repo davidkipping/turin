@@ -273,7 +273,7 @@ def centering_constants(epoch_data, eph):
     """Precompute, in float64, the epoch-centred time representation.
 
     The GPU is float32: at BKJD/BTJD magnitudes its resolution is 5-10 s,
-    and MetalPlanet measures 1.7e-4 in flux after 1,000 orbits without
+    and elome measures 1.7e-4 in flux after 1,000 orbits without
     centring. Every large-minus-large subtraction therefore happens here,
     so only O(1) values enter the float32 graph.
 

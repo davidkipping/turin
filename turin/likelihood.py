@@ -38,7 +38,7 @@ from . import profile as _profile
 #: Rough bytes per (chain, point, sub-exposure) for the forward pass and the
 #: fused kernel's backward grids together, used only to size epoch blocks.
 #:
-#: It was set from MetalPlanet's documented ~12 B/pt forward and ~32 B/pt
+#: It was set from elome's documented ~12 B/pt forward and ~32 B/pt
 #: transient and described here as "deliberately pessimistic". It is not:
 #: a fresh-process MLX probe of one compiled value+grad at 512 chains
 #: measured **121 B per (chain, point)** on the default path, so 48 is about
@@ -171,7 +171,7 @@ class ProfiledTransitLogProb:
 
         ``v``: ``(n_chains, dim)``. Columns are kept as ``(n_chains, 1)`` so
         they broadcast against the per-epoch and per-point axes, and so
-        MetalPlanet's fp64 fallback broadcasts them against ``z``.
+        elome's fp64 fallback broadcasts them against ``z``.
         """
         col = lambda i: v[:, i:i + 1]
         if self.mode == "lineph":

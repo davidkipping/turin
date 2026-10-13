@@ -2,11 +2,11 @@
 
 Four checks, in decreasing order of authority:
 
-1. fp64 ``circular`` against MetalPlanet's own batman-style frontend, which
+1. fp64 ``circular`` against elome's own batman-style frontend, which
    is verified against a 30-digit mpmath oracle to 2e-16. This is the real
    correctness test: it pins turin's geometry, limb darkening and exposure
    wiring all at once.
-2. fp32 against the same, to MetalPlanet's documented fp32 floor.
+2. fp32 against the same, to elome's documented fp32 floor.
 3. Gradients by exact structural invariants plus finite differences. Note
    FD is a *weak* reference here: MLX's fp64 ``sin``/``cos`` are only
    float32-accurate, so the model is a staircase at ~1e-8 and a small-h FD
@@ -27,8 +27,8 @@ import tempfile
 import mlx.core as mx
 import numpy as np
 import pytest
-import metalplanet
-from metalplanet.api import TransitModel, TransitParams
+import elome
+from elome.api import TransitModel, TransitParams
 
 from turin import model as M
 from turin import prep
@@ -64,8 +64,8 @@ def turin_flux(*, grid, k=K, b=B, T14_=T14, q1=Q1, q2=Q2, period=P_REF,
     return np.array(f, dtype=np.float64)[0, 0]
 
 
-def metalplanet_reference(n_sub=1, exp_time=0.0):
-    """MetalPlanet's frontend at the a/R* and inclination turin implies."""
+def elome_reference(n_sub=1, exp_time=0.0):
+    """elome's frontend at the a/R* and inclination turin implies."""
     with mx.stream(mx.cpu):
         aRs = float(M.a_over_rstar(*[mx.array([[v]], dtype=mx.float64)
                                      for v in (T14, P_REF, K, B)])[0, 0])
@@ -80,8 +80,8 @@ def metalplanet_reference(n_sub=1, exp_time=0.0):
     return TransitModel(pars, TIMES, **kwargs).light_curve(pars), aRs
 
 
-def test_fp64_circular_matches_metalplanet_frontend():
-    ref, aRs = metalplanet_reference()
+def test_fp64_circular_matches_elome_frontend():
+    ref, aRs = elome_reference()
     with mx.stream(mx.cpu):
         got = turin_flux(grid=one_epoch_grid())
     assert 1.0 < aRs < 200.0
@@ -89,15 +89,15 @@ def test_fp64_circular_matches_metalplanet_frontend():
     assert 1 - got.min() > 1e-3, "sanity: there should be a visible transit"
 
 
-def test_fp32_circular_matches_to_metalplanet_fp32_floor():
-    ref, _ = metalplanet_reference()
+def test_fp32_circular_matches_to_elome_fp32_floor():
+    ref, _ = elome_reference()
     got = turin_flux(grid=one_epoch_grid(times=TIMES.astype(np.float32),
                                          dtype=mx.float32))
     assert np.abs(got - ref).max() < 5e-7
 
 
-def metalplanet_contact(n_gl, exp_time, k=K, b=B):
-    """MetalPlanet's frontend with the same contact rule turin now uses."""
+def elome_contact(n_gl, exp_time, k=K, b=B):
+    """elome's frontend with the same contact rule turin now uses."""
     with mx.stream(mx.cpu):
         aRs = float(M.a_over_rstar(*[mx.array([[v]], dtype=mx.float64)
                                      for v in (T14, P_REF, k, b)])[0, 0])
@@ -110,10 +110,10 @@ def metalplanet_contact(n_gl, exp_time, k=K, b=B):
                         integration="contact", n_gl=n_gl).light_curve(pars)
 
 
-def test_exposure_integration_matches_metalplanet_contact_rule():
-    """turin's in-kernel integration is MetalPlanet's, so it must agree exactly."""
+def test_exposure_integration_matches_elome_contact_rule():
+    """turin's in-kernel integration is elome's, so it must agree exactly."""
     exp = 29.4 / 1440
-    ref = metalplanet_contact(M.N_GL, exp)
+    ref = elome_contact(M.N_GL, exp)
     with mx.stream(mx.cpu):
         got = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=exp))
     assert np.abs(got - ref).max() < 1e-14
@@ -127,7 +127,7 @@ def test_contact_integration_is_far_more_accurate_than_supersampling():
     supersampled reference would flatter it.
     """
     exp = 29.4 / 1440
-    ref = metalplanet_contact(12, exp)
+    ref = elome_contact(12, exp)
     with mx.stream(mx.cpu):
         contact = turin_flux(grid=one_epoch_grid(n_sub=1, exp_time=exp))
         old = M.HAS_TAU_KERNEL
@@ -147,7 +147,7 @@ def test_contact_integration_is_far_more_accurate_than_supersampling():
     assert err_super > 0.005 * depth
 
 
-def test_the_fallback_route_still_matches_metalplanet_supersampling():
+def test_the_fallback_route_still_matches_elome_supersampling():
     """Without the tau kernel turin supersamples, and must do so exactly.
 
     This is the route ``geometry="chord"`` always takes, and the one any
@@ -304,7 +304,7 @@ def test_kipping_square_maps_into_physical_profiles(q1, q2):
     """Every (q1, q2) in the unit square must give a valid intensity profile.
 
     That is the whole point of Kipping (2013), and it is what makes the map
-    compatible with the polynomial (Agol et al.) formulation MetalPlanet
+    compatible with the polynomial (Agol et al.) formulation elome
     implements: the quadratic law is that law's N=2 case.
     """
     u1, u2 = M.limb_dark_coeffs_np(q1, q2)
@@ -316,12 +316,12 @@ def test_kipping_square_maps_into_physical_profiles(q1, q2):
 
 
 def test_quadratic_law_is_the_n2_case_of_the_polynomial_law():
-    """MetalPlanet's 'quadratic' and 'polynomial' must agree at the same u.
+    """elome's 'quadratic' and 'polynomial' must agree at the same u.
 
     If they did not, Kipping's (q1, q2) -- which parameterizes the *quadratic*
     law -- would not be the right thing to feed this model.
     """
-    from metalplanet.api import TransitModel, TransitParams
+    from elome.api import TransitModel, TransitParams
 
     tt = np.linspace(-0.2, 0.2, 401)
     for u1, u2 in ((0.35, 0.22), (0.61, 0.36), (1.82, -0.84)):
@@ -402,7 +402,7 @@ GRAZING_EXP = 29.4 / 1440
 
 @functools.lru_cache(maxsize=None)
 def _grazing_reference_gradient(k, b):
-    """(d/dk, d/db) of sum(f^2), central-differenced on MetalPlanet's frontend.
+    """(d/dk, d/db) of sum(f^2), central-differenced on elome's frontend.
 
     The frontend is the same contact rule turin uses (so this is *not* an
     independent implementation of the contact geometry), differenced with
@@ -413,7 +413,7 @@ def _grazing_reference_gradient(k, b):
     of the test share it.
     """
     def ref(k_, b_):
-        f = metalplanet_contact(32, GRAZING_EXP, k=k_, b=b_)
+        f = elome_contact(32, GRAZING_EXP, k=k_, b=b_)
         return float(np.sum(np.asarray(f, dtype=np.float64) ** 2))
 
     h = 1e-6
@@ -436,7 +436,7 @@ def test_grazing_gradient_matches_a_finite_differenced_reference(k, b, n_gl, tol
 
     1. **Finite, non-zero gradients through the collapsed-pair branch.** When
        ``b >= 1 - k`` the contact clip collapses the inner pair and ``sqrt``
-       / ``arcsin`` sit at an infinite derivative; MetalPlanet 0.8.1 guards
+       / ``arcsin`` sit at an infinite derivative; elome 0.8.1 guards
        that with a ``stop_gradient`` in ``exposure.contact_offsets``, which
        ``flux_dev_from_tau`` and the frontend share. Remove that guard and
        the three collapsed-pair cases here go NaN (measured). The
@@ -452,7 +452,7 @@ def test_grazing_gradient_matches_a_finite_differenced_reference(k, b, n_gl, tol
        sub-intervals. KOI-448.02's turin-defaults posterior straddles it.
 
     What this does **not** pin, and should not: ``flux_dev_from_tau``'s own
-    detachment of the split points (``metal.py``). That is MetalPlanet's
+    detachment of the split points (``metal.py``). That is elome's
     internal choice, and it is invisible to an accuracy test by
     construction -- splits that move track the kink, so a moving-split
     gradient agrees with the truth *better* at finite ``n_gl`` than the
@@ -504,7 +504,7 @@ def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol, k, b):
     """``vertex_flux_devs`` (one ld_basis launch, phase-ordered) against
     two independent references.
 
-    Each vertex against MetalPlanet's scalar kernel called at exactly that
+    Each vertex against elome's scalar kernel called at exactly that
     ``(u1, u2)`` on the points in plain *storage* order -- no gathers -- so
     the phase-order round trip is checked too. Not via turin's q route:
     ``q_to_u`` clamps ``q1 >= 1e-12``, so ``q1 = 0`` gives ``u1 = 1e-6``, not
@@ -536,7 +536,7 @@ def test_vertex_flux_devs_are_the_three_vertex_laws(dtype, tol, k, b):
         a = M.a_over_rstar(geo["T14"], geo["period"], geo["k"], geo["b"])
 
         def at_u(u1, u2):
-            dev = metalplanet.flux_dev_from_tau(
+            dev = elome.flux_dev_from_tau(
                 tau, geo["period"], a, geo["b"], geo["k"], col(u1), col(u2),
                 exp_time=grid.exp_time, integration="contact", n_gl=grid.n_gl)
             return np.array(dev, dtype=np.float64).reshape(verts[0].shape)

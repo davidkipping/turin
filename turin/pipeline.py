@@ -71,7 +71,6 @@ def run(args, log=print):
         problem = collapsed_ld_problem(args)
         if problem:
             raise SystemExit(f"turin: {problem}")
-        _caps.require_metalplanet()
     _outputs.set_run_status("")
     _outputs.set_run_tag(args.tag)
     target = args.target

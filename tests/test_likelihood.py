@@ -375,7 +375,7 @@ def test_fp32_gradient_tracks_fp64_under_exposure_integration(dataset):
     moving an interior split of a continuous integrand cancels -- so a central
     difference, which recomputes the splits at each step, measures the
     quadrature error's parameter dependence rather than the gradient. Worse,
-    MetalPlanet's own docs note that a difference straddling a contact is
+    elome's own docs note that a difference straddling a contact is
     wrong at any step size, because the light curve's tau-derivative genuinely
     jumps there. So FD gets a loose sanity bound and the precise claim is
     float32 against float64.
