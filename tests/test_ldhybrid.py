@@ -51,6 +51,16 @@ def test_log_ndtr_matches_scipy_in_both_tails():
     assert np.max(np.abs(got - ref)) < 1e-6
 
 
+def test_ndtri_exp_inverts_log_ndtr_where_trunc_normal_uses_it():
+    """The lower tail and the centre. Past z ~ 4, log Phi(z) ~ -3e-5 holds
+    too little of z to invert (measured 1e-4 at 4-5, 7e-3 at 5-5.3), which
+    is why trunc_normal reflects every interval to a non-positive centre."""
+    z = np.linspace(-37.0, 4.0, 2001)
+    with mx.stream(mx.cpu):
+        got = np.array(NT.ndtri_exp(mx.array(log_ndtr(z), dtype=mx.float64)))
+    assert np.max(np.abs(got - z) / np.maximum(np.abs(z), 1.0)) < 1e-6
+
+
 def test_truncated_normal_draws_are_exact_and_masses_correct():
     rng = np.random.default_rng(0)
     a = np.r_[rng.uniform(-30, 30, 4000), rng.uniform(-30, 0, 1000)]
@@ -331,6 +341,31 @@ def test_float32_tracks_float64_and_blocking_is_exact(data):
         g64 = np.array(mx.grad(lambda v: hi(v).sum())(
             mx.array(V[:6], dtype=mx.float64)))
     assert (np.abs(g32 - g64) / np.maximum(np.abs(g64), 1.0)).max() < 1e-2
+
+
+def test_batched_rows_do_not_mix(data):
+    """Every per-chain quantity -- x*, L, g, R, the Gaussian, log Z, the
+    conditional draws' inputs -- computed for a batch equals the same row
+    computed alone (an axis slip in an einsum or a reduction would couple
+    chains and still pass every single-theta test)."""
+    _, hi = _targets(data)
+    rng = np.random.default_rng(3)
+    V = np.tile(H4.V_TRUE[:5], (5, 1))
+    V[:, 2:] *= 1 + 0.03 * rng.standard_normal((5, 3))
+
+    def parts(rows):
+        v = mx.array(rows, dtype=mx.float64)
+        x, L, g, R = LH.expansion_point(hi._gen_blocks(hi.unpack(v)),
+                                        len(rows), mx.float64)
+        u, my, Ly = hi._gauss(x, g, R)
+        return [np.array(a) for a in (x, L, g, R, my, Ly, hi(v))]
+
+    with mx.stream(mx.cpu):
+        whole = parts(V)
+        for i in range(len(V)):
+            for w, one in zip(whole, parts(V[i:i + 1])):
+                np.testing.assert_allclose(w[i], one[0], rtol=1e-10,
+                                           atol=1e-10)
 
 
 def test_detached_gradient_matches_finite_differences_without_exposure():

@@ -182,6 +182,7 @@ def test_collapsed_hybrid4_lineph_end_to_end(tmp_path, fake_target):
     assert "dim 5" in text and "GHK layout frozen at the MAP" in text
     assert "conditional draws of q1, q2, q3, q4" in text
     assert "--PL=exact (required by --ld=collapsed" in text
+    assert "refused to compile" not in text        # anvil ran it compiled
     out = str(tmp_path)
     rows = _summary_rows(os.path.join(out, "KOI-1.01_lineph_summary.csv"))
     assert list(rows)[:9] == ["dP", "dtau0", "k", "beta", "T14",

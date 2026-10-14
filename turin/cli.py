@@ -113,15 +113,17 @@ usage: turin --KOI-448.02 [options]
                           exact is the true flux-space profile, ratio is
                           hurin's O(transit depth) form, hybrid refines
                           ratio's static factorization back to exact
-  --ld=sampled|collapsed  limb darkening. sampled (default) samples q1, q2
-                          with everything else. collapsed integrates the
-                          quadratic law out of the log-density and draws
-                          q1, q2 afterwards from their exact conditional
-                          (collapsed Gibbs): same posterior, two fewer
-                          sampled dimensions, ~2.2x the per-evaluation
-                          memory. LinEph only (--modes=lineph); needs
-                          --PL=exact or auto, circular geometry and the
-                          quadratic law
+  --ld=sampled|collapsed  limb darkening. sampled (default) samples the
+                          law's q's (q1, q2; q1..q4 for hybrid4) with
+                          everything else. collapsed integrates the limb
+                          darkening out of the log-density and draws the
+                          q's afterwards from their exact conditional
+                          (collapsed Gibbs): same posterior, two (four)
+                          fewer sampled dimensions. Quadratic: ~2.2x the
+                          per-evaluation memory; hybrid4: ~5.6x the
+                          per-evaluation time. LinEph only
+                          (--modes=lineph); needs --PL=exact or auto
+                          (auto resolves to exact) and circular geometry
   --law=quadratic|hybrid4 limb-darkening law. quadratic (default) samples
                           Kipping's q1, q2. hybrid4 is elome's four-weight
                           rational law (LDhybrid v1.0; SquishierPlanet
