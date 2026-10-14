@@ -147,6 +147,9 @@ turin/
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
+  ldhybrid.py     --law=hybrid4 --ld=collapsed: the same over a 4-simplex (MarginalHybridLogProb, HybridOmegaSampler)
+  simplexmass.py  GHK over a simplex, two-pass MGS/TSQR, triangular solves, exact simplex QP on R
+  normtail.py     tail-stable log Phi, its inverse, truncated-normal draws (MLX has no erfc)
   outputs.py      CSV/PDF products, resume state
   capabilities.py minimum-anvil gate, installed versions, MLX cache release
 ```
@@ -328,13 +331,53 @@ poles, eps = 0.0286, 0.3858).
 
 Products: `q1..q4` are sampled rows (R-hat, ESS); `w1..w4` are derived rows
 and chain columns, placed before `loglike`. Refused, CLI and pipeline:
-`--ld=collapsed` (quadratic only -- hybrid4's needs the 4-simplex integral,
-GHK in SquishierPlanet's prototype) and `--geometry=chord` (hurin parity;
-hurin has only quadratic). This is **Step 1 of SquishierPlanet's
+`--geometry=chord` (hurin parity; hurin has only quadratic). This and the
+collapsed form below are **Steps 1 and 2 of SquishierPlanet's
 `docs/upstream/turin_oblate_prompt.md`**, for hybrid4 only, built on the
-user's request; Step 2 (collapsed hybrid LD, which that brief recommends as
-hybrid4's default) and Step 3 (oblate planets) are not done, and hybrid2/5
-are not exposed.
+user's request; Step 3 (oblate planets) is not done, and hybrid2/5 are not
+exposed. Low-SNR grazing caveat, measured on KOI-448.02: four free weights
+can fake a V shape, so sampled hybrid4 split between the quadratic law's
+grazing solution (k 0.16) and a small central planet with extreme limb
+darkening (k 0.027, q1 on its wall), unconverged at R-hat 1.26; on
+KOI-518.02 the laws cost the same. That target is atypical (the user's
+point): do not generalise from it.
+
+### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62)
+
+`ldmarg`'s collapsed Gibbs over a 4-simplex: five generator curves
+`{1, 1-T_j}` from one `ld_basis` launch (`model.generator_flux_devs`; any
+hybrid4 law is `sum omega_g F_g`, 9e-18), induced prior
+`-5 log sum omega_g/F*_g`, the baseline profiled exactly, `L(x)`'s quadratic
+model integrated over the simplex. `ldmarg.py` is untouched (bitwise). What
+had to change from 2-D, each decided by measurement (the probe and its
+numbers: `docs/bench/collapsed_hybrid_probe.md`):
+
+- **Integral by GHK**, 1,024 frozen scrambled-Sobol points, layout
+  `(dep, order)` frozen at the fit's MAP (`ldhybrid.freeze_layout`). Error
+  ~1/N; re-choosing the layout per draw did not help. The layout and the
+  **points themselves** are stored in `ResumeState` (not a seed: scipy
+  could change), so resume and `--replot` rebuild the identical target.
+- **Algebra on R, never H.** Two-pass MGS of the projected columns, TSQR
+  across blocks, ridge as appended rows, unrolled triangular solves, the
+  GHK factor from a second QR of `R^-T T^T`. KOI-448.02's H reached cond
+  7e9 (float32 solves 12x wrong); R's is <= 8.5e4.
+- **x\* is the exact QP optimum of the centroid model** (face enumeration,
+  31 supports, each by QR on R: `simplexmass.qp_simplex_r`), then detached.
+  A Euclidean projection was tried and is pinned against by a test.
+- **Normal tails** (`normtail.py`): NR erfcc in log form, Acklam inverse,
+  and one lower-tail truncated normal after reflecting to a non-positive
+  centre (a third of the work of three where-branches; GHK dominates cost).
+- **Conditional draws**: independence MH through 32 fresh GHK draws, weight
+  `(L - L_model) + lw_GHK`, started from a proposal (edge-atom rule).
+  Acceptance is ~0.25 (GHK's weight variance), yet the draws match the
+  exact conditional (means 0.5 se, widths 1.3%).
+- Cost: 25 ms vs 4.5 ms sampled (512 chains, value+grad); GHK is ~2/3 of
+  it. It pays only where sampled weights mix badly. **Real-target
+  acceptance against sampled hybrid4 is pending** (plan step 6).
+- How the accuracy was mis-measured once, recorded so it is not repeated:
+  uniform-simplex QMC is not a reference for a peaked integrand (it was off
+  by up to thousands of nats at high SNR and was misread as a bug in x*);
+  importance-sample the true L from the model's own GHK draws instead.
 
 ### Collapsed limb darkening (`--ld=collapsed`, `ldmarg.py`)
 

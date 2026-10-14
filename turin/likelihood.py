@@ -295,9 +295,12 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
     ``validate_precision``, ``certify`` and ``reanchor_every``. It costs a
     second copy of the static tensors (a few MB) and nothing per call.
 
-    The likelihood class follows ``layout.ld``: ``"collapsed"`` builds
-    :class:`turin.ldmarg.MarginalLDLogProb` for both the float32 target and
-    the float64 replica, so ``log_prob_hi`` is the float64 collapsed density.
+    The likelihood class follows ``layout.ld`` and ``layout.law``:
+    ``"collapsed"`` builds :class:`turin.ldmarg.MarginalLDLogProb` (quadratic)
+    or :class:`turin.ldhybrid.MarginalHybridLogProb` (hybrid4, which also
+    takes ``ghk_layout``/``ghk_points``; other classes ignore them) for both
+    the float32 target and the float64 replica, so ``log_prob_hi`` is the
+    float64 collapsed density.
     ``ld_mode``, if given, must agree with the layout -- it is a check, not a
     switch, because the two modes have different dimensions.
     """
@@ -307,10 +310,15 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
     if ld != layout.ld:
         raise ValueError(f"ld_mode={ld_mode!r} but the layout was built with "
                          f"ld={layout.ld!r}")
-    if ld == "collapsed":
+    if ld == "collapsed" and layout.law == "hybrid4":
+        from .ldhybrid import MarginalHybridLogProb as cls
+    elif ld == "collapsed":
         from .ldmarg import MarginalLDLogProb as cls
     else:
         cls = ProfiledTransitLogProb
+    if cls is not _ghk_class() and ("ghk_layout" in kw or "ghk_points" in kw):
+        kw = {k: v for k, v in kw.items()
+              if k not in ("ghk_layout", "ghk_points")}
 
     lo = cls(layout, centering, epoch_data, orders, dtype=mx.float32, **kw)
     hi = None
@@ -324,6 +332,12 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
         lo, transform,
         model_log_prob_hi=(_Fp64Wrapper(hi) if hi is not None else None))
     return target, transform, lo, hi
+
+
+def _ghk_class():
+    from .ldhybrid import MarginalHybridLogProb
+
+    return MarginalHybridLogProb
 
 
 class _Fp64Wrapper:

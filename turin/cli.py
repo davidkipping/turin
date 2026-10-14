@@ -130,7 +130,9 @@ usage: turin --KOI-448.02 [options]
                           sampled through q1..q4 in the unit cube, mapped
                           uniformly onto its weight simplex (SquishierPlanet's
                           stick-breaking); the weights w1..w4 are reported as
-                          derived. Needs circular geometry and --ld=sampled
+                          derived. Needs circular geometry. With
+                          --ld=collapsed (LinEph only) the four weights are
+                          integrated out, as for the quadratic law
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -255,10 +257,6 @@ def law_problem(args):
     law = getattr(args, "law", "quadratic")
     if law == "quadratic":
         return None
-    if getattr(args, "ld", "sampled") == "collapsed":
-        return (f"--law={law} needs --ld=sampled: collapsed limb darkening is "
-                "implemented for the quadratic law only (its hybrid4 form "
-                "needs a simplex integral turin does not have yet)")
     if args.geometry != "circular":
         return (f"--law={law} needs --geometry=circular: chord is for hurin "
                 "parity, and hurin has only the quadratic law; the hybrid "

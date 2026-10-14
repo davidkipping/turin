@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turin"
-version = "0.1.61"
+version = "0.1.62"
 description = "GPU transit fitting for Kepler and TESS: profile-likelihood polynomial detrending with elome and anvil on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +13,7 @@ authors = [{ name = "David Kipping" }]
 dependencies = [
     "mlx>=0.30",
     "numpy>=1.24",
+    "scipy>=1.11",
     "lightkurve>=2.4",
     "astropy>=5.3",
     "requests>=2.31",

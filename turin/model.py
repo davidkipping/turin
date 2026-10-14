@@ -546,6 +546,55 @@ def vertex_flux_devs(grid, *, mid, k, b, T14, period):
     return [b0 / f0, b2 / f1, (2.0 * b1 - b2) / f2]
 
 
+def generator_flux_devs(grid, *, mid, k, b, T14, period, law="hybrid4"):
+    """Light-curve deviations of a hybrid law's generator laws.
+
+    Returns ``[F_0 - 1, ..., F_n - 1]``, each ``(n_chains, n_epochs,
+    max_pts)``, for the generators ``{1, 1 - T_j}`` of the law's shape basis
+    (coefficients ``c_g = (1, -e_g)`` in elome's ``ld_basis`` contract
+    ``flux - 1 = (B @ c) / (N @ c)``). Every law on the weight simplex
+    ``w_j >= 0, sum w_j <= 1`` is the convex mix ``sum_g omega_g (F_g - 1)``
+    with ``omega_g = lambda_g F*_g / sum(lambda F*)``, ``lambda = (1 - sum w,
+    w)`` and ``F*_g = N @ c_g`` (:func:`generator_fstar`); verified to 9e-18
+    in float64. This is what lets :mod:`turin.ldhybrid` integrate the weights
+    out. One kernel launch, the route and phase-order gathers of
+    :func:`vertex_flux_devs`; no fallback (``geometry="chord"`` has no tau
+    kernel).
+    """
+    if not HAS_TAU_KERNEL:
+        raise RuntimeError("generator_flux_devs needs elome's tau kernel "
+                           "(flux_dev_from_tau)")
+    n_g = len(ld_names(law)) + 1
+    n_chains = mid.shape[0]
+    flat = time_from_mid(grid, mid).reshape(n_chains, -1)
+    if grid.order is not None:
+        flat = mx.take(flat, grid.order, axis=1)
+    basis = elome.flux_dev_from_tau(
+        flat, period, a_over_rstar(T14, period, k, b), b, k,
+        exp_time=grid.exp_time,
+        integration="contact" if grid.exp_time > 0 else "none",
+        n_gl=grid.n_gl, limb_dark=law, ld_basis=True)        # (C, m, n_g)
+    if grid.order is not None:
+        basis = mx.take(basis, grid.unorder, axis=1)
+    shape = (n_chains, grid.n_epochs, grid.max_pts)
+    norms = generator_norms(law)
+    b0 = basis[..., 0]
+    out = [(b0 / norms[0]).reshape(shape)]
+    for j in range(1, n_g):
+        out.append(((b0 - basis[..., j]) / norms[j]).reshape(shape))
+    return out
+
+
+def generator_norms(law="hybrid4"):
+    """``F*_g = N @ c_g``, the generators' unocculted fluxes, as Python
+    floats (so nothing float64 leaks into a float32 graph): ``N_0`` and
+    ``N_0 - N_j``."""
+    from elome.hybrid import hybrid_norms
+
+    N = [float(x) for x in np.asarray(hybrid_norms(law), dtype=np.float64)]
+    return (N[0],) + tuple(N[0] - N[j] for j in range(1, len(N)))
+
+
 def transit_flux(grid, **kw):
     """Exposure-averaged transit flux, ``1 + f_dev``.
 

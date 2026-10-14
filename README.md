@@ -89,6 +89,7 @@ analytically inside every log-density evaluation — a profile likelihood — so
 | `ttv` | `k, beta, T14, q1, q2` + one `dtau` per transit | period fixed; timings seeded by a template sweep |
 | `lineph --ld=collapsed` | `dP, dtau0, k, beta, T14` | limb darkening integrated out; `q1, q2` drawn from their conditional (see below) |
 | either, `--law=hybrid4` | `q1, q2, q3, q4` in place of `q1, q2` | the hybrid4 law; weights `w1..w4` derived (see below) |
+| `lineph --law=hybrid4 --ld=collapsed` | `dP, dtau0, k, beta, T14` | hybrid4's weights integrated out; `q1..q4` drawn from their conditional |
 
 `beta` is the impact parameter as a fraction of its k-dependent bound, which
 is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
@@ -176,21 +177,29 @@ A uniform cube gives a uniform simplex, as Kipping's map gives a uniform
 quadratic triangle. The summary and chains carry `q1..q4` (sampled, with
 R-hat and ESS) and the physical weights `w1..w4` (derived, like `b`).
 
-- **Works in both fit modes**, `lineph` and `ttv`, with grid-Gibbs.
-- **Needs `--ld=sampled`.** Collapsed limb darkening exists for the
-  quadratic law only; for hybrid4 it needs an integral over a 4-simplex that
-  turin does not have yet.
+- **Works in both fit modes**, `lineph` and `ttv`, with grid-Gibbs, and with
+  `--ld=collapsed` for LinEph (below).
 - **Needs circular geometry** (`chord` exists for hurin parity, and hurin
   has only the quadratic law).
 - A lineage never changes law: resuming with another `--law` is refused.
 - Weights fitted with older hybrid4 definitions (Elómë < 0.15's pole
   ladder) are not interchangeable with these.
+- **A caution for weak grazing transits.** Four free weights can make a
+  transit V-shaped, so on a low-SNR grazing system hybrid4 can admit a
+  second explanation the quadratic law does not: a small planet on a central
+  chord with extreme limb darkening. On KOI-448.02 (default prior) the
+  quadratic fit is 99.7% grazing at `k = 0.16`; sampled hybrid4 split its
+  chains between that and `k = 0.027, b = 0.27`, with `q1` against its wall,
+  and had not converged after three rounds (R-hat 1.26). On a typical
+  target (KOI-518.02) the two laws cost the same and both converged in one
+  round.
 
 ### Collapsed limb darkening (`--ld=collapsed`)
 
-An opt-in alternative for the LinEph fit. Instead of sampling `q1, q2` with
-everything else, turin integrates the quadratic limb darkening out of the
-log-density, samples the other five parameters from that **marginal**
+An opt-in alternative for the LinEph fit, for either law
+(`--law=hybrid4 --ld=collapsed`: see "Collapsed hybrid4" below). Instead of
+sampling `q1, q2` with everything else, turin integrates the quadratic limb
+darkening out of the log-density, samples the other five parameters from that **marginal**
 posterior, and then draws `q1, q2` for every kept sample from their exact
 **conditional** given the rest. Marginal plus conditional draws of the
 integrated block is collapsed Gibbs sampling: the joint posterior is the same
@@ -260,6 +269,41 @@ so grazing geometries are covered by synthetic tests only. The default
 mode's chains are byte-identical to those from before the feature existed
 (KOI-518.02, 153,600 draws). Details: `docs/bench/collapsed_ld_acceptance.md`.
 
+### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`)
+
+The same idea for hybrid4's four weights, which take five generator light
+curves and live on a 4-simplex instead of a triangle. Every hybrid4 law is a
+convex mix of the generators `{1, 1 - T_j}` (exact, to 9e-18), and uniform
+`q1..q4` induce the prior `-5 log sum_g omega_g/F*_g` on the mixing weights.
+The baseline is profiled exactly as always, and the profiled likelihood is
+integrated over the simplex under its quadratic model about its exact
+constrained optimum. Two things differ from the quadratic law's version:
+
+- **The integral is GHK** (Geweke-Hajivassiliou-Keane: sequential truncated
+  normals on a fixed 1,024-point scrambled-Sobol rule, so the value is
+  deterministic and differentiable). Against a 2^18-point reference at
+  posterior draws its error is at most 0.015 nats on KOI-518.02, and 0.03 at
+  the 95th percentile on KOI-448.02's two-solution posterior. The rule's
+  layout is frozen at the fit's MAP, and the layout and points are stored
+  with the fit, so a resume or `--replot` rebuilds the identical target.
+- **The algebra runs on the triangular factor of the curvature**, never the
+  curvature itself, which reaches a condition number of 7e9 on KOI-448.02
+  (beyond float32); its factor's is at most 8.5e4.
+
+Checked against references that share none of its approximations: the
+collapsed value equals the true integral to under 5e-4 nats near the
+posterior on synthetic data (5e-3 at very high SNR); the conditional draws
+of `q1..q4` reproduce the exact conditional (means within 0.5 standard
+errors, widths within 1.3%) with none on a wall; float32 tracks float64 to
+an sd of 4e-4. It costs about 5.6x the sampled hybrid4 likelihood per
+evaluation (25 ms against 4.5 ms for 512 chains, value and gradient), mostly
+the GHK integral, so it pays only where the sampled weights mix badly -- the
+case SquishierPlanet measured 10-100x gains on, where they press on the
+simplex walls -- not on a typical Kepler target, where sampled hybrid4
+already mixes as well as the quadratic law. **Real-target acceptance
+against sampled hybrid4 is pending.** Products, restrictions and the resume
+guard are as for the quadratic law, with `q1..q4` and derived `w1..w4`.
+
 ### Weak transits and grid-Gibbs
 
 A transit observed at low signal-to-noise, or with a data gap across it, has a
@@ -322,7 +366,8 @@ cannot pool chains drawn both ways.
 --geometry=circular|chord    true circular orbit (default) or hurin's chord
 --ld=sampled|collapsed       sample q1, q2 (default), or integrate the limb
                              darkening out (LinEph only), see above
---law=quadratic|hybrid4      limb-darkening law (default quadratic), see above
+--law=quadratic|hybrid4      limb-darkening law (default quadratic), see above;
+                             with --ld=collapsed for LinEph too
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache

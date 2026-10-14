@@ -342,6 +342,12 @@ class ResumeState:
     #: every state written before it existed used that law; a lineage can
     #: never switch law (different parameters, different model).
     law: str = "quadratic"
+    #: collapsed hybrid limb darkening only: the GHK layout ``(dep, order)``
+    #: frozen at the fit's MAP, and the rule's points themselves (not a
+    #: seed, so a scipy upgrade cannot change a resumed target). Both are
+    #: part of the density; ``None`` for every other fit.
+    ghk_layout: tuple | None = None
+    ghk_points: np.ndarray | None = None
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
               "gibbsgrid", "ld", "law")

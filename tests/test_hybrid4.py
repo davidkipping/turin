@@ -69,8 +69,10 @@ def test_names_and_layouts():
     assert ttv.names[7:] == ("dtau_0", "dtau_1", "dtau_2")
     assert ttv.n_shape == 7
 
-    with pytest.raises(ValueError, match="quadratic law only"):
-        params.lineph_layout(EPH, ld="collapsed", law="hybrid4")
+    # collapsed hybrid4 samples the geometry alone (tests/test_ldhybrid.py)
+    col = params.lineph_layout(EPH, ld="collapsed", law="hybrid4")
+    assert col.names == ("dP", "dtau0", "k", "beta", "T14")
+    assert col.law == "hybrid4" and col.ld_names == ()
 
 
 def test_q_maps_onto_the_weight_simplex_as_squishierplanet_does():

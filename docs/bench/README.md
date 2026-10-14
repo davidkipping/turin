@@ -9,6 +9,8 @@ Three records live here.
 - `collapsed_ld_battery.md` and `collapsed_ld_battery_compare.py`: the same
   comparison on 20 Kepler targets, including 14 with real grazing posterior
   mass; same posteriors, ~1.25x the LinEph cost.
+- `collapsed_hybrid_probe.md`: the measurements that set the design of
+  collapsed hybrid4 limb darkening (`--law=hybrid4 --ld=collapsed`).
 - Everything below: the hurin/turin comparison on KOI-518.02.
 
 ## KOI-518.02 hurin/turin benchmark artefacts

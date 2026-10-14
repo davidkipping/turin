@@ -145,9 +145,10 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
                   law="quadratic"):
     """Parameter layout for the linear-ephemeris fit.
 
-    ``ld="collapsed"`` drops ``q1, q2`` from the sampled vector: the limb
-    darkening is integrated out of the log-density instead
-    (:class:`turin.ldmarg.MarginalLDLogProb`). Quadratic law only.
+    ``ld="collapsed"`` drops the limb-darkening coordinates from the sampled
+    vector: the limb darkening is integrated out of the log-density instead
+    (:class:`turin.ldmarg.MarginalLDLogProb` for the quadratic law,
+    :class:`turin.ldhybrid.MarginalHybridLogProb` for hybrid4).
     """
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
@@ -155,9 +156,8 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
         raise ValueError(f"unknown ld mode {ld!r}; expected {LD_MODES}")
     if law not in LAWS:
         raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
-    if ld == "collapsed" and law != "quadratic":
-        raise ValueError("--ld=collapsed is implemented for the quadratic "
-                         f"law only, not {law}")
+    if ld == "collapsed" and law not in ("quadratic", "hybrid4"):
+        raise ValueError(f"--ld=collapsed is not implemented for {law}")
     rows = [("dP", -DP_HALF, DP_HALF), ("dtau0", -DTAU0_HALF, DTAU0_HALF)]
     rows += list(_shape_bounds(eph, T14_max=T14_max, law=law))
     if ld == "collapsed":

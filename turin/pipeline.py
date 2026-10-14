@@ -45,6 +45,15 @@ PARAM_LABELS = {
 
 
 
+
+def _ghk_kw(layout, state):
+    """``build_target`` keywords for a collapsed hybrid4 target resumed from
+    ``state``: its frozen GHK layout and points. Empty otherwise."""
+    if (layout.ld != "collapsed" or layout.law != "hybrid4" or state is None
+            or getattr(state, "ghk_layout", None) is None):
+        return {}
+    return dict(ghk_layout=state.ghk_layout, ghk_points=state.ghk_points)
+
 def _model_ld_names(law):
     from .model import ld_names
 
@@ -191,9 +200,10 @@ def replot(args, prepared, outdir, *, log=print):
             layout, centering, ed, orders, profile_mode=state.profile_mode,
             ld_mode=layout.ld, num_resample=prepared.num_resample,
             exposure_time=prepared.exposure_time, geometry=args.geometry,
-            n_chains_hint=64, fp64=True)
+            n_chains_hint=64, fp64=True, **_ghk_kw(layout, state))
         collapsed = layout.ld == "collapsed"
-        names = list(layout.names) + (["q1", "q2"] if collapsed else [])
+        names = list(layout.names) + (
+            list(_model_ld_names(layout.law)) if collapsed else [])
 
         tf = tarfile.open(chains_path)
         d = pd.read_csv(io.StringIO(
@@ -459,15 +469,18 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         pl_choice = None                     # probed below, once the MAP exists
 
     provisional = pl_choice.mode if pl_choice else "exact"
+    # collapsed hybrid4: a resumed lineage rebuilds its stored GHK rule; a
+    # fresh one starts on the default layout and freezes its own at the MAP
+    build_kw.update(_ghk_kw(layout, prior_state))
     target_obj, transform, lp, hi = _likelihood.build_target(
         layout, centering, epoch_data, orders,
         profile_mode=provisional, ld_mode=layout.ld, **build_kw)
     log(f"  log-density: dim {layout.dim}, "
         f"{len(lp.blocks)} epoch block(s) of <= {lp.block_size}")
     if layout.ld == "collapsed":
-        log("  limb darkening: collapsed -- integrated out of the "
-            "log-density; q1, q2 drawn afterwards from their exact "
-            "conditional")
+        log(f"  limb darkening ({layout.law}): collapsed -- integrated out of "
+            f"the log-density; {', '.join(_model_ld_names(layout.law))} drawn "
+            "afterwards from their exact conditional")
     if prepared.exposure_time > 0:
         from .model import HAS_TAU_KERNEL, N_GL
 
@@ -562,6 +575,20 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
                 transform, build_kwargs=build_kw, n_chains=cfg.n_chains,
                 seed=args.seed, log=log)
         u0 = map_res.ball(cfg.n_chains, seed=args.seed + 1)
+        if layout.ld == "collapsed" and layout.law == "hybrid4":
+            # GHK's layout is frozen once per fit, at the MAP, and rebuilt
+            # into the target; the init ball carries over (same parameters)
+            from . import ldhybrid as _ldh
+
+            v_map = transform.model_np(np.asarray(map_res.u_best)[None, :])[0]
+            frozen = _ldh.freeze_layout(hi if hi is not None else lp, v_map)
+            build_kw.update(ghk_layout=frozen, ghk_points=lp.ghk_points)
+            target_obj, transform, lp, hi = _likelihood.build_target(
+                layout, centering, epoch_data, orders,
+                profile_mode=provisional, ld_mode=layout.ld, **build_kw)
+            log(f"    GHK layout frozen at the MAP: dependent weight "
+                f"{frozen[0]}, order {list(frozen[1])} "
+                f"({lp.ghk_points.shape[0]} points)")
 
     if pl_choice is None:                    # resumed without a MAP step
         pl_choice = _plselect.fixed_choice(
@@ -721,11 +748,11 @@ def _ml_model(lp, v_ml, collapsed):
     with mx.stream(mx.cpu):
         v_row = mx.array(np.asarray(v_ml)[None, :].astype(np.float32))
         if collapsed:
-            # one curve needs one (q1, q2): the conditional mode at the ML
-            # theta. A display point estimate only; the posterior q1, q2 in
+            # one curve needs one limb darkening: the conditional mode at the
+            # ML theta. A display point estimate only; the posterior q's in
             # every other product are the conditional draws.
-            (cq1,), (cq2,) = lp.conditional_mode_ld(v_row)
-            q_ml = (float(cq1), float(cq2))
+            q_ml = tuple(float(np.asarray(a)[0])
+                         for a in lp.conditional_mode_ld(v_row))
         model, coeffs = lp.full_model(v_row, ld=q_ml)
         model = np.array(model, dtype=np.float64)[0]
         baseline = np.array(_profile.baseline(lp.design, coeffs),
@@ -774,22 +801,32 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     names = names_s
     thin = _sampling.export_thin(results)
     collapsed = layout.ld == "collapsed"
+    ld_cols = list(_model_ld_names(layout.law))
     if collapsed:
-        # collapsed Gibbs: q1, q2 were integrated out of the sampled target,
-        # so each kept draw gets them from its exact conditional here. The
-        # sampler needs model-space draws (physical ones carry dP/dtau0's
-        # report offsets).
-        from . import ldmarg as _ldmarg
-
+        # collapsed Gibbs: the limb darkening was integrated out of the
+        # sampled target, so each kept draw gets it from its exact
+        # conditional here. The sampler needs model-space draws (physical
+        # ones carry dP/dtau0's report offsets).
         flat = results.get_chain(thin=thin, flat=True).astype(np.float64)
         v_model = transform.model_np(flat)
-        q1, q2, acc, edge = _ldmarg.draw_limb_darkening(lp, v_model,
-                                                        seed=args.seed)
-        phys = np.column_stack([transform.to_physical(v_model), q1, q2])
-        names = names_s + ["q1", "q2"]
-        log(f"  limb darkening: {len(q1)} conditional draws of q1, q2 "
-            f"(MH acceptance {acc:.2f}; expansion point on a triangle edge "
-            f"for {100 * edge:.0f}% of draws)")
+        if layout.law == "hybrid4":
+            from . import ldhybrid as _ldh
+
+            q, acc, edge = _ldh.draw_limb_darkening(lp, v_model,
+                                                    seed=args.seed)
+            where = "a face of the weight simplex"
+        else:
+            from . import ldmarg as _ldmarg
+
+            q1, q2, acc, edge = _ldmarg.draw_limb_darkening(lp, v_model,
+                                                            seed=args.seed)
+            q = np.column_stack([q1, q2])
+            where = "a triangle edge"
+        phys = np.column_stack([transform.to_physical(v_model), q])
+        names = names_s + ld_cols
+        log(f"  limb darkening: {len(q)} conditional draws of "
+            f"{', '.join(ld_cols)} (MH acceptance {acc:.2f}; expansion point "
+            f"on {where} for {100 * edge:.0f}% of draws)")
     else:
         phys = _sampling.physical_draws(transform, results, thin=thin)
 
@@ -802,7 +839,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                                  rhat=verdict.rhat, ess_bulk=verdict.ess,
                                  ess_tail=None)
     if collapsed:
-        summary.update(_outputs.summarize(phys[:, len(names_s):], ["q1", "q2"]))
+        summary.update(_outputs.summarize(phys[:, len(names_s):], ld_cols))
 
     # derived quantities, computed after sampling in float64
     b_draws = _outputs.derived_b(phys, names, layout.b_prior)
@@ -869,6 +906,8 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         ld=layout.ld, law=layout.law,
+        ghk_layout=getattr(lp, "ghk_layout", None),
+        ghk_points=getattr(lp, "ghk_points", None),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,
         n_durations=float(prepared.n_durations),
         legendre_orders=np.asarray(orders), exposure_time=prepared.exposure_time,

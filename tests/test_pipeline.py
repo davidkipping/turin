@@ -170,6 +170,52 @@ def test_hybrid4_writes_its_weights_in_both_modes(tmp_path, fake_target):
     assert sum("replotting" in l for l in logs) == 2, logs
 
 
+def test_collapsed_hybrid4_lineph_end_to_end(tmp_path, fake_target):
+    """--law=hybrid4 --ld=collapsed samples the geometry alone, freezes its
+    GHK layout at the MAP and stores the rule with the fit; products carry
+    q1..q4 from conditional draws (blank diagnostics) and w1..w4 derived;
+    a resume continues on the stored rule and --replot replays it."""
+    logs = []
+    args = _args(tmp_path, ld="collapsed", law="hybrid4")
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    text = "\n".join(logs)
+    assert "dim 5" in text and "GHK layout frozen at the MAP" in text
+    assert "conditional draws of q1, q2, q3, q4" in text
+    assert "--PL=exact (required by --ld=collapsed" in text
+    out = str(tmp_path)
+    rows = _summary_rows(os.path.join(out, "KOI-1.01_lineph_summary.csv"))
+    assert list(rows)[:9] == ["dP", "dtau0", "k", "beta", "T14",
+                              "q1", "q2", "q3", "q4"]
+    for q in ("q1", "q2", "q3", "q4"):
+        assert rows[q]["R-hat"] == "" and 0 < float(rows[q]["Median"]) < 1
+    assert rows["k"]["R-hat"] != "" and {"w1", "w4", "b"} <= set(rows)
+    with tarfile.open(os.path.join(out, "KOI-1.01_lineph_chains.csv.tar.gz")) as t:
+        body = t.extractfile(t.getmembers()[0]).read().decode().splitlines()
+    cols = body[0].split(",")
+    assert cols == ["dP", "dtau0", "k", "beta", "T14", "q1", "q2", "q3", "q4",
+                    "b", "log10_rho", "w1", "w2", "w3", "w4", "loglike"]
+    d = np.array([[float(x) for x in r.split(",")] for r in body[2:]])
+    assert np.all((d[:, 5:9] > 0) & (d[:, 5:9] < 1))
+    st = outputs.load_resume(out, "KOI-1.01", "lineph")
+    assert (st.ld, st.law, st.profile_mode) == ("collapsed", "hybrid4", "exact")
+    assert len(st.ghk_layout) == 2 and st.ghk_points.shape == (1024, 4)
+    assert {"q1", "q2", "q3", "q4"} <= set(st.ml_params)
+
+    logs = []
+    args = _args(tmp_path, ld="collapsed", law="hybrid4", extend1=True)
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    assert not any("GHK layout frozen" in l for l in logs)   # stored rule
+    st2 = outputs.load_resume(out, "KOI-1.01", "lineph")
+    assert st2.ghk_layout == st.ghk_layout
+    assert np.array_equal(st2.ghk_points, st.ghk_points)
+
+    logs = []
+    args = _args(tmp_path, ld="collapsed", law="hybrid4")
+    args.replot = True
+    assert pipeline.run(args, log=logs.append) == 0
+    assert any("replotting" in l for l in logs)
+
+
 def test_a_lineage_never_switches_law(tmp_path, fake_target):
     assert pipeline.run(_args(tmp_path), log=lambda m: None) in FINISHED
     with pytest.raises(SystemExit, match="law='quadratic'"):
@@ -178,7 +224,8 @@ def test_a_lineage_never_switches_law(tmp_path, fake_target):
 
 
 @pytest.mark.parametrize("over,pattern", [
-    (dict(law="hybrid4", ld="collapsed"), "--ld=sampled"),
+    (dict(law="hybrid4", ld="collapsed", modes=("lineph", "ttv")),
+     "modes=lineph"),
     (dict(law="hybrid4", geometry="chord"), "circular"),
 ])
 def test_hybrid4_refusals_reach_the_pipeline(tmp_path, fake_target, over,
@@ -203,7 +250,7 @@ def test_collapsed_lineph_writes_hurin_products(tmp_path, fake_target):
         assert any(n.endswith(suffix) for n in names), (suffix, names)
 
     text = "\n".join(logs)
-    assert "dim 5" in text and "limb darkening: collapsed" in text
+    assert "dim 5" in text and "limb darkening (quadratic): collapsed" in text
     assert "--PL=exact (required by --ld=collapsed" in text
     assert "PL probe" not in text                 # never probed
     assert "conditional draws of q1, q2" in text

@@ -1,0 +1,428 @@
+"""Collapsed hybrid4 limb darkening (``--law=hybrid4 --ld=collapsed``).
+
+Each piece against a reference that does not share its approximation:
+scipy for the normal tails, NumPy's QR and a host QP for the linear algebra,
+direct Monte Carlo from the Gaussian for GHK, turin's sampled hybrid4
+likelihood for the conditional, importance sampling of the *true* likelihood
+for the collapsed value, uniform-simplex quadrature weighted by the true
+likelihood for the conditional draws, float64 for float32.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+import os
+
+import mlx.core as mx
+import numpy as np
+import pytest
+from scipy.special import log_ndtr, ndtr
+from scipy.stats import qmc
+
+from turin import likelihood, params
+from turin import ldhybrid as LH
+from turin import model as M
+from turin import normtail as NT
+from turin import simplexmass as SM
+
+sys.path.insert(0, os.path.dirname(__file__))
+import test_hybrid4 as H4                                   # noqa: E402
+
+
+# -- normal tails ------------------------------------------------------------
+
+def _cdf_fraction(z, a, b):
+    if a >= 0:
+        la, lb, lz = log_ndtr(-a), log_ndtr(-b), log_ndtr(-z)
+        return -np.expm1(lz - la) / -np.expm1(lb - la)
+    if b <= 0:
+        la, lb, lz = log_ndtr(a), log_ndtr(b), log_ndtr(z)
+        return -np.expm1(la - lz) * np.exp(lz - lb) / -np.expm1(la - lb)
+    return (ndtr(z) - ndtr(a)) / (ndtr(b) - ndtr(a))
+
+
+def test_log_ndtr_matches_scipy_in_both_tails():
+    x = np.linspace(-40.0, 8.0, 3001)
+    with mx.stream(mx.cpu):
+        got = np.array(NT.log_ndtr(mx.array(x, dtype=mx.float64)))
+    ref = log_ndtr(x)
+    assert np.max(np.abs(got - ref) / np.maximum(np.abs(ref), 1e-12)) < 1e-5
+    assert np.max(np.abs(got - ref)) < 1e-6
+
+
+def test_truncated_normal_draws_are_exact_and_masses_correct():
+    rng = np.random.default_rng(0)
+    a = np.r_[rng.uniform(-30, 30, 4000), rng.uniform(-30, 0, 1000)]
+    b = np.r_[a[:4000] + rng.exponential(1.0, 4000),
+              a[4000:] + rng.uniform(0, 60, 1000)]       # wide straddles too
+    v = rng.uniform(1e-6, 1 - 1e-6, a.size)
+    with mx.stream(mx.cpu):
+        z, lm = NT.trunc_normal(*(mx.array(t, dtype=mx.float64)
+                                  for t in (a, b, v)))
+    z, lm = np.array(z), np.array(lm)
+    assert np.all((z >= a) & (z <= b))
+    frac = np.array([_cdf_fraction(z[i], a[i], b[i]) for i in range(a.size)])
+    want = np.where(a + b > 0, 1.0 - v, v)    # the reflected branch reverses v
+    assert np.max(np.abs(frac - want)) < 2e-6
+    ref = np.array([_cdf_fraction(b[i], a[i], b[i]) for i in range(3)])
+    assert np.allclose(ref, 1.0)
+    mass = np.where(a >= 0, log_ndtr(-a) + np.log(-np.expm1(log_ndtr(-b) - log_ndtr(-a))),
+                    np.where(b <= 0, log_ndtr(b) + np.log(-np.expm1(log_ndtr(a) - log_ndtr(b))),
+                             np.log(np.maximum(ndtr(b) - ndtr(a), 1e-300))))
+    assert np.max(np.abs(lm - mass)) < 1e-5
+
+
+def test_truncated_normal_gradient_is_finite_deep_in_a_tail():
+    a = mx.array([25.0, -40.0, 30.0], dtype=mx.float32)
+    b = a + mx.array([1e-3, 1e-4, 2.0], dtype=mx.float32)
+    g = mx.grad(lambda s: mx.sum(NT.trunc_normal(a * s, b * s,
+                mx.full(a.shape, 0.3, dtype=mx.float32))[1]))(
+        mx.array(1.0, dtype=mx.float32))
+    assert np.isfinite(float(g))
+
+
+# -- linear algebra and the QP ------------------------------------------------
+
+def test_mgs_and_tsqr_match_numpy_qr():
+    rng = np.random.default_rng(1)
+    A = rng.normal(size=(3, 400, 4)) * np.array([1, 1e-3, 1e2, 1])
+    with mx.stream(mx.cpu):
+        R = np.array(SM.mgs_r([mx.array(A[:, :, j], dtype=mx.float64)
+                               for j in range(4)]))
+        R2 = np.array(SM.tsqr([SM.mgs_r([mx.array(A[:, s, j], dtype=mx.float64)
+                                         for j in range(4)])
+                               for s in (slice(0, 150), slice(150, 400))]))
+    ref = []
+    for a in A:
+        r = np.linalg.qr(a)[1]
+        ref.append(r * np.sign(np.diag(r))[:, None])
+    ref = np.array(ref)
+    assert np.abs(R - ref).max() / np.abs(ref).max() < 1e-13
+    assert np.abs(R2 - ref).max() / np.abs(ref).max() < 1e-13
+
+
+def test_simplex_qp_on_r_is_the_exact_constrained_optimum():
+    rng = np.random.default_rng(2)
+    worst = 0.0
+    for scale in (1.0, 1e3, 1e8):
+        for _ in range(10):
+            A = rng.normal(size=(4, 4)) * np.array([1, 0.3, 1e-2, 3])
+            H = scale * (A @ A.T + 1e-4 * np.eye(4))
+            xh = rng.dirichlet(np.ones(5))[1:] + rng.normal(0, 0.3, 4)
+            ref = SM.qp_simplex_np(xh, H)
+            R = np.linalg.cholesky(H).T
+            with mx.stream(mx.cpu):
+                x = np.array(SM.qp_simplex_r(
+                    mx.array(R[None], dtype=mx.float64),
+                    mx.array((R @ xh)[None], dtype=mx.float64)))[0]
+            f = lambda z: (z - xh) @ H @ (z - xh)
+            assert np.all(x >= 0) and x.sum() <= 1 + 1e-12
+            worst = max(worst, (f(x) - f(ref)) / max(f(ref), 1e-12))
+    assert worst < 1e-8
+    # and no lattice point beats it (a check independent of both solvers)
+    U = qmc.Sobol(5, scramble=True, seed=3).random(2 ** 14)
+    E = -np.log(U)
+    X = (E / E.sum(1, keepdims=True))[:, 1:]
+    q = np.einsum("ni,ij,nj->n", X - xh, H, X - xh)
+    assert f(x) <= q.min() + 1e-9 * max(1.0, q.min())
+
+
+# -- GHK ----------------------------------------------------------------------
+
+def _gauss_case(rng, scale):
+    A = rng.normal(size=(4, 4))
+    H = scale * (A @ A.T + 0.05 * np.eye(4))
+    xh = rng.dirichlet(np.ones(5))[1:] + rng.normal(0, 0.1, 4)
+    return xh, H
+
+
+def test_ghk_matches_direct_monte_carlo():
+    """``log int_simplex exp(-1/2 (x-xh)^T H (x-xh)) p(x) dx`` by GHK vs by
+    direct sampling of the Gaussian (cases where enough of it is inside)."""
+    rng = np.random.default_rng(1)
+    r2 = np.random.default_rng(9)
+    U = SM.sobol_points(1024, 4, 2024)
+    checked = 0
+    for scale in (30.0, 300.0, 3000.0):
+        for _ in range(3):
+            xh, H = _gauss_case(rng, scale)
+            xs = SM.qp_simplex_np(xh, H)
+            dep, order = SM.choose_layout(xs, H)
+            T, t = SM.layout_map(dep, order, 5)
+            Ly = np.linalg.cholesky(T @ np.linalg.inv(H) @ T.T)
+            with mx.stream(mx.cpu):
+                got = float(SM.ghk_log_mass(
+                    mx.array((T @ xh + t)[None], dtype=mx.float64),
+                    mx.array(Ly[None], dtype=mx.float64),
+                    mx.array(U, dtype=mx.float64), dep, order,
+                    LH.INV_FSTAR)[0])
+            X = xh + r2.standard_normal((400_000, 4)) @ np.linalg.cholesky(
+                np.linalg.inv(H)).T
+            lp = LH.log_prior_x_np(X)
+            inside = np.isfinite(lp)
+            if inside.mean() < 0.02:
+                continue
+            vals = np.where(inside, np.exp(np.where(inside, lp, 0.0)), 0.0)
+            direct = (np.log(vals.mean()) + 2 * math.log(2 * math.pi)
+                      - 0.5 * np.linalg.slogdet(H)[1])
+            se = vals.std() / vals.mean() / math.sqrt(len(vals))
+            assert abs(got - direct) < 4 * se + 0.02, (got, direct, se)
+            checked += 1
+    assert checked >= 5
+
+
+# -- the generators, the prior, the conditional --------------------------------
+
+def test_every_hybrid4_law_is_a_convex_mix_of_the_generators():
+    cen = dict(times_centered=np.linspace(-0.3, 0.3, 400)[None, :],
+               n_arr=np.zeros(1), d_arr=np.zeros(1), P_ref=9.0, tau0_ref=0.0)
+    col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
+    with mx.stream(mx.cpu):
+        grid = M.build_grid(cen, np.zeros(1), dtype=mx.float64,
+                            exp_time=29.4 / 1440, mask=np.ones((1, 400)))
+        kw = dict(mid=mx.zeros((1, 1), dtype=mx.float64), k=col(0.1),
+                  b=col(0.95), T14=col(0.15), period=col(9.0))
+        F = [np.array(f)[0, 0] for f in M.generator_flux_devs(grid, **kw)]
+        for q in np.random.default_rng(0).uniform(size=(6, 4)):
+            om = LH.w_to_omega(M.ld_weights_np(q))
+            ref = np.array(M.transit_flux_dev(
+                grid, q=tuple(col(x) for x in q), law="hybrid4", **kw))[0, 0]
+            assert np.abs(sum(o * f for o, f in zip(om, F)) - ref).max() < 1e-13
+    assert np.allclose(LH.x_to_q(LH.q_to_x(np.array([[0.3, 0.6, 0.2, 0.9]]))),
+                       [[0.3, 0.6, 0.2, 0.9]], atol=1e-12)
+
+
+def test_uniform_q_induces_the_minus_five_prior_on_omega():
+    """E[omega] under uniform q, against the same expectation under the
+    claimed density -5 log sum omega/F* (by uniform-simplex quadrature)."""
+    q = np.random.default_rng(4).uniform(size=(400_000, 4))
+    om = LH.w_to_omega(M.ld_weights_np(q))
+    U = qmc.Sobol(5, scramble=True, seed=6).random(2 ** 18)
+    E = -np.log(U)
+    OM = E / E.sum(1, keepdims=True)
+    w = np.exp(LH.log_prior_x_np(OM[:, 1:]))
+    np.testing.assert_allclose(om.mean(0), w @ OM / w.sum(), atol=2e-3)
+
+
+@pytest.fixture(scope="module")
+def data():
+    return H4.make_dataset()
+
+
+def _targets(data, **kw):
+    ed, cen, _, _, orders = data
+    lay = params.lineph_layout(H4.EPH, ld="collapsed", law="hybrid4")
+    with mx.stream(mx.cpu):
+        hi = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                      exposure_time=H4.EXP, n_chains_hint=8,
+                                      dtype=mx.float64, **kw)
+    return lay, hi
+
+
+def test_conditional_loglik_is_the_sampled_hybrid4_likelihood(data):
+    ed, cen, _, _, orders = data
+    _, hi = _targets(data)
+    sam = params.lineph_layout(H4.EPH, law="hybrid4")
+    with mx.stream(mx.cpu):
+        lp = likelihood.ProfiledTransitLogProb(
+            sam, cen, ed, orders, num_resample=7, exposure_time=H4.EXP,
+            n_chains_hint=8, dtype=mx.float64)
+        q = np.random.default_rng(5).uniform(0.05, 0.95, size=(6, 4))
+        v7 = np.column_stack([np.tile(H4.V_TRUE[:5], (6, 1)), q])
+        vm = mx.array(v7, dtype=mx.float64)
+        want = np.array(lp(vm)) - np.array(lp.log_prior(lp.unpack(vm)))
+        got = np.array(hi.loglik_at(mx.array(v7[:, :5], dtype=mx.float64),
+                                    LH.q_to_x(q)))
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-8)
+
+
+def test_collapsed_value_is_the_true_integral(data):
+    """The collapsed value against ``log int exp(L_true(x)) p(x) dx`` by
+    importance sampling the true likelihood from the model's own GHK draws:
+    this isolates the quadratic model's error (GHK's own is tested below)."""
+    _, hi = _targets(data)
+    rng = np.random.default_rng(3)
+    for i in range(3):
+        v = H4.V_TRUE[:5].copy()
+        if i:
+            v[2:] *= 1 + 0.004 * rng.standard_normal(3)
+        with mx.stream(mx.cpu):
+            vm = mx.array(v[None], dtype=mx.float64)
+            x, L, g, R = hi.ld_terms(vm)
+            u, my, Ly = hi._gauss(x, g, R)
+            dep, order = hi.ghk_layout
+            lw, Y = SM.ghk_terms(my, Ly, mx.array(SM.sobol_points(4096, 4, 77)
+                                                  [None], dtype=mx.float64),
+                                 dep, order, LH.INV_FSTAR)
+            X = np.clip(SM.omega_from_free(np.array(Y)[0], dep, order)[:, 1:],
+                        0, 1)
+            Lt = np.array(hi.loglik_grid(v, X))
+        lw = np.array(lw)[0]
+        xs, Ls, gs, Rs = (np.array(a)[0] for a in (x, L, g, R))
+        Lq = Ls + (X - xs) @ gs - 0.5 * np.sum(((X - xs) @ Rs.T) ** 2, 1)
+        a = lw + (Lt - Lq)
+        ratio = (np.log(np.exp(a - a.max()).sum()) + a.max()
+                 - np.log(np.exp(lw - lw.max()).sum()) - lw.max())
+        assert abs(ratio) < 2e-3, ratio
+
+
+def test_expansion_point_is_the_exact_optimum_of_the_centroid_model(data):
+    """x* is the curvature-metric QP optimum of the model at the centroid
+    (as Gate A validated), not a Euclidean projection of the Newton step."""
+    _, hi = _targets(data)
+    v = H4.V_TRUE[:5].copy()
+    with mx.stream(mx.cpu):
+        vm = mx.array(v[None], dtype=mx.float64)
+        blocks = hi._gen_blocks(hi.unpack(vm))
+        x0 = mx.full((1, 4), 0.2, dtype=mx.float64)
+        _, g0, R0 = LH._sum_terms(blocks, x0)
+        xs = np.array(hi.ld_terms(vm)[0])[0]
+    g0, R0 = np.array(g0)[0], np.array(R0)[0]
+    H = R0.T @ R0
+    want = SM.qp_simplex_np(np.full(4, 0.2) + np.linalg.solve(H, g0), H)
+    np.testing.assert_allclose(xs, want, atol=1e-8)
+
+
+def test_ghk_rule_error_at_the_posterior(data):
+    """N = 1024 against a 2^18 randomised reference, on the model at three
+    posterior-like rows (measured on real targets: max 0.015 and 95th
+    percentile 0.03 nats)."""
+    _, hi = _targets(data)
+    rng = np.random.default_rng(6)
+    for i in range(3):
+        v = H4.V_TRUE[:5].copy()
+        v[2:] *= 1 + 0.004 * rng.standard_normal(3)
+        with mx.stream(mx.cpu):
+            x, L, g, R = hi.ld_terms(mx.array(v[None], dtype=mx.float64))
+            u, my, Ly = hi._gauss(x, g, R)
+            dep, order = hi.ghk_layout
+            got = float(SM.ghk_log_mass(my, Ly, hi._U, dep, order,
+                                        LH.INV_FSTAR)[0])
+            refs = [float(SM.ghk_log_mass(my, Ly, mx.array(
+                SM.sobol_points(2 ** 14, 4, 100 + r), dtype=mx.float64),
+                dep, order, LH.INV_FSTAR)[0]) for r in range(16)]
+        ref = max(refs) + math.log(np.mean(np.exp(np.array(refs) - max(refs))))
+        assert abs(got - ref) < 0.03, (got, ref)
+
+
+def test_float32_tracks_float64_and_blocking_is_exact(data):
+    ed, cen, _, _, orders = data
+    lay, hi = _targets(data)
+    lo = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                  exposure_time=H4.EXP, n_chains_hint=64,
+                                  dtype=mx.float32)
+    rng = np.random.default_rng(1)
+    V = np.tile(H4.V_TRUE[:5], (64, 1))
+    V[:, 2:] *= 1 + 0.01 * rng.standard_normal((64, 3))
+    f32 = np.array(lo(mx.array(V, dtype=mx.float32)), dtype=np.float64)
+    with mx.stream(mx.cpu):
+        f64 = np.array(hi(mx.array(V, dtype=mx.float64)))
+        hb = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                      exposure_time=H4.EXP, n_chains_hint=64,
+                                      dtype=mx.float64, budget_bytes=1)
+        fb = np.array(hb(mx.array(V, dtype=mx.float64)))
+    assert len(hb.blocks) > 1
+    assert np.abs(fb - f64).max() < 1e-9
+    assert np.std(f32 - f64) < 5e-3
+    g32 = np.array(mx.grad(lambda v: lo(v).sum())(
+        mx.array(V[:6], dtype=mx.float32)), dtype=np.float64)
+    with mx.stream(mx.cpu):
+        g64 = np.array(mx.grad(lambda v: hi(v).sum())(
+            mx.array(V[:6], dtype=mx.float64)))
+    assert (np.abs(g32 - g64) / np.maximum(np.abs(g64), 1.0)).max() < 1e-2
+
+
+def test_detached_gradient_matches_finite_differences_without_exposure():
+    """x* is detached; the value depends on it only through L's departure
+    from its quadratic model, so the autodiff gradient must match the total
+    derivative. Exposure off: FD is invalid under the contact rule."""
+    ed, cen, _, _, orders = H4.make_dataset()
+    lay = params.lineph_layout(H4.EPH, ld="collapsed", law="hybrid4")
+    with mx.stream(mx.cpu):
+        hi = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=1,
+                                      exposure_time=0.0, n_chains_hint=4,
+                                      dtype=mx.float64)
+        v = H4.V_TRUE[:5].copy()
+        g = np.array(mx.grad(lambda z: hi(z).sum())(
+            mx.array(v[None], dtype=mx.float64)))[0]
+        for i, h in ((1, 1e-7), (2, 1e-7), (3, 1e-6), (4, 1e-7)):
+            vp, vm = v.copy(), v.copy()
+            vp[i] += h
+            vm[i] -= h
+            fd = (float(np.array(hi(mx.array(vp[None], dtype=mx.float64)))[0])
+                  - float(np.array(hi(mx.array(vm[None], dtype=mx.float64)))[0])
+                  ) / (2 * h)
+            assert abs(g[i] - fd) / max(abs(g[i]), 1.0) < 2e-3, (i, g[i], fd)
+
+
+def test_conditional_draws_reproduce_the_exact_conditional(data):
+    ed, cen, _, _, orders = data
+    lay, hi = _targets(data)
+    lo = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                  exposure_time=H4.EXP, n_chains_hint=1024,
+                                  dtype=mx.float32)
+    v = H4.V_TRUE[:5].copy()
+    n = 4096
+    q, acc, _ = LH.draw_limb_darkening(lo, np.tile(v, (n, 1)), seed=4)
+    om = LH.w_to_omega(M.ld_weights_np(q))
+    assert np.all((q > 0) & (q < 1)) and np.all(om > 0)     # no wall atoms
+    U = qmc.Sobol(5, scramble=True, seed=9).random(2 ** 16)
+    E = -np.log(U)
+    OM = E / E.sum(1, keepdims=True)
+    with mx.stream(mx.cpu):
+        L = np.concatenate([np.array(hi.loglik_grid(v, OM[i:i + 8192, 1:]))
+                            for i in range(0, len(OM), 8192)])
+    a = L + LH.log_prior_x_np(OM[:, 1:])
+    w = np.exp(a - a.max())
+    w /= w.sum()
+    mu = w @ OM
+    sd = np.sqrt(w @ (OM - mu) ** 2)
+    se = om.std(0) / math.sqrt(n / 10)
+    assert np.all(np.abs(om.mean(0) - mu) < 4 * se), (om.mean(0), mu)
+    np.testing.assert_allclose(om.std(0) / sd, 1.0, atol=0.05)
+    assert acc > 0.1
+
+
+def test_target_compiles_and_the_ghk_rule_is_part_of_it(data):
+    ed, cen, _, _, orders = data
+    lay, hi = _targets(data)
+    lo = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                  exposure_time=H4.EXP, n_chains_hint=16,
+                                  dtype=mx.float32)
+    V = mx.array(np.tile(H4.V_TRUE[:5], (16, 1)), dtype=mx.float32)
+    plain = np.array(lo(V))
+    val, grad = mx.compile(lambda v: mx.value_and_grad(
+        lambda w: lo(w).sum())(v))(V)
+    assert np.isfinite(np.array(grad)).all()
+    assert abs(float(val) - plain.sum()) < 0.05 * 16
+    # a stored layout and rule rebuild the identical density
+    _, other = _targets(data, ghk_layout=(2, (1, 4, 3, 0)),
+                        ghk_points=SM.sobol_points(256, 4, 11))
+    _, same = _targets(data, ghk_layout=other.ghk_layout,
+                       ghk_points=other.ghk_points)
+    with mx.stream(mx.cpu):
+        Vd = mx.array(np.tile(H4.V_TRUE[:5], (2, 1)), dtype=mx.float64)
+        assert np.array_equal(np.array(other(Vd)), np.array(same(Vd)))
+        assert not np.array_equal(np.array(other(Vd)), np.array(hi(Vd)))
+
+
+def test_constructor_refusals(data):
+    ed, cen, _, _, orders = data
+    lay = params.lineph_layout(H4.EPH, ld="collapsed", law="hybrid4")
+    with pytest.raises(ValueError, match="exact"):
+        LH.MarginalHybridLogProb(lay, cen, ed, orders, profile_mode="ratio")
+    with pytest.raises(ValueError, match="circular"):
+        LH.MarginalHybridLogProb(lay, cen, ed, orders, geometry="chord")
+    with pytest.raises(ValueError, match="hybrid4"):
+        LH.MarginalHybridLogProb(params.lineph_layout(H4.EPH, ld="collapsed"),
+                                 cen, ed, orders)
+    with pytest.raises(ValueError, match="LinEph-only"):
+        LH.MarginalHybridLogProb(params.ttv_layout(H4.EPH, cen, 0.03,
+                                                   law="hybrid4"),
+                                 cen, ed, orders)
+    target, _, lo, hi = likelihood.build_target(
+        lay, cen, ed, orders, num_resample=7, exposure_time=H4.EXP,
+        n_chains_hint=4)
+    assert isinstance(lo, LH.MarginalHybridLogProb)
+    assert isinstance(hi, LH.MarginalHybridLogProb)
