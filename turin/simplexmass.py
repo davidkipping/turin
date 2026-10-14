@@ -75,13 +75,13 @@ def mgs_r(cols):
     return mx.stack([mx.stack(rows[i], axis=-1) for i in range(D)], axis=-2)
 
 
-def tsqr(Rs, ridge_rel=0.0):
+def tsqr(Rs, ridge_rel=0.0, ridge_abs=0.0):
     """Combine per-block factors ``Rs`` (list of ``(C, D, D)``) into one,
-    adding ``ridge_rel * trace(R^T R)`` to the curvature (as rows
-    ``sqrt(eps) I``): the factor of ``sum_b R_b^T R_b + eps I``."""
+    adding ``eps = ridge_rel * trace(R^T R) + ridge_abs`` to the curvature
+    (as rows ``sqrt(eps) I``): the factor of ``sum_b R_b^T R_b + eps I``."""
     D = Rs[0].shape[-1]
     trace = sum(mx.sum(R * R, axis=(-2, -1)) for R in Rs)
-    s = mx.sqrt(ridge_rel * trace)                         # (C,)
+    s = mx.sqrt(ridge_rel * trace + ridge_abs)             # (C,)
     eye = mx.eye(D, dtype=Rs[0].dtype)
     cols = []
     for j in range(D):

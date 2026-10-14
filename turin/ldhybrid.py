@@ -65,11 +65,37 @@ GHK_SEED = 2024
 #: Relative ridge on the curvature, as ``ldmarg.RIDGE_H_REL``; applied once,
 #: after combining blocks.
 RIDGE_H_REL = 1e-7
-#: Independence-MH proposals per conditional draw (fresh GHK draws).
-N_PROP = 32
+#: Absolute ridge on the curvature, in nats over the weight coordinates
+#: (0.1.64). Where the data do not see the limb darkening at all -- no
+#: transit in the data, k -> 0 -- the curvature vanishes with the relative
+#: ridge, the model's Gaussian centres ~1e10 from the simplex, and GHK
+#: cannot cancel the resulting magnitudes: on KOI-2650.01 the collapsed value
+#: came out +3,456 nats too high at k = 0 (float64; float32 similar), a
+#: false peak that trapped 70 of 512 chains. The simplex is at most sqrt(2)
+#: across, so this ridge moves the integrand by at most 1e-3 nats anywhere;
+#: measured at those thetas, the error went to +0.004 (1e-6 and 1e-3 agree;
+#: 0.1 costs 0.03).
+RIDGE_H_ABS = 1e-3
+#: Steps per conditional draw (:class:`HybridOmegaSampler`): 128 was needed
+#: by the hardest synthetic case, the mass in a corner of the simplex.
+#: Fixed, never adaptive: stopping on the chain's own history (e.g. after k
+#: acceptances) is itself biased.
+N_STEPS = 128
+#: Exact-HMC travel time before the scalings in ``_draw_batch``. pi/8, not
+#: the textbook pi/2: the moves bounce off the simplex's faces, and the work
+#: is the bounces. Against independent references on six synthetic thetas
+#: and a vertex case, pi/8 was as accurate as pi/4 and pi/2 at 128 steps
+#: (every case within ~1 standard error) and 1.5x cheaper than pi/2.
+HMC_T = 0.125 * math.pi
 
 FSTAR = np.array(_model.generator_norms(LAW), dtype=np.float64)
 INV_FSTAR = 1.0 / FSTAR
+#: ``log`` of the induced prior's normalising constant: uniform ``q`` is
+#: uniform ``w`` (density 4! on its simplex), and the projective map to
+#: ``omega`` has Jacobian ``prod(1/F*) (sum omega/F*)^-G``, so
+#: ``p(x) = 4! prod(1/F*) (sum omega/F*)^-G`` exactly. Added to the
+#: collapsed value so it is on sampled mode's scale (it was 0.7685 high).
+LOG_PRIOR_NORM = math.log(math.factorial(D)) - float(np.sum(np.log(FSTAR)))
 DEFAULT_LAYOUT = (0, tuple(range(1, G)))
 
 
@@ -107,7 +133,8 @@ def q_to_x(q):
 
 
 def log_prior_x_np(x):
-    """``-G log sum_g omega_g/F*_g`` (unnormalised); -inf off the simplex."""
+    """``-G log sum_g omega_g/F*_g`` (unnormalised: add
+    :data:`LOG_PRIOR_NORM` for the density); -inf off the simplex."""
     om = x_to_omega(x)
     ok = np.all(om >= -1e-12, -1)
     s = np.maximum((np.maximum(om, 0.0) / FSTAR).sum(-1), 1e-300)
@@ -169,7 +196,7 @@ def _block_terms(blk, x, derivs=True):
 
 def _sum_terms(blocks, x):
     """``(L, g, R)`` over blocks: ``L`` and ``g`` summed, ``R`` by TSQR with
-    the relative ridge added once (block-invariant)."""
+    the relative and absolute ridges added once (block-invariant)."""
     L = g = None
     Rs = []
     for blk in blocks:
@@ -177,7 +204,7 @@ def _sum_terms(blocks, x):
         L = l if L is None else L + l
         g = gv if g is None else g + gv
         Rs.append(R)
-    return L, g, _sm.tsqr(Rs, RIDGE_H_REL)
+    return L, g, _sm.tsqr(Rs, RIDGE_H_REL, RIDGE_H_ABS)
 
 
 def _sum_loglik(blocks, x):
@@ -307,7 +334,9 @@ class MarginalHybridLogProb(ProfiledTransitLogProb):
         u, my, Ly = self._gauss(x, g, R)
         dep, order = self.ghk_layout
         logZ = _sm.ghk_log_mass(my, Ly, self._U, dep, order, INV_FSTAR)
-        return L + 0.5 * mx.sum(u * u, axis=-1) + logZ + self.log_prior(p)
+        # GHK integrates the unnormalised prior; LOG_PRIOR_NORM normalises it
+        return (L + 0.5 * mx.sum(u * u, axis=-1) + logZ + LOG_PRIOR_NORM
+                + self.log_prior(p))
 
     def epoch_log_lik(self, v):
         raise NotImplementedError(
@@ -382,65 +411,135 @@ def freeze_layout(lp, v_row):
 class HybridOmegaSampler:
     """Exact draws of ``omega | theta`` -- the Gibbs half of collapsed Gibbs.
 
-    For each theta row, an independence Metropolis-Hastings chain through
-    :data:`N_PROP` fresh GHK draws of the quadratic model's prior-weighted
-    truncated Gaussian, against the exact conditional ``L(x) + log p(x)``.
-    A GHK draw's density is the Gaussian over the product of its truncation
-    masses, so the MH weight is ``(L - L_model)(x) + lw(x)`` with ``lw`` the
-    GHK log-weight: exact at any rule. The chain **starts from a proposal
-    draw**, never from ``x*``, which may sit on a face (the edge-atom lesson
-    of ``ldmarg.OmegaSampler``); there is no way to pass a start.
+    For each theta row, a Metropolis chain on the simplex against the exact
+    conditional ``L(x) + log p(x)``. Its moves leave the quadratic model's
+    Gaussian truncated to the simplex invariant, so a Metropolis test on
+    ``(L - L_model) + log p`` alone makes the exact conditional stationary;
+    the model is close to the truth (acceptance ~0.9 measured). Each step is,
+    with equal probability, **exact HMC** in the whitened coordinates
+    (:func:`_exact_hmc`, Pakman & Paninski 2014: closed-form trajectories,
+    analytic reflections, no step size), which mixes the interior, or an
+    exact 1-D draw along one of the simplex's edge directions
+    (:func:`_edge_move`), which mixes a corner -- a needle in whitened
+    coordinates, where HMC alone stalled. Plain hit-and-run, tried first,
+    took hundreds of steps in a corner.
+
+    This replaced (0.1.64) an independence sampler through fresh GHK draws.
+    That one is exact too, but a GHK draw's weight degenerates when the
+    conditional is narrow and away from the model's Gaussian -- acceptance
+    fell to 0.4-1.9% on synthetic thetas and 32 proposals left the product
+    q's 0.4 sd off on KOI-4016.01 -- and no affordable chain length fixed
+    it. The chain starts **strictly inside** the simplex next to ``x*``
+    (:meth:`_start`), never on ``x*`` itself, which may sit on a face: the
+    edge-atom lesson of ``ldmarg.OmegaSampler``, whose chains could not leave
+    such a start. These chains move (acceptance ~0.9), and a proposal that
+    rounds onto a face is refused (:func:`_inside`).
     """
 
-    def __init__(self, lp_f32, *, n_prop=N_PROP, batch=1024, seed=0):
+    def __init__(self, lp_f32, *, n_steps=N_STEPS, batch=1024, seed=0):
         if not isinstance(lp_f32, MarginalHybridLogProb):
             raise TypeError("HybridOmegaSampler needs a MarginalHybridLogProb")
         self.lp = lp_f32
-        self.n_prop = int(n_prop)
+        self.n_steps = int(n_steps)
         self.batch = int(batch)
         self.rng = np.random.default_rng(seed)
 
+    def _start(self, xs):
+        """Just inside the simplex at ``x*``: (1 - 1e-6) x* + 1e-6 centroid,
+        after clipping float32 rounding. The model's mass sits against ``x*``
+        (its constrained optimum), so the chain starts where it is; GHK
+        starts, tried first, left 128-step chains biased where the mass is a
+        thin layer far from the model's mean."""
+        x0 = np.clip(xs, 0.0, None)
+        x0 = x0 / np.maximum(1.0, x0.sum(-1, keepdims=True))
+        x0 = (1.0 - 1e-6) * x0 + 1e-6 / G
+        return np.where(_inside(x0)[:, None], x0, 1.0 / G)
+
     def _draw_batch(self, v_model):
         lp = self.lp
+        rng = self.rng
         v = mx.array(np.asarray(v_model, dtype=np.float32), dtype=lp.dtype)
         blocks = lp._gen_blocks(lp.unpack(v))
         mx.eval([a for blk in blocks for a in blk.arrays()])
         x, L, g, R = expansion_point(blocks, v.shape[0], lp.dtype)
-        u, my, Ly = lp._gauss(x, g, R)
         C = v.shape[0]
-        dep, order = lp.ghk_layout
-        U = np.clip(self.rng.uniform(size=(C, self.n_prop, D)), 1e-7,
-                    1.0 - 1e-7)
-        lw, Y = _sm.ghk_terms(my, Ly, mx.array(U, dtype=lp.dtype), dep, order,
-                              INV_FSTAR)
-        lw = np.array(lw, dtype=np.float64)
-        X = _sm.omega_from_free(np.array(Y, dtype=np.float64), dep,
-                                order)[..., 1:]                 # (C, P, D)
-        X = np.clip(X, 0.0, 1.0)
-        X = X / np.maximum(1.0, X.sum(-1, keepdims=True))
         xs = np.array(x, dtype=np.float64)
         gn = np.array(g, dtype=np.float64)
         Rn = np.array(R, dtype=np.float64)
-        dx = X - xs[:, None, :]
-        Lq = (gn[:, None, :] * dx).sum(-1) - 0.5 * np.sum(
-            np.einsum("cij,cpj->cpi", Rn, dx) ** 2, -1)       # minus L*
-        Lt = np.stack([np.array(_sum_loglik(blocks, mx.array(
-            X[:, i, :], dtype=lp.dtype)), dtype=np.float64)
-            for i in range(self.n_prop)], -1) - np.array(L, np.float64)[:, None]
-        logw = (Lt - Lq) + lw
-        logw = np.where(np.isfinite(logw), logw, -np.inf)
-        cur = np.zeros(C, dtype=int)
-        wcur = logw[:, 0]
+        Hn = np.einsum("cki,ckj->cij", Rn, Rn)
+        L0 = np.array(L, dtype=np.float64)
+
+        def true_l(X):
+            return np.array(_sum_loglik(blocks, mx.array(X, dtype=lp.dtype)),
+                            dtype=np.float64) - L0
+
+        def corr(X, Lt):
+            dx = X - xs
+            Lq = (gn * dx).sum(-1) - 0.5 * np.einsum("ci,cij,cj->c", dx, Hn, dx)
+            return (Lt - Lq) + log_prior_x_np(X)
+
+        # whitened coordinates of the model N(xh, H^-1): z = R (x - xh);
+        # the simplex is F z + f >= 0 with F = A R^-1, f = A xh + a0, where
+        # omega = A x + a0 (omega_0 = 1 - sum x, omega_j = x_j)
+        Rinv = np.linalg.inv(Rn)
+        xh = xs + np.einsum("cij,cj->ci", Rinv, np.einsum(
+            "cji,cj->ci", Rinv, gn))                          # x* + H^-1 g
+        Am = np.vstack([-np.ones(D), np.eye(D)])              # (G, D)
+        a0 = np.r_[1.0, np.zeros(D)]
+        F = np.einsum("gi,cij->cgj", Am, Rinv)                 # (C, G, D)
+        f = xh @ Am.T + a0                                     # (C, G)
+
+        # Travel time. Where the model's mean is far outside the simplex the
+        # truncated mass is a thin layer d = |R (x* - xh)| sds out (x* is the
+        # model's exact constrained optimum, so d is the distance from the
+        # mean to the simplex), the Gaussian looks like a slope of 1/d there,
+        # and a pi/2 trajectory would cross it thousands of times (measured:
+        # every move refused at d ~ 30). T ~ 1/d keeps the step on that scale;
+        # it depends on theta alone, so the move stays exact, and the jitter
+        # breaks periodic orbits.
+        dist = np.linalg.norm(np.einsum("cij,cj->ci", Rn, xs - xh), axis=-1)
+        # ... and where the curvature is weak (k -> 0: the ridge alone) the
+        # whole simplex is small in whitened units and a unit-speed trajectory
+        # would cross it again and again, so T is also capped at the
+        # simplex's median edge length in those units (theta alone; inactive
+        # on the acceptance targets, whose median edge is 8-17).
+        width = np.median(np.linalg.norm(np.einsum("cij,ej->cei", Rn, _EDGES),
+                                         axis=-1), axis=-1)
+        T0 = HMC_T * np.minimum(1.0 / np.maximum(1.0, dist),
+                                np.minimum(1.0, width))
+
+        cur = self._start(xs)
+        ccur = corr(cur, true_l(cur))
         acc = np.zeros(C)
-        logu = np.log(self.rng.uniform(size=(C, self.n_prop)))
-        for i in range(1, self.n_prop):
+        for _ in range(self.n_steps):
+            # a mixture of two moves, each leaving the truncated model
+            # invariant, picked independently of the state: exact HMC in the
+            # whitened coordinates (the interior), or an exact 1-D draw along
+            # a direction trading weight between two omega components (the
+            # simplex's own edges; a corner of the simplex is a needle in the
+            # whitened coordinates, where HMC bounces without end -- measured,
+            # 79% of its moves hit the bounce cap at a vertex)
+            use_hmc = rng.random(C) < 0.5
+            z0 = np.einsum("cij,cj->ci", Rn, cur - xh)
+            T = T0 * rng.uniform(0.5, 1.5, C)
+            s0 = rng.standard_normal((C, D))
+            h = np.flatnonzero(use_hmc)
+            z1 = z0.copy()
+            ok_h = np.zeros(C, dtype=bool)
+            z1[h], ok_h[h] = _exact_hmc(z0[h], s0[h], F[h], f[h], T=T[h])
+            p_h = xh + np.einsum("cij,cj->ci", Rinv, z1)
+            p_e, ok_e = _edge_move(cur, xs, gn, Hn, rng)
+            prop = np.where(use_hmc[:, None], p_h, p_e)
+            ok = np.where(use_hmc, ok_h, ok_e) & _inside(prop)
+            safe = np.where(ok[:, None], prop, cur)
+            cprop = np.where(ok, corr(safe, true_l(safe)), -np.inf)
             with np.errstate(invalid="ignore"):
-                ok = logu[:, i] < logw[:, i] - wcur
-            cur = np.where(ok, i, cur)
-            wcur = np.where(ok, logw[:, i], wcur)
-            acc += ok
+                take = ok & (np.log(rng.random(C)) < cprop - ccur)
+            cur = np.where(take[:, None], prop, cur)
+            ccur = np.where(take, cprop, ccur)
+            acc += take
         on_face = np.any(x_to_omega(xs) < 1e-6, -1)
-        return X[np.arange(C), cur], acc / (self.n_prop - 1), on_face
+        return cur, acc / max(self.n_steps, 1), on_face
 
     def step(self, v_model):
         """Draw ``x`` for every row of ``v_model (C, 5)`` (model space).
@@ -451,7 +550,105 @@ class HybridOmegaSampler:
         return tuple(np.concatenate(parts) for parts in zip(*out))
 
 
-def draw_limb_darkening(lp_f32, v_model, *, n_prop=N_PROP, batch=1024,
+def _inside(X):
+    """Strictly inside the simplex, and mapping to q strictly inside the
+    box: a point rounded onto a face would be an atom on the q box's edge
+    (3 in 614,400 GHK-based draws once did), and faces have probability
+    zero, so excluding them is exact."""
+    q = x_to_q(X)
+    return (np.all(x_to_omega(X) > 0.0, -1)
+            & np.all((q > 0.0) & (q < 1.0), -1))
+
+
+def _exact_hmc(z0, s, F, f, T=0.5 * math.pi, max_bounces=200):
+    """One iteration of exact HMC for ``N(0, I)`` truncated to
+    ``F z + f >= 0`` (Pakman & Paninski 2014): the trajectory
+    ``z(t) = z0 cos t + s sin t`` is followed for time ``T`` (per row),
+    reflecting analytically off each wall it meets. The map is
+    volume-preserving and
+    reversible, so the truncated Gaussian is invariant with no Metropolis
+    test. Returns ``(z, ok)``; a row needing more than ``max_bounces``
+    reflections stays at ``z0`` (``ok`` False) -- the bounce count is the
+    same forwards and backwards, so refusing those keeps it reversible.
+    Rows are independent; arrays ``(C, D)``, ``F (C, G, D)``, ``f (C, G)``.
+    """
+    z = z0.copy()
+    v = s.copy()
+    left = np.broadcast_to(np.asarray(T, dtype=np.float64),
+                           (z.shape[0],)).copy()
+    nb = np.zeros(z.shape[0], dtype=int)
+    idx = np.arange(z.shape[0])            # rows still travelling
+    for _ in range(max_bounces + 1):
+        Fi, fi, zi, vi = F[idx], f[idx], z[idx], v[idx]
+        A = np.einsum("cgd,cd->cg", Fi, zi)
+        B = np.einsum("cgd,cd->cg", Fi, vi)
+        u = np.hypot(A, B)
+        phi = np.arctan2(B, A)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            c = -fi / u
+            th = np.where(np.abs(c) <= 1.0, np.mod(phi + np.arccos(
+                np.clip(c, -1.0, 1.0)), 2 * math.pi), np.inf)
+        th = np.where(th > 1e-10, th, np.inf)       # not the wall we sit on
+        j = np.argmin(th, -1)
+        r = np.arange(len(idx))
+        t_hit = th[r, j]
+        hit = t_hit < left[idx]
+        t = np.where(hit, t_hit, left[idx])
+        ct, st = np.cos(t)[:, None], np.sin(t)[:, None]
+        zn = zi * ct + vi * st
+        vn = -zi * st + vi * ct
+        Fj = Fi[r, j]
+        refl = vn - 2.0 * (np.sum(Fj * vn, -1) / np.sum(Fj * Fj, -1)
+                           )[:, None] * Fj
+        z[idx] = zn
+        v[idx] = np.where(hit[:, None], refl, vn)
+        left[idx] -= t
+        nb[idx] += hit
+        idx = idx[hit]
+        if idx.size == 0:
+            break
+    live = np.zeros(z.shape[0], dtype=bool)
+    live[idx] = True
+    ok = ~live & (nb <= max_bounces)
+    return np.where(ok[:, None], z, z0), ok
+
+
+#: the directions trading weight between two omega components, in x
+_EDGES = np.array([np.r_[np.eye(G)[i] - np.eye(G)[j]][1:]
+                   for i in range(G) for j in range(i + 1, G)])
+
+
+def _edge_move(cur, xs, g, H, rng):
+    """An exact draw of the quadratic model restricted to the line through
+    ``cur`` along a random :data:`_EDGES` direction (a 1-D normal truncated
+    to the simplex). Reversible for the truncated model: the direction is
+    chosen independently of the state, and the step is a Gibbs draw."""
+    C = cur.shape[0]
+    d = _EDGES[rng.integers(len(_EDGES), size=C)]
+    a = np.einsum("ci,cij,cj->c", d, H, d)
+    b = ((g - np.einsum("cij,cj->ci", H, cur - xs)) * d).sum(-1)
+    om = x_to_omega(cur)
+    dom = np.concatenate([-d.sum(-1, keepdims=True), d], -1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = -om / dom
+    lo = np.max(np.where(dom > 0, r, -np.inf), -1)
+    hi = np.min(np.where(dom < 0, r, np.inf), -1)
+    sa = np.sqrt(a)
+    m = b / a
+    t = m + _truncnorm((lo - m) * sa, (hi - m) * sa, rng.random(C)) / sa
+    return cur + t[:, None] * d, np.isfinite(t)
+
+
+def _truncnorm(a, b, u):
+    """Standard normal truncated to ``[a, b]``, by inversion of ``u``;
+    float64, tail-stable (scipy's log-space ``truncnorm``)."""
+    from scipy.stats import truncnorm
+
+    z = truncnorm.ppf(u, a, b)
+    return np.clip(np.where(np.isfinite(z), z, 0.5 * (a + b)), a, b)
+
+
+def draw_limb_darkening(lp_f32, v_model, *, n_steps=N_STEPS, batch=1024,
                         seed=0):
     """Conditional ``q1..q4`` draws for every row of ``v_model``.
 
@@ -459,7 +656,7 @@ def draw_limb_darkening(lp_f32, v_model, *, n_prop=N_PROP, batch=1024,
     coordinates, the mean MH acceptance, and the share of rows whose
     expansion point sits on a face of the simplex.
     """
-    sampler = HybridOmegaSampler(lp_f32, n_prop=n_prop, batch=batch,
+    sampler = HybridOmegaSampler(lp_f32, n_steps=n_steps, batch=batch,
                                  seed=seed)
     x, acc, on_face = sampler.step(v_model)
     return x_to_q(x), float(np.mean(acc)), float(np.mean(on_face))

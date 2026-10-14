@@ -1,6 +1,6 @@
 # Benchmark and acceptance artefacts
 
-Three records live here.
+Four records live here.
 
 - `collapsed_ld_acceptance.md` and `collapsed_ld_compare.py`: `--ld=collapsed`
   against the default on KOI-518.02 and KOI-448.02 (see that file; the
@@ -11,6 +11,10 @@ Three records live here.
   mass; same posteriors, ~1.25x the LinEph cost.
 - `collapsed_hybrid_probe.md`: the measurements that set the design of
   collapsed hybrid4 limb darkening (`--law=hybrid4 --ld=collapsed`).
+- `collapsed_hybrid_acceptance.md`, `collapsed_hybrid_compare.py` and
+  `collapsed_hybrid_seeds.py`: collapsed hybrid4 against sampled hybrid4 on
+  the user's five-target suite. The first pass failed and 0.1.64 fixed it;
+  the second pass has a second seed of both modes on three targets.
 - Everything below: the hurin/turin comparison on KOI-518.02.
 
 ## KOI-518.02 hurin/turin benchmark artefacts

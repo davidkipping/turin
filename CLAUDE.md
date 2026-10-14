@@ -342,7 +342,7 @@ darkening (k 0.027, q1 on its wall), unconverged at R-hat 1.26; on
 KOI-518.02 the laws cost the same. That target is atypical (the user's
 point): do not generalise from it.
 
-### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62)
+### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62; fixed 0.1.64)
 
 `ldmarg`'s collapsed Gibbs over a 4-simplex: five generator curves
 `{1, 1-T_j}` from one `ld_basis` launch (`model.generator_flux_devs`; any
@@ -367,13 +367,79 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
 - **Normal tails** (`normtail.py`): NR erfcc in log form, Acklam inverse,
   and one lower-tail truncated normal after reflecting to a non-positive
   centre (a third of the work of three where-branches; GHK dominates cost).
-- **Conditional draws**: independence MH through 32 fresh GHK draws, weight
-  `(L - L_model) + lw_GHK`, started from a proposal (edge-atom rule).
-  Acceptance is ~0.25 (GHK's weight variance), yet the draws match the
-  exact conditional (means 0.5 se, widths 1.3%).
-- Cost: 25 ms vs 4.5 ms sampled (512 chains, value+grad); GHK is ~2/3 of
-  it. It pays only where sampled weights mix badly. **Real-target
-  acceptance against sampled hybrid4 is pending** (plan step 6).
+- **Absolute ridge** (`RIDGE_H_ABS` = 1e-3, 0.1.64, MODEL_REV 9). With no
+  transit in the data (k -> 0) the curvature vanishes, and the relative ridge
+  vanishes with it. The model's Gaussian then centres ~1e10 away, and GHK
+  cannot cancel the magnitudes: on KOI-2650.01 the value came out +3,456
+  nats too high at k = 0. That false peak trapped 70 of 512 chains, and
+  ChEES's step size collapsed to 1.2e-10. The ridge moves the integrand by
+  at most 1e-3 nats, because the simplex is <= sqrt(2) across. Pinned by
+  `test_no_transit_gives_the_flat_answer_in_both_precisions` (a mutation to
+  0 fails it).
+- **The prior is normalised** (`LOG_PRIOR_NORM` = log 4! - sum log F*,
+  closed form, = -0.768476). Collapsed `loglike` was 0.7685 above sampled
+  mode's; it is now on the same scale. Harmless before (a constant), and
+  wrong to describe as model error, which is how 0.1.63's review first
+  read the offset.
+- **Conditional draws** (`HybridOmegaSampler`, rewritten 0.1.64). A
+  Metropolis chain against the exact conditional. Each move leaves the
+  quadratic model's truncated Gaussian invariant, so only `(L - L_model) +
+  log p` enters the test (acceptance 0.92-0.95 on the acceptance targets).
+  Each move is, with equal chance:
+  - **exact HMC** in whitened coordinates (Pakman & Paninski 2014). Its
+    travel time scales as 1/(distance from the mean to the simplex) and is
+    capped at the simplex's whitened size, so a thin far-out layer is not
+    crossed hundreds of times. `HMC_T` = pi/8.
+  - an **exact 1-D draw** along one of the simplex's 10 edge directions.
+    These mix a corner, which is a needle in whitened units, where HMC alone
+    hit the bounce cap 79% of the time.
+
+  128 steps (`N_STEPS`; fixed, because stopping on the chain's history is
+  biased). The chain starts 1e-6 inside the simplex next to `x*`, since the
+  mass sits against it. That start cannot become an edge atom: the chain
+  moves, and a proposal that rounds onto a face is refused (`_inside`).
+  This replaced an independence sampler through 32 GHK draws. That sampler
+  was exact in the limit, but GHK's sequential weights degenerate wherever
+  the conditional is narrow and off the model's axis. It left KOI-4016.01's
+  `q1` 0.41 sd off (85 MCSE); on synthetic thetas it was off by up to 23 sd
+  at 32 proposals and 5 sd at 2,048; and it put 3 draws on the q box's
+  wall. Hit-and-run, tried next, took hundreds of steps in a corner.
+  Validated against references that share no turin machinery: box
+  importance sampling of the true L, plus an exponential proposal for a
+  vertex-piled case. Lesson: a reference must fit the target's geometry.
+  Uniform-q SNIS had an effective sample size of 1-60 at narrow thetas.
+- **The value's error is GHK's rule error, not the quadratic model's.**
+  The model is accurate wherever measured: the draws' acceptance is 0.9+,
+  and true minus model was 0.00 at a vertex case. With a consistent layout
+  GHK converges to the true marginal as N grows. At 1,024 points it errs by
+  0.005-0.064 nats (sd over posterior thetas) on the acceptance targets, and
+  by up to ~2 nats at narrow off-axis thetas far from any posterior (0.004
+  at 4,096). Accepted and documented, not fixed: a larger rule costs ~2/3 of
+  the evaluation per doubling. A probe that integrates one layout's GHK mean
+  and covariance under another layout produces a fake "layout bug" of
+  ~1 nat. That happened in 0.1.64's review; every layout agrees to 0.001
+  when done consistently.
+- **Export rows are capped at 160,000** for this mode
+  (`pipeline._EXPORT_ROWS_COLLAPSED_HYBRID`): every exported row needs a
+  conditional draw (~1.3 ms), and the general 1,000,000-row budget would
+  make each export take 20+ minutes. R-hat and ESS still see every draw.
+- **Real-target acceptance** (`docs/bench/collapsed_hybrid_acceptance.md`):
+  the user's five-target suite (KOI-4016.01, 4087.01, 1430.03, 1361.01,
+  2650.01) against sampled hybrid4. The first pass (0.1.63) found the three
+  defects above. The second (0.1.64) agrees on every parameter: within
+  0.016 sd, 0 shifts beyond 3 MCSE, widths within 1.4%, 0 wall atoms.
+  The chain-split null failed 9 of 70 comparisons, all marginal. A second
+  seed of both modes showed those were run-level noise: the cross-mode KS
+  is no larger than two seeds of one mode (KOI-4016.01: medians 0.0038 vs
+  0.0046). The chain-split null is optimistic here, as warned below.
+  KOI-2650.01's collapsed runs reproducibly hold 0.3% of draws in a far
+  grazing tail (k > 0.06, up to 0.998) that sampled runs essentially never
+  visit (0-2 chains). The collapsed density there matches the true marginal
+  (+/-0.05 nats at 30 tail thetas), so the likely reading is that sampled
+  mode under-explores it; this is not proven.
+  **Cost: 3.7-8.7x the wall time (median 4.4x), 0.23-0.53x the ESS/s**,
+  worst on small datasets (a fixed per-chain GHK cost, plus ~200 s of
+  post-hoc draws per export). It stays opt-in.
 - How the accuracy was mis-measured once, recorded so it is not repeated:
   uniform-simplex QMC is not a reference for a peaked integrand (it was off
   by up to thousands of nats at high SNR and was misread as a bug in x*);

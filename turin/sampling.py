@@ -43,6 +43,14 @@ ESS_MIN_TAU = 100
 #: Working-set budget for ``anvil.diagnose`` (bytes); see :func:`assess`.
 DIAGNOSE_MEMORY_BUDGET = 256 * 2**20
 
+#: Adapted step size below which a run is stopped after its first round
+#: (anvil's own "tiny step" threshold). Healthy LinEph fits adapt to 0.05-0.12
+#: in the whitened space; collapsed hybrid4 on KOI-2650.01, its chains
+#: trapped at a false peak (fixed in 0.1.64), adapted to 1.2e-10 and then
+#: spent two further rounds that could not move them. More draws cannot
+#: help a step that small, so the run ends, products written, unconverged.
+STEP_FLOOR = 1e-4
+
 #: Export works on a systematic subsample of the pooled draws at most this
 #: many rows (and this many values, so a high-dimensional fit gets fewer
 #: rows). Summaries, the chains product, plots and the float32 certificate
@@ -215,6 +223,15 @@ class Verdict:
     warmup_verdict: str = ""
     skew: float = 0.0
     excess_kurtosis: float = 0.0
+    #: adapted step size at the end of warmup (nan without a warmup trace)
+    step_size: float = float("nan")
+
+    @property
+    def frozen(self):
+        """Warmup adapted a step below :data:`STEP_FLOOR`: the chains cannot
+        move, so extending the run is pointless."""
+        return bool(np.isfinite(self.step_size)
+                    and self.step_size < STEP_FLOOR)
 
     def describe(self):
         lines = [
@@ -224,6 +241,10 @@ class Verdict:
         ]
         if self.warmup_verdict:
             lines.append(f"  warmup: {self.warmup_verdict}")
+        if self.frozen:
+            lines.append(f"  FROZEN: warmup adapted a step size of "
+                         f"{self.step_size:.2g} (< {STEP_FLOOR:g}); the chains "
+                         "cannot move, so more draws will not help")
         lines.append(f"  posterior shape after whitening: skew "
                      f"{self.skew:.2f}, excess kurtosis "
                      f"{self.excess_kurtosis:.2f}"
@@ -257,12 +278,18 @@ def assess(results, names, *, settle_tol=0.05):
         ess[i] > _ess_floor(n) for i, n in enumerate(names))
 
     warmup_verdict = ""
+    step_size = float("nan")
     if getattr(results, "warmup_trace", None):
         try:
             warmup_verdict = str(
                 anvil.warmup_report(results, settle_tol=settle_tol))
         except Exception as exc:                      # diagnostic only
             warmup_verdict = f"(warmup_report failed: {exc})"
+        try:
+            eps = np.asarray(results.warmup_trace["step_size"], dtype=float)
+            step_size = float(eps.ravel()[-1]) if eps.size else step_size
+        except (KeyError, TypeError, IndexError):
+            pass
 
     skew = exk = 0.0
     try:
@@ -273,6 +300,9 @@ def assess(results, names, *, settle_tol=0.05):
     except Exception:
         pass
 
+    # a frozen warmup is never converged, whatever R-hat says: chains that
+    # cannot move agree with each other only if they started together
+    ok = ok and not (np.isfinite(step_size) and step_size < STEP_FLOOR)
     i_r, i_e = int(np.argmax(rhat)), int(np.argmin(ess))
     return Verdict(
         converged=bool(ok), rhat=rhat, ess=ess, names=list(names),
@@ -282,6 +312,7 @@ def assess(results, names, *, settle_tol=0.05):
         worst_rhat=(names[i_r], float(rhat[i_r])),
         worst_ess=(names[i_e], float(ess[i_e])),
         warmup_verdict=warmup_verdict, skew=skew, excess_kurtosis=exk,
+        step_size=step_size,
     )
 
 
@@ -478,6 +509,10 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
 
         if verdict.converged:
             break
+        if verdict.frozen:
+            log("  stopping: the chains are frozen (see above), so extending "
+                "cannot converge this run")
+            break
         if total >= cfg.max_samples:
             log(f"  stopping at the {cfg.max_samples} draws/chain cap "
                 "without meeting the convergence gates")
@@ -544,15 +579,17 @@ def certify(target, results, names, *, n_probe=256, target_ess=1e4, log=print):
     return cert
 
 
-def export_thin(results):
+def export_thin(results, max_rows=EXPORT_MAX_ROWS):
     """Thinning factor that brings the pooled draws within the export budget.
 
     Systematic (every t-th draw of every chain), so each chain stays equally
-    represented. 1 when everything fits.
+    represented. 1 when everything fits. ``max_rows`` lowers the row budget
+    for a mode whose export costs per row (collapsed hybrid4's conditional
+    draws).
     """
     # a view of the stored (cached, for a Continuation) array: no copy
     n_draws, n_chains, dim = results.get_chain().shape
-    max_rows = min(EXPORT_MAX_ROWS, EXPORT_MAX_VALUES // max(1, dim + 3))
+    max_rows = min(max_rows, EXPORT_MAX_VALUES // max(1, dim + 3))
     return max(1, -(-n_draws * n_chains // max_rows))
 
 

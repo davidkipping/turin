@@ -120,8 +120,8 @@ usage: turin --KOI-448.02 [options]
                           q's afterwards from their exact conditional
                           (collapsed Gibbs): same posterior, two (four)
                           fewer sampled dimensions. Quadratic: ~2.2x the
-                          per-evaluation memory; hybrid4: ~5.6x the
-                          per-evaluation time. LinEph only
+                          per-evaluation memory; hybrid4: 3.7-8.7x the
+                          wall time on Kepler targets. LinEph only
                           (--modes=lineph); needs --PL=exact or auto
                           (auto resolves to exact) and circular geometry
   --law=quadratic|hybrid4 limb-darkening law. quadratic (default) samples

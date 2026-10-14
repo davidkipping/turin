@@ -461,3 +461,151 @@ def test_constructor_refusals(data):
         n_chains_hint=4)
     assert isinstance(lo, LH.MarginalHybridLogProb)
     assert isinstance(hi, LH.MarginalHybridLogProb)
+
+
+# -- 0.1.64: what the real-target acceptance suite found ---------------------
+# Weakly constrained limb darkening (KOI-4016.01: SNR 22, 8 transits) and a
+# chain that wandered to k = 0 (KOI-2650.01) broke three things the
+# well-constrained synthetic target above cannot see. A noisier copy of it,
+# and thetas away from its truth, reproduce each.
+
+@pytest.fixture(scope="module")
+def weak():
+    ed, cen, _, _, orders = H4.make_dataset(yerr=2e-3)
+    lay = params.lineph_layout(H4.EPH, ld="collapsed", law="hybrid4")
+    with mx.stream(mx.cpu):
+        hi = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                      exposure_time=H4.EXP, n_chains_hint=8,
+                                      dtype=mx.float64)
+    lo = LH.MarginalHybridLogProb(lay, cen, ed, orders, num_resample=7,
+                                  exposure_time=H4.EXP, n_chains_hint=2048,
+                                  dtype=mx.float32)
+    return hi, lo
+
+
+def _true_log_marginal(hi, v, n=2 ** 16, seed=3):
+    """``log int exp(L(q)) dq`` over the q cube (uniform q is the prior)."""
+    Q = np.clip(qmc.Sobol(4, scramble=True, seed=seed).random(n), 1e-12,
+                1 - 1e-12)
+    with mx.stream(mx.cpu):
+        L = np.array(hi.loglik_grid(v, LH.q_to_x(Q)))
+    return float(np.log(np.mean(np.exp(L - L.max()))) + L.max())
+
+
+def _collapsed_minus_prior(lp, V, dtype, stream):
+    with mx.stream(stream):
+        vm = mx.array(np.atleast_2d(V), dtype=dtype)
+        return (np.array(lp(vm), dtype=np.float64)
+                - np.array(lp.log_prior(lp.unpack(vm)), dtype=np.float64))
+
+
+def test_the_prior_normaliser_is_exact():
+    """``p(x) = 4! prod(1/F*) (sum omega/F*)^-5`` integrates to one."""
+    U = qmc.Sobol(5, scramble=True, seed=1).random(2 ** 20)
+    E = -np.log(U)
+    X = (E / E.sum(1, keepdims=True))[:, 1:]
+    lp = LH.log_prior_x_np(X)
+    integral = np.log(np.mean(np.exp(lp - lp.max()))) + lp.max() - math.log(24)
+    assert abs(integral + LH.LOG_PRIOR_NORM) < 2e-3, integral
+
+
+def test_collapsed_value_is_the_true_marginal_on_sampled_modes_scale(weak):
+    """Absolute, not up to a constant: at the truth, the collapsed value minus
+    the theta prior is ``log int exp(L) p dx``, so the loglike column means
+    the same in both modes (it was 0.7685 high before the normaliser). Away
+    from the posterior, where the conditional is narrow and off the model's
+    axis, the 1,024-point GHK rule errs by up to ~2 nats (0.004-0.08 at
+    4,096): measured, documented, not tested here."""
+    hi, _ = weak
+    v = np.array([0.0, 0.0, 0.095, 0.30, H4.T14_T])
+    got = _collapsed_minus_prior(hi, v, mx.float64, mx.cpu)[0]
+    assert abs(got - _true_log_marginal(hi, v)) < 0.02
+
+
+def test_no_transit_gives_the_flat_answer_in_both_precisions(weak):
+    """k -> 0: the likelihood is flat in the limb darkening, so the marginal
+    is L itself. Without the absolute ridge the curvature vanishes and GHK
+    returned thousands of nats too much (KOI-2650.01's false peak)."""
+    hi, lo = weak
+    V = np.array([[0.0, 0.0, k, 0.3, H4.T14_T] for k in (0.0, 1e-5, 1e-3)])
+    with mx.stream(mx.cpu):
+        flat = np.array([float(hi.loglik_grid(v, np.full((1, 4), 0.2))[0])
+                         for v in V])
+    f64 = _collapsed_minus_prior(hi, V, mx.float64, mx.cpu)
+    f32 = _collapsed_minus_prior(lo, V, mx.float32, mx.gpu)
+    np.testing.assert_allclose(f64, flat, atol=0.03)     # GHK's rule error
+    np.testing.assert_allclose(f32, f64, atol=0.05)
+
+
+def test_float32_tracks_float64_across_a_ball_reaching_no_transit(weak):
+    hi, lo = weak
+    rng = np.random.default_rng(2)
+    V = np.column_stack([np.zeros((48, 2)), rng.uniform(0.0, 0.12, 48),
+                         rng.uniform(0.0, 0.95, 48),
+                         rng.uniform(0.6, 1.2, 48) * H4.T14_T])
+    f64 = _collapsed_minus_prior(hi, V, mx.float64, mx.cpu)
+    f32 = _collapsed_minus_prior(lo, V, mx.float32, mx.gpu)
+    assert np.all(np.isfinite(f32))
+    assert np.max(np.abs(f32 - f64)) < 0.05, np.max(np.abs(f32 - f64))
+
+
+def _box_reference(hi, v):
+    """Exact conditional of q: SNIS of the true L, uniform over q, then
+    uniform over a box (mean +/- 8 sd) around that; no turin sampling."""
+    S = qmc.Sobol(4, scramble=True, seed=9).random(2 ** 17)
+
+    def snis(lo_b, hi_b):
+        Q = np.clip(lo_b + S * (hi_b - lo_b), 1e-12, 1 - 1e-12)
+        with mx.stream(mx.cpu):
+            L = np.array(hi.loglik_grid(v, LH.q_to_x(Q)))
+        w = np.exp(L - L.max())
+        w /= w.sum()
+        mu = w @ Q
+        return mu, np.sqrt(w @ (Q - mu) ** 2), 1.0 / np.sum(w ** 2)
+
+    mu, sd, _ = snis(np.zeros(4), np.ones(4))
+    s = np.maximum(sd, 0.01)
+    return snis(np.clip(mu - 8 * s, 0, 1), np.clip(mu + 8 * s, 0, 1))
+
+
+def _vertex_reference(hi, v):
+    """The conditional piled into the vertex omega_0 = 1: SNIS from
+    independent exponentials at the gradient's rates (its own shape)."""
+    with mx.stream(mx.cpu):
+        x, L, g, R = hi.ld_terms(mx.array(v[None], dtype=mx.float64))
+    assert np.allclose(np.array(x)[0], 0.0)
+    rate = np.maximum(-np.array(g, dtype=np.float64)[0], 1.0)
+    X = np.random.default_rng(5).exponential(1.0 / rate, size=(2 ** 16, 4))
+    with mx.stream(mx.cpu):
+        Lt = np.array(hi.loglik_grid(v, X))
+    lw = np.where(X.sum(1) < 1, Lt + LH.log_prior_x_np(X)
+                  - np.sum(np.log(rate) - rate * X, 1), -np.inf)
+    w = np.exp(lw - lw.max())
+    w /= w.sum()
+    Q = LH.x_to_q(X)
+    mu = w @ Q
+    return mu, np.sqrt(w @ (Q - mu) ** 2), 1.0 / np.sum(w ** 2)
+
+
+@pytest.mark.parametrize("v, ref", [
+    ([0.0, 0.0, 0.095, 0.30, H4.T14_T], _box_reference),   # the truth
+    ([0.0, 0.0, 0.06, 0.70, 0.105], _box_reference),       # narrow, off-axis
+    ([0.0, 0.0, 0.095, 0.70, 0.105], _box_reference),
+    ([0.0, 0.0, 0.095, 0.90, 0.175], _vertex_reference),   # a corner
+])
+def test_conditional_draws_where_the_model_fits_loosely(weak, v, ref):
+    """The independence sampler through GHK draws (<= 0.1.63) failed here by
+    up to 23 sd at 32 proposals and 5 sd at 2,048; GHK's sequential weights
+    degenerate when the conditional is narrow and away from the model's
+    Gaussian. Every case within 0.1 conditional sd and widths within 10%."""
+    hi, lo = weak
+    v = np.array(v)
+    mu, sd, ess = ref(hi, v)
+    assert ess > 300
+    n = 2048
+    q, acc, _ = LH.draw_limb_darkening(lo, np.tile(v, (n, 1)), seed=4)
+    assert np.all((q > 0) & (q < 1))                         # no wall atoms
+    err = np.abs(q.mean(0) - mu) / sd
+    assert np.all(err < 0.1), err
+    np.testing.assert_allclose(q.std(0) / sd, 1.0, atol=0.1)
+    assert acc > 0.5

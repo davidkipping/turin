@@ -288,21 +288,48 @@ constrained optimum. Two things differ from the quadratic law's version:
   with the fit, so a resume or `--replot` rebuilds the identical target.
 - **The algebra runs on the triangular factor of the curvature**, never the
   curvature itself, which reaches a condition number of 7e9 on KOI-448.02
-  (beyond float32); its factor's is at most 8.5e4.
+  (beyond float32); its factor's is at most 8.5e4. A small fixed ridge keeps
+  the curvature from vanishing where the data cannot see the limb
+  darkening at all (no transit, k -> 0), which otherwise made a false peak.
+- **The post-hoc draws of `q1..q4`** use a Metropolis chain whose moves are
+  exact for the quadratic model truncated to the simplex: exact HMC with
+  analytic reflections (Pakman & Paninski 2014), alternating with exact
+  draws along the simplex's edges, 128 steps per draw.
 
-Checked against references that share none of its approximations: the
-collapsed value equals the true integral to under 5e-4 nats near the
-posterior on synthetic data (5e-3 at very high SNR); the conditional draws
-of `q1..q4` reproduce the exact conditional (means within 0.5 standard
-errors, widths within 1.3%) with none on a wall; float32 tracks float64 to
-an sd of 4e-4. It costs about 5.6x the sampled hybrid4 likelihood per
-evaluation (25 ms against 4.5 ms for 512 chains, value and gradient), mostly
-the GHK integral, so it pays only where the sampled weights mix badly -- the
-case SquishierPlanet measured 10-100x gains on, where they press on the
-simplex walls -- not on a typical Kepler target, where sampled hybrid4
-already mixes as well as the quadratic law. **Real-target acceptance
-against sampled hybrid4 is pending.** Products, restrictions and the resume
-guard are as for the quadratic law, with `q1..q4` and derived `w1..w4`.
+Validated on the user's five-target Kepler suite (KOI-4016.01, 4087.01,
+1430.03, 1361.01, 2650.01; SNR 11.5-52) against sampled hybrid4, with a
+second seed of both modes on three targets
+(`docs/bench/collapsed_hybrid_acceptance.md`):
+
+- every parameter, `q1..q4` and `w1..w4` included, within 0.016 sd, with no
+  shift beyond 3 Monte Carlo standard errors;
+- 16-84% widths within 1.4%;
+- the two modes differ no more than two seeds of one mode do;
+- no `q` draw on the box edge.
+
+That took a second pass. The first found three defects, all now fixed:
+
+- the conditional draws were biased by up to 0.41 sd where the limb
+  darkening is weakly constrained;
+- chains fell into a false peak at k = 0;
+- a few draws landed exactly on the box edge.
+
+The collapsed value matches the true marginal to about 0.01 nats near
+these posteriors (sd over posterior draws 0.005-0.06, the 1,024-point GHK
+rule's own error).
+
+On KOI-2650.01, collapsed mode reproducibly carries 0.3% of its draws in a
+far grazing tail (k > 0.06) that sampled mode's chains essentially never
+visit. Collapsed mode's density there matches the true marginal, so the
+likely reading is that sampled mode under-explores it.
+
+**It is slower: 3.7-8.7x the wall time of sampled hybrid4 (median 4.4x),
+0.23-0.53x the effective samples per second.** The GHK integral is a fixed
+per-chain cost, so the gap is widest on small datasets. Sampled hybrid4
+stays the default. Collapsed mode is for taking the limb darkening out of
+the sampled vector, or for a target whose sampled fit mixes poorly in `k`.
+Products, restrictions and the resume guard are as for the quadratic law,
+with `q1..q4` and derived `w1..w4`.
 
 ### Weak transits and grid-Gibbs
 

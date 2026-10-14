@@ -419,6 +419,20 @@ def _drive(max_samples=120, n_samples=40, seed=3):
     return t, res, verdict, total, "\n".join(logs)
 
 
+def test_a_frozen_run_stops_after_its_first_round(monkeypatch):
+    """A warmup that adapts a step below STEP_FLOOR cannot be rescued by more
+    draws (KOI-2650.01's trapped collapsed run spent two more rounds at
+    1.2e-10), so the loop ends there, unconverged."""
+    t, res, verdict, total, text = _drive(max_samples=400)
+    assert np.isfinite(verdict.step_size) and not verdict.frozen
+    assert "FROZEN" not in text
+    monkeypatch.setattr(sampling, "STEP_FLOOR", 1e9)    # every step "tiny"
+    t, res, verdict, total, text = _drive(max_samples=400)
+    assert verdict.frozen and not verdict.converged and "FROZEN" in text
+    assert "stopping: the chains are frozen" in text
+    assert total == 40                                   # round 0 only
+
+
 def test_extension_is_a_continuation_and_pools_its_draws():
     """With resume, later rounds continue the same chains, so they pool."""
     t, res, verdict, total, text = _drive()

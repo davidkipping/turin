@@ -175,11 +175,11 @@ def test_hybrid4_refusals():
 
 # -- the likelihood ---------------------------------------------------------
 
-def make_dataset(dtau_true=0.0, seed=7):
+def make_dataset(dtau_true=0.0, seed=7, yerr=YERR):
     rng = np.random.default_rng(seed)
     t = np.arange(100.0, 100.0 + 10.0 * P_REF, EXP)
     tw, fw, ew = prep.extract_near_transit_data(
-        t, np.ones_like(t), np.full(t.size, YERR), P_REF, EPOCH, DUR_H)
+        t, np.ones_like(t), np.full(t.size, yerr), P_REF, EPOCH, DUR_H)
     ed = prep.segment_epochs(tw, fw, ew, P_REF, EPOCH, DUR_H)
     cen = prep.centering_constants(ed, EPH)
     n_ep = ed["n_epochs"]
@@ -199,7 +199,7 @@ def make_dataset(dtau_true=0.0, seed=7):
     base = 1.0 + 2.5e-4 * x - 1.8e-4 * (1.5 * x**2 - 0.5)
     ed = dict(ed)
     ed["flux_padded"] = np.where(
-        ed["mask"] > 0, f * base + rng.normal(0.0, YERR, f.shape), 1.0)
+        ed["mask"] > 0, f * base + rng.normal(0.0, yerr, f.shape), 1.0)
     return ed, cen, dtau, n_ep, np.full(n_ep, 2)
 
 

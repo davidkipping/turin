@@ -36,6 +36,13 @@ CORNER_EPOCHS = 7
 #: a run; they are always written after round 0 and at the end.
 HEAVY_EVERY_S = 1200
 
+#: Export row budget for collapsed hybrid4, whose every exported row needs a
+#: conditional q draw (~1.3 ms each, measured at 128 steps): 160,000 rows
+#: keeps an export near 3.5 min where the general budget (1,000,000) would
+#: take 20+. Thinning is systematic and R-hat/ESS still see every draw, so
+#: only the products' row count changes.
+_EXPORT_ROWS_COLLAPSED_HYBRID = 160_000
+
 PARAM_LABELS = {
     "dP": "$P$ (d)", "dtau0": r"$\tau_0$", "k": "$k = R_p/R_\\star$",
     "b": "$b$", "T14": "$T_{14}$ (d)", "q1": "$q_1$",
@@ -799,8 +806,10 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     target = prepared.target
     names_s = list(layout.names)            # what was sampled
     names = names_s
-    thin = _sampling.export_thin(results)
     collapsed = layout.ld == "collapsed"
+    thin = _sampling.export_thin(
+        results, max_rows=_EXPORT_ROWS_COLLAPSED_HYBRID
+        if collapsed and layout.law == "hybrid4" else _sampling.EXPORT_MAX_ROWS)
     ld_cols = list(_model_ld_names(layout.law))
     if collapsed:
         # collapsed Gibbs: the limb darkening was integrated out of the
