@@ -94,6 +94,11 @@ def test_modes_subset():
     (["--KOI-1.01", "--ld=collapsed"], "modes=lineph"),     # default modes
     (["--KOI-1.01", "--ld=collapsed", "--modes=lineph", "--geometry=chord"],
      "circular"),
+    # oblate planets
+    (["--KOI-1.01", "--oblate", "--modes=lineph"], "law=hybrid4"),
+    (["--KOI-1.01", "--oblate", "--law=hybrid4"], "LinEph-only"),
+    (["--KOI-1.01", "--oblate", "--law=hybrid4", "--modes=lineph",
+      "--geometry=chord"], "circular"),
 ])
 def test_bad_arguments_are_rejected(argv, pattern):
     with pytest.raises(SystemExit, match=pattern):
@@ -122,6 +127,19 @@ def test_law_flag_defaults_to_quadratic_and_accepts_hybrid4():
     assert a.law == "hybrid4" and a.modes == ("lineph", "ttv")
     assert outputs.ResumeState.law == "quadratic"
     assert "law" in outputs.ResumeState.GUARDS
+
+
+def test_oblate_implies_collapsed_unless_sampled_is_asked_for():
+    a = cli.parse_args(["--KOI-1.01", "--oblate", "--law=hybrid4",
+                        "--modes=lineph"])
+    assert (a.oblate, a.ld) == (True, "collapsed")
+    a = cli.parse_args(["--KOI-1.01", "--oblate", "--law=hybrid4",
+                        "--modes=lineph", "--ld=sampled"])
+    assert a.ld == "sampled"
+    a = cli.parse_args(["--KOI-1.01"])
+    assert (a.oblate, a.ld) == (False, "sampled")
+    assert outputs.ResumeState.oblate is False
+    assert "oblate" in outputs.ResumeState.GUARDS
 
 
 @pytest.mark.parametrize("pl", ["auto", "exact"])

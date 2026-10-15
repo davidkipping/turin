@@ -48,6 +48,8 @@ PARAM_LABELS = {
     "b": "$b$", "T14": "$T_{14}$ (d)", "q1": "$q_1$",
     "q2": "$q_2$", "q3": "$q_3$", "q4": "$q_4$",
     "w1": "$w_1$", "w2": "$w_2$", "w3": "$w_3$", "w4": "$w_4$",
+    "fc": r"$\sqrt{f}\cos 2\theta$", "fs": r"$\sqrt{f}\sin 2\theta$",
+    "f": "$f$", "theta": r"$\theta$ (deg)", "A": "$A$", "B": "$B$",
 }
 
 
@@ -88,9 +90,12 @@ def _gibbsgrid(mode, args):
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
-    from .cli import collapsed_ld_problem, law_problem
+    from .cli import (collapsed_ld_problem, law_problem, oblate_problem,
+                      resolve_ld)
 
-    problem = law_problem(args) or collapsed_ld_problem(args)
+    resolve_ld(args)
+    problem = (oblate_problem(args) or law_problem(args)
+               or collapsed_ld_problem(args))
     if problem:
         raise SystemExit(f"turin: {problem}")
     _outputs.set_run_status("")
@@ -183,7 +188,8 @@ def replot(args, prepared, outdir, *, log=print):
         state.check(b_prior=args.b_prior, geometry=args.geometry,
                     ttv_max=args.ttv_max_days, gibbsgrid=_gibbsgrid(mode, args),
                     ld=getattr(args, "ld", "sampled"),
-                    law=getattr(args, "law", "quadratic"))
+                    law=getattr(args, "law", "quadratic"),
+                    oblate=getattr(args, "oblate", False))
         chains_path = _outputs.product_path(outdir, target, mode, "chains",
                                             "csv.tar.gz")
         summary_path = _outputs.product_path(outdir, target, mode, "summary",
@@ -303,7 +309,8 @@ def _mode_layout(mode, args, prepared, centering, epoch_data):
                                   law=getattr(args, "law", "quadratic")), tau_half
     return _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
                                  ld=getattr(args, "ld", "sampled"),
-                                 law=getattr(args, "law", "quadratic")), None
+                                 law=getattr(args, "law", "quadratic"),
+                                 oblate=getattr(args, "oblate", False)), None
 
 
 def transit_snrs(prepared, centering, shape, *, b_prior="transiting",
@@ -437,7 +444,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
                           else args.profile_mode),
             gibbsgrid=_gibbsgrid(mode, args),
             ld=getattr(args, "ld", "sampled"),
-            law=getattr(args, "law", "quadratic"))
+            law=getattr(args, "law", "quadratic"),
+            oblate=getattr(args, "oblate", False))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -467,6 +475,10 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             "exact", "required by --ld=collapsed: the omega gradient and "
             "Hessian come from the envelope theorem, which needs the exact "
             "flux-space profile")
+    elif layout.oblate and args.profile_mode == "auto":
+        pl_choice = _plselect.fixed_choice(
+            "exact", "--oblate: probing the solves would cost dozens of "
+            "evaluations of the oblate kernel (~40-85x a round one)")
     elif prior_state is not None and args.profile_mode == "auto":
         pl_choice = _plselect.fixed_choice(
             prior_state.profile_mode, "carried over from the resumed run")
@@ -582,6 +594,17 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
                 transform, build_kwargs=build_kw, n_chains=cfg.n_chains,
                 seed=args.seed, log=log)
         u0 = map_res.ball(cfg.n_chains, seed=args.seed + 1)
+        if layout.oblate:
+            # chains centred off f = 0 (elome's fp32 d/df is 0 below 1e-5)
+            # and spread over the Laplace approximation once the final
+            # target exists, below
+            u_center = _seeding.floor_oblateness(map_res.u_best, transform,
+                                                 layout)
+            if not np.array_equal(u_center, map_res.u_best):
+                log(f"    MAP at f < {_seeding.F_FLOOR:g}: chains centred at "
+                    f"f = {_seeding.F_FLOOR:g} instead")
+            map_res.u_best = u_center
+            u0 = None
         if layout.ld == "collapsed" and layout.law == "hybrid4":
             # GHK's layout is frozen once per fit, at the MAP, and rebuilt
             # into the target; the init ball carries over (same parameters)
@@ -607,6 +630,14 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             layout, centering, epoch_data, orders,
             profile_mode=pl_choice.mode, ld_mode=layout.ld, **build_kw)
 
+    if layout.oblate and u0 is None and resume_for_anvil is None:
+        u0, info = _seeding.laplace_starts(target_obj, map_res.u_best,
+                                           cfg.n_chains, seed=args.seed + 1)
+        log("    chains spread over the Laplace approximation at the MAP"
+            + (" (Hessian not usable: a 1e-3 ball instead)"
+               if info["fallback"] else
+               f" ({info['n_flat']} flat direction(s) capped; "
+               f"{info['pulled']} start(s) pulled back)"))
     if u0 is not None:
         _sampling.check_precision(target_obj, u0, log=log,
                                   strict=not args.no_strict_precision)
@@ -780,6 +811,19 @@ def _ld_weight_draws(layout, phys, names):
     q = np.column_stack([phys[:, names.index(n)] for n in qn])
     return [f"w{j + 1}" for j in range(len(qn))], ld_weights_np(q, layout.law)
 
+def _oblate_draws(layout, phys, names):
+    """``(names, (n, 4) draws)`` of an oblate planet's reported shape: ``f``,
+    ``theta`` (degrees, on [-90, 90]) and the semi-axes ``A = k/sqrt(1-f)``,
+    ``B = A (1 - f)``, from the sampled ``fc, fs`` and ``k``; ``([], None)``
+    for a round one."""
+    if not layout.oblate:
+        return [], None
+    f, theta = _params.oblate_from_fcfs_np(phys[:, names.index("fc")],
+                                           phys[:, names.index("fs")])
+    A = phys[:, names.index("k")] / np.sqrt(1.0 - f)
+    return ["f", "theta", "A", "B"], np.column_stack([f, theta, A, A * (1 - f)])
+
+
 def _ml_row(results, lp, transform):
     """The maximum-likelihood draw over every draw, in model space.
 
@@ -863,14 +907,25 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     w_names, w_draws = _ld_weight_draws(layout, phys, names)
     if w_names:
         summary.update(_outputs.summarize(w_draws, w_names))
+    # oblate: f, theta (degrees) and the semi-axes, derived from fc, fs, k
+    ob_names, ob_draws = _oblate_draws(layout, phys, names)
+    if ob_names:
+        summary.update(_outputs.summarize(ob_draws, ob_names))
+        f95 = float(np.percentile(ob_draws[:, 0], 95))
+        log(f"  oblateness: f median {np.median(ob_draws[:, 0]):.4f}, "
+            f"f < {f95:.4f} (95%); prior uniform in f on [0, "
+            f"{_params.F_MAX:g}] and in theta; T14 is the area-equivalent "
+            "circle's duration")
 
     _outputs.export_summary(outdir, target, mode, summary, log=log)
     _outputs.export_logrho(outdir, target, mode, rho, log=log)
 
     if heavy:
-        cols = list(names) + ["b", "log10_rho"] + w_names + ["loglike"]
+        cols = (list(names) + ["b", "log10_rho"] + w_names + ob_names
+                + ["loglike"])
         arrays = [phys[:, i] for i in range(phys.shape[1])] + [
             b_draws, rho] + [w_draws[:, j] for j in range(len(w_names))] + [
+            ob_draws[:, j] for j in range(len(ob_names))] + [
             np.asarray(results.get_log_prob(thin=thin, flat=True),
                        dtype=np.float64) + lp.log_const]
         _outputs.export_chains(outdir, target, mode, cols, arrays, thin=thin,
@@ -882,7 +937,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     v_ml_named = v_ml if q_ml is None else np.concatenate([v_ml, q_ml])
     _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
 
-    keep = ("k", "beta", "T14") + _model_ld_names(layout.law)
+    keep = ("k", "beta", "T14", "fc", "fs") + _model_ld_names(layout.law)
     state_holder["ml_params"] = {
         n: float(v_ml_named[i]) for i, n in enumerate(names) if n in keep}
 
@@ -914,7 +969,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         b_prior=layout.b_prior, profile_mode=pl_mode,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
-        ld=layout.ld, law=layout.law,
+        ld=layout.ld, law=layout.law, oblate=layout.oblate,
         ghk_layout=getattr(lp, "ghk_layout", None),
         ghk_points=getattr(lp, "ghk_points", None),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,

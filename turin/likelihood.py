@@ -26,6 +26,7 @@ Gaussian over the profiled residuals. Swapping in ``anvil-gp``'s
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -191,6 +192,8 @@ class ProfiledTransitLogProb:
         p = dict(dP=dP, dtau0=dtau0, dtau=dtau, k=k, beta=beta, b=b,
                  T14=T14, q=q, period=lay.P_ref + dP)
         p.update(zip(lay.ld_names, q))
+        if lay.oblate:
+            p.update(oblate_fields(col("fc"), col("fs"), k))
         return p
 
     def mid_times(self, grid, p, lo, hi):
@@ -206,6 +209,8 @@ class ProfiledTransitLogProb:
         term = _params.bk_log_prior(p["beta"], p["k"], self.layout.b_prior)
         if self.mode == "ttv":
             term = term + _params.ttv_log_prior(p["dtau"], self.layout.P_ref)
+        if self.layout.oblate:
+            term = term + oblate_log_prior(p)
         return term
 
     def __call__(self, v):
@@ -214,8 +219,9 @@ class ProfiledTransitLogProb:
         for blk in self.blocks:
             f_dev = _model.transit_flux_dev(
                 blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
-                k=p["k"], b=p["b"], T14=p["T14"], q=p["q"], law=self.law,
-                period=p["period"], geometry=self.geometry)
+                k=p.get("k_flux", p["k"]), b=p["b"], T14=p["T14"], q=p["q"],
+                law=self.law, period=p["period"], geometry=self.geometry,
+                f=p.get("f_flux"), theta=p.get("theta"))
             c = _profile.solve_coefficients(blk.design, f_dev,
                                             self.profile_mode)
             resid = _profile.residual_dev(blk.design, f_dev, c)
@@ -239,8 +245,9 @@ class ProfiledTransitLogProb:
         for blk in self.blocks:
             f_dev = _model.transit_flux_dev(
                 blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
-                k=p["k"], b=p["b"], T14=p["T14"], q=p["q"], law=self.law,
-                period=p["period"], geometry=self.geometry)
+                k=p.get("k_flux", p["k"]), b=p["b"], T14=p["T14"], q=p["q"],
+                law=self.law, period=p["period"], geometry=self.geometry,
+                f=p.get("f_flux"), theta=p.get("theta"))
             c = _profile.solve_coefficients(blk.design, f_dev,
                                             self.profile_mode)
             resid = _profile.residual_dev(blk.design, f_dev, c)
@@ -272,9 +279,38 @@ class ProfiledTransitLogProb:
                       for x in ld)
         f_dev = _model.transit_flux_dev(
             self.grid, mid=self.mid_times(self.grid, p, 0, self.n_epochs),
-            k=p["k"], b=p["b"], T14=p["T14"], q=q, law=self.law,
-            period=p["period"], geometry=self.geometry)
+            k=p.get("k_flux", p["k"]), b=p["b"], T14=p["T14"], q=q,
+            law=self.law, period=p["period"], geometry=self.geometry,
+            f=p.get("f_flux"), theta=p.get("theta"))
         return _profile.detrended_model(self.design, f_dev, self.profile_mode)
+
+
+def oblate_fields(fc, fs, k):
+    """The oblate planet's entries of an unpacked parameter dict.
+
+    ``f``, ``theta`` (radians) from ``(fc, fs)``; ``oblate_ok`` where the
+    point is allowed (:func:`turin.params.oblate_ok`); and the values the
+    kernel actually sees, ``k_flux`` and ``f_flux``, which are swapped for a
+    harmless interior point (a small round planet) where it is not. elome
+    returns NaN outside its domain, and masking the *output* would not be
+    enough: a ``where`` over a NaN branch can still send NaN into the
+    gradient. Keeping the kernel inside its domain keeps both finite; the
+    point gets its -inf from :func:`oblate_log_prior`.
+    """
+    f, theta = _params.oblate_from_fcfs(fc, fs)
+    ok = _params.oblate_ok(k, f)
+    return dict(fc=fc, fs=fs, f=f, theta=theta, oblate_ok=ok,
+                k_flux=mx.where(ok, k, mx.full(k.shape, 0.01, dtype=k.dtype)),
+                f_flux=mx.where(ok, f, mx.zeros_like(f)))
+
+
+def oblate_log_prior(p):
+    """0 where the oblate point is allowed, -inf where not, ``(n_chains,)``:
+    the disc ``f <= F_MAX`` and elome's ``k <= (1 - f)^1.5``. Inside, the
+    prior on ``(fc, fs)`` is flat, which is uniform in ``f`` and ``theta``."""
+    ok = p["oblate_ok"][:, 0]
+    zero = mx.zeros(ok.shape, dtype=p["k"].dtype)
+    return mx.where(ok, zero, zero - math.inf)
 
 
 def _prep_offsets(exposure_time, num_resample):

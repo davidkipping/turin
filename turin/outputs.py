@@ -348,9 +348,13 @@ class ResumeState:
     #: part of the density; ``None`` for every other fit.
     ghk_layout: tuple | None = None
     ghk_points: np.ndarray | None = None
+    #: an oblate planet (``--oblate``). Defaulted to False because every
+    #: state written before it existed was round; a lineage can never switch
+    #: (two more parameters, a different model).
+    oblate: bool = False
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
-              "gibbsgrid", "ld", "law")
+              "gibbsgrid", "ld", "law", "oblate")
 
     def check_model_rev(self, log=None):
         """Refuse to continue chains sampled under an older likelihood.
@@ -393,11 +397,13 @@ class ResumeState:
             else:
                 same = stored == given
             if not same:
+                flag = f"--{name.replace('_', '-')}"
+                use = ((flag if stored else f"no {flag}")
+                       if isinstance(stored, bool) else f"{flag}={stored!r}")
                 raise SystemExit(
                     f"{self.target} {self.mode}: this run was made with "
                     f"{name}={stored!r}, but you asked for {given!r}. "
-                    f"Use --{name.replace('_', '-')}={stored!r} to extend it, "
-                    f"or --fresh to start over.")
+                    f"Use {use} to extend it, or --fresh to start over.")
 
 
 def resume_path(outdir, target, mode):

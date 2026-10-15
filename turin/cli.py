@@ -47,6 +47,7 @@ _BOOL_FLAGS = {
     "--no-strict-precision": "no_strict_precision",
     "--capabilities": "show_capabilities",
     "--replot": "replot",
+    "--oblate": "oblate",
 }
 _VALUE_FLAGS = {
     "--chains": "chains",
@@ -113,7 +114,8 @@ usage: turin --KOI-448.02 [options]
                           exact is the true flux-space profile, ratio is
                           hurin's O(transit depth) form, hybrid refines
                           ratio's static factorization back to exact
-  --ld=sampled|collapsed  limb darkening. sampled (default) samples the
+  --ld=sampled|collapsed  limb darkening. sampled (the default, except
+                          collapsed under --oblate) samples the
                           law's q's (q1, q2; q1..q4 for hybrid4) with
                           everything else. collapsed integrates the limb
                           darkening out of the log-density and draws the
@@ -135,6 +137,16 @@ usage: turin --KOI-448.02 [options]
                           derived. Needs circular geometry. With
                           --ld=collapsed (LinEph only) the four weights are
                           integrated out, as for the quadratic law
+  --oblate                an oblate planet: projected flattening f and
+                          long-axis sky angle theta, sampled as
+                          fc, fs = sqrt(f) (cos 2theta, sin 2theta), uniform
+                          in f on [0, 0.6] and in theta; f, theta (degrees)
+                          and the semi-axes A, B are reported, k is the
+                          area-equivalent radius and T14 that circle's
+                          duration. Needs --law=hybrid4, --modes=lineph and
+                          circular geometry; implies --ld=collapsed unless
+                          --ld=sampled is given. The oblate kernel costs
+                          ~40-85x a round one
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -180,8 +192,11 @@ class Args:
     max_leapfrog: int = 128
     seed: int = 0
     gibbsgrid: str = "on"
-    ld: str = "sampled"
+    #: None until resolved (:func:`resolve_ld`): "collapsed" under --oblate,
+    #: "sampled" otherwise
+    ld: str | None = None
     law: str = "quadratic"
+    oblate: bool = False
     modes: tuple = MODES
     cache_dir: str | None = None
     outdir: str | None = None
@@ -240,16 +255,50 @@ def parse_args(argv=None):
     _choice("PL", args.profile_mode, PL_CHOICES)
     _choice("geometry", args.geometry, GEOMETRIES)
     _choice("gibbsgrid", args.gibbsgrid, GIBBSGRID)
+    resolve_ld(args)
     _choice("ld", args.ld, LD_CHOICES)
     _choice("law", args.law, LAW_CHOICES)
     for mode in args.modes:
         _choice("modes", mode, MODES)
-    problem = law_problem(args) or collapsed_ld_problem(args)
+    problem = (oblate_problem(args) or law_problem(args)
+               or collapsed_ld_problem(args))
     if problem:
         _fail(problem)
     if args.tag is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
         _fail(f"--tag={args.tag!r} must match [A-Za-z0-9_-]+")
     return args
+
+
+def resolve_ld(args):
+    """Settle ``args.ld`` if it was not given: ``collapsed`` under
+    ``--oblate`` (SquishierPlanet: the GHK overhead is ~5% of an oblate
+    evaluation, and on their hardest oblate geometry only collapsed chains
+    converged), ``sampled`` otherwise. Idempotent; the pipeline calls it too,
+    for code that builds ``Args`` without :func:`parse_args`."""
+    if getattr(args, "ld", None) is None:
+        args.ld = "collapsed" if getattr(args, "oblate", False) else "sampled"
+    return args.ld
+
+
+def oblate_problem(args):
+    """Why ``--oblate`` cannot run in this combination, or None."""
+    if not getattr(args, "oblate", False):
+        return None
+    law = getattr(args, "law", "quadratic")
+    if law != "hybrid4":
+        return (f"--oblate needs --law=hybrid4, not --law={law}: the "
+                "quadratic law has no elementary light curve for an ellipse "
+                "(its linear term needs elliptic integrals), and elome's "
+                "oblate kernel takes the hybrid laws only")
+    if "ttv" in args.modes:
+        return ("--oblate is LinEph-only: pass --modes=lineph. A TTV fit "
+                "would pay the oblate kernel (~40-85x) on every grid-Gibbs "
+                "sweep, and oblateness is a shape property that LinEph "
+                "measures from every epoch together")
+    if args.geometry != "circular":
+        return ("--oblate needs --geometry=circular: elome's oblate kernel "
+                "is on its tau route")
+    return None
 
 
 def law_problem(args):

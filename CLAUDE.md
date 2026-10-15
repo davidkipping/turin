@@ -342,6 +342,61 @@ darkening (k 0.027, q1 on its wall), unconverged at R-hat 1.26; on
 KOI-518.02 the laws cost the same. That target is atypical (the user's
 point): do not generalise from it.
 
+### Oblate planets (`--oblate`, 0.1.65)
+
+Step 3 of SquishierPlanet's `docs/upstream/turin_oblate_prompt.md`, built on
+the user's request with two decisions taken with them: a ρ⋆ prior and a
+degeneracy warning instead of the brief's ridge sampler (deferred until
+Kepler injections show the false mode matters), and `--ld=collapsed` as the
+`--oblate` default (`cli.resolve_ld`; `Args.ld` is `None` until resolved).
+hybrid4, LinEph and circular geometry only (`cli.oblate_problem`, refused in
+CLI and pipeline); `oblate` is a resume guard (old states read round).
+
+- **Model.** elome's `flux_dev_from_tau(..., f=, theta=)` (radians), `k` the
+  area-equivalent radius √(AB), `a_over_rstar` keeps the circle relation, so
+  T14 is that circle's duration (a coordinate; the log says so). `f`/`theta`
+  reach elome **only when oblate** (`model.oblate_kw`): elome's `f = 0` is
+  not bitwise its spherical forms (9.7e-8 of the depth measured), and every
+  spherical path is **bitwise** 0.1.64 (16 quantities on KOI-518.02,
+  quadratic and hybrid4, sampled, collapsed and TTV, value and gradient).
+- **Coordinates** `(fc, fs) = √f (cos 2θ, sin 2θ)` after T14, on the box
+  `±√F_MAX` cut to the disc `f <= F_MAX = 0.6` (`params.oblate_from_fcfs`).
+  Uniform there is uniform in `f` and `θ`; β-triangle `b >= 0` with θ over a
+  half-turn covers every geometry once.
+- **Domain.** elome returns NaN for `k > (1-f)^1.5` (reachable: `k`'s box
+  goes to 1). `likelihood.oblate_fields` masks from the *parameters* and
+  hands the kernel a harmless point (`k_flux`, `f_flux`) where the point is
+  not allowed; `oblate_log_prior` gives it -inf. Masking the output instead
+  can leave NaN in the gradient. Pinned by a test (a mutation that drops the
+  swap fails it in both `--ld` modes).
+- **Collapsed** needs nothing new beyond passing `f`, `θ` through
+  `_gen_blocks`: the conditional equals the sampled oblate likelihood to
+  1e-12, and value and draws match the exact marginal and conditional.
+  Memory: no change (collapsed peak is the GHK workspace, 1.54 vs 1.56 GB
+  round vs oblate); cost 224 ms collapsed vs 164 ms sampled oblate vs 81 ms
+  collapsed round (512 chains, 860 points, value+grad).
+- **Start.** The MAP's 128 starts already spread `(fc, fs)` by ~±0.1 (the
+  brief's three-way nudge needs no code). `seeding.floor_oblateness` moves
+  the chains' centre to `f >= 1e-4` (elome's fp32 d/df is 0 below 1e-5, and
+  f = fc² + fs² is stationary at the origin), and `seeding.laplace_starts`
+  spreads chains over a finite-difference Laplace approximation (sigmas
+  capped at 0.5 unconstrained units, far starts pulled back). Oblate only,
+  so round starts stay bitwise. Known weakness, measured: on a very sharp
+  posterior (30 ppm, 1-min cadence) `find_map` stops ~130 log-units short of
+  the peak, and at 10 ppm ~9,000, where warmup was then spent descending.
+- **`--PL=auto`** resolves to exact without probing under `--oblate`.
+- **Products.** `fc, fs` sampled (R-hat, ESS); `f`, `theta` (degrees),
+  semi-axes `A, B` derived, after `w1..w4` and before `loglike`; a log line
+  with `f`'s median and 95% upper limit and the prior.
+- **Known limitation, not solved:** the b-k grazing bound and taper use `k`,
+  not the projected extent `A = k/√(1-f)`.
+- References in `tests/test_oblate.py`: elome's `TransitModel` (fp64 1e-13,
+  fp32 2e-6) and SquishierPlanet's float64 `model.light_curve` (1e-12).
+  Injection (f = 0.1, θ = 30°, b = 0.7, 30 ppm, 1-min cadence, collapsed):
+  f = 0.099 ± 0.004, θ = 30.9 ± 2.2°, converged in one round.
+- **Pending:** the ρ⋆ prior, the degeneracy warning, real-target and
+  synthetic acceptance (the brief's tests 2-6), README.
+
 ### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62; fixed 0.1.64)
 
 `ldmarg`'s collapsed Gibbs over a 4-simplex: five generator curves

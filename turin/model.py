@@ -430,7 +430,8 @@ def _expanded_flux_dev(grid, tau, *, k, b, T14, q1, q2, period, geometry):
 
 
 def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
-                     q=None, law="quadratic", geometry="circular"):
+                     q=None, law="quadratic", geometry="circular", f=None,
+                     theta=None):
     """Exposure-averaged transit flux **deviation**, ``f - 1``.
 
     Shape ``(n_chains, n_epochs, max_pts)``. Scalar-per-chain parameters
@@ -441,6 +442,11 @@ def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
     ``q`` -- a sequence of columns -- or, for the quadratic law, as
     ``q1``/``q2``. The quadratic path is exactly what it was before
     ``law`` existed; ``hybrid4`` needs the tau kernel (``circular``).
+
+    ``f``, ``theta`` (``(n_chains, 1)``, radians) make the planet oblate:
+    elome's projected flattening and long-axis sky angle, with ``k`` the
+    area-equivalent radius (:func:`oblate_kw`). Hybrid laws only. ``None``
+    (the default) passes nothing, so the spherical call is unchanged.
 
     The deviation, not the flux, is the primary quantity: it is what
     elome computes natively, and everything downstream works in
@@ -475,10 +481,15 @@ def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
             flat, period, a_over_rstar(T14, period, k, b), b, k,
             exp_time=grid.exp_time,
             integration="contact" if grid.exp_time > 0 else "none",
-            n_gl=grid.n_gl, limb_dark=law, u=ld_weights(q, law))
+            n_gl=grid.n_gl, limb_dark=law, u=ld_weights(q, law),
+            **oblate_kw(f, theta))
         if grid.order is not None:
             dev = mx.take(dev, grid.unorder, axis=1)
         return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
+    if f is not None:
+        raise ValueError("an oblate planet (f=) takes a hybrid law; elome has "
+                         "no elementary oblate light curve for the quadratic "
+                         "law")
 
     q1, q2 = q
     if not (HAS_TAU_KERNEL and geometry == "circular"):
@@ -546,7 +557,20 @@ def vertex_flux_devs(grid, *, mid, k, b, T14, period):
     return [b0 / f0, b2 / f1, (2.0 * b1 - b2) / f2]
 
 
-def generator_flux_devs(grid, *, mid, k, b, T14, period, law="hybrid4"):
+def oblate_kw(f, theta):
+    """elome's oblate keywords, or none at all for a spherical planet.
+
+    elome's ``f=0`` matches the spherical forms to fp32 tolerance but is not
+    bitwise (9.7e-8 of the depth measured), so a spherical fit must not pass
+    ``f`` at all: that is what keeps every pre-oblate path bitwise.
+    """
+    if f is None:
+        return {}
+    return {"f": f, "theta": theta}
+
+
+def generator_flux_devs(grid, *, mid, k, b, T14, period, law="hybrid4",
+                        f=None, theta=None):
     """Light-curve deviations of a hybrid law's generator laws.
 
     Returns ``[F_0 - 1, ..., F_n - 1]``, each ``(n_chains, n_epochs,
@@ -573,7 +597,8 @@ def generator_flux_devs(grid, *, mid, k, b, T14, period, law="hybrid4"):
         flat, period, a_over_rstar(T14, period, k, b), b, k,
         exp_time=grid.exp_time,
         integration="contact" if grid.exp_time > 0 else "none",
-        n_gl=grid.n_gl, limb_dark=law, ld_basis=True)        # (C, m, n_g)
+        n_gl=grid.n_gl, limb_dark=law, ld_basis=True,
+        **oblate_kw(f, theta))                                 # (C, m, n_g)
     if grid.order is not None:
         basis = mx.take(basis, grid.unorder, axis=1)
     shape = (n_chains, grid.n_epochs, grid.max_pts)

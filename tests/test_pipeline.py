@@ -217,6 +217,91 @@ def test_collapsed_hybrid4_lineph_end_to_end(tmp_path, fake_target):
     assert any("replotting" in l for l in logs)
 
 
+@pytest.mark.parametrize("ld", ["collapsed", "sampled"])
+def test_oblate_lineph_end_to_end(tmp_path, fake_target, monkeypatch, ld):
+    """--oblate samples fc, fs after T14 and reports f, theta (degrees) and
+    the semi-axes A, B as derived rows and columns; --PL=auto resolves to
+    exact; the chains start on the Laplace spread; a resume and --replot
+    rebuild the oblate model. The injection is round, which is all plumbing
+    needs. The float64 certificate (82 s of oblate CPU probes here) runs on
+    the collapsed default's first fit only; the other runs test plumbing."""
+    if ld == "sampled":
+        monkeypatch.setattr(pipeline._sampling, "certify",
+                            lambda *a, **k: None)
+    logs = []
+    args = _args(tmp_path, law="hybrid4", oblate=True,
+                 ld=None if ld == "collapsed" else "sampled")
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    text = "\n".join(logs)
+    assert "--PL=exact (" in text
+    assert "Laplace approximation" in text
+    assert "oblateness: f median" in text and "(95%)" in text
+    out = str(tmp_path)
+    rows = _summary_rows(os.path.join(out, "KOI-1.01_lineph_summary.csv"))
+    names = list(rows)
+    assert names[:7] == ["dP", "dtau0", "k", "beta", "T14", "fc", "fs"]
+    assert rows["fc"]["R-hat"] != "" and rows["fs"]["R-hat"] != ""
+    for n in ("f", "theta", "A", "B"):
+        assert rows[n]["R-hat"] == ""
+    assert 0 <= float(rows["f"]["Median"]) <= 0.6
+    with tarfile.open(os.path.join(out, "KOI-1.01_lineph_chains.csv.tar.gz")) as tar:
+        body = tar.extractfile(tar.getmembers()[0]).read().decode().splitlines()
+    cols = body[0].split(",")
+    assert cols[-11:] == ["b", "log10_rho", "w1", "w2", "w3", "w4", "f",
+                          "theta", "A", "B", "loglike"]
+    d = np.array([[float(x) for x in r.split(",")] for r in body[2:]])
+    fc, fs = d[:, cols.index("fc")], d[:, cols.index("fs")]
+    f = d[:, cols.index("f")]
+    np.testing.assert_allclose(f, fc ** 2 + fs ** 2, rtol=1e-9)
+    np.testing.assert_allclose(d[:, cols.index("theta")],
+                               np.degrees(0.5 * np.arctan2(fs, fc)), atol=1e-9)
+    A = d[:, cols.index("A")]
+    np.testing.assert_allclose(A, d[:, cols.index("k")] / np.sqrt(1 - f),
+                               rtol=1e-9)
+    np.testing.assert_allclose(d[:, cols.index("B")], A * (1 - f), rtol=1e-9)
+    assert np.all(f <= 0.6)
+    state = outputs.load_resume(out, "KOI-1.01", "lineph")
+    assert state.oblate and state.ld == ld and state.profile_mode == "exact"
+    assert {"fc", "fs"} <= set(state.ml_params)
+    if ld == "collapsed":
+        assert "Certificate from" in text
+    else:
+        return                        # the resume and replot are shared code
+
+    monkeypatch.setattr(pipeline._sampling, "certify", lambda *a, **k: None)
+    logs = []
+    args = _args(tmp_path, law="hybrid4", oblate=True, extend1=True,
+                 ld=None if ld == "collapsed" else "sampled")
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    logs = []
+    args = _args(tmp_path, law="hybrid4", oblate=True,
+                 ld=None if ld == "collapsed" else "sampled")
+    args.replot = True
+    assert pipeline.run(args, log=logs.append) == 0
+    assert any("replotting" in l for l in logs)
+
+
+def test_a_lineage_never_switches_oblateness(tmp_path, fake_target):
+    assert pipeline.run(_args(tmp_path, law="hybrid4", ld="sampled"),
+                        log=lambda m: None) in FINISHED
+    with pytest.raises(SystemExit, match="oblate=False"):
+        pipeline.run(_args(tmp_path, law="hybrid4", ld="sampled",
+                           oblate=True, extend1=True), log=lambda m: None)
+
+
+@pytest.mark.parametrize("over,pattern", [
+    (dict(oblate=True), "hybrid4"),
+    (dict(oblate=True, law="hybrid4", modes=("lineph", "ttv")),
+     "LinEph-only"),
+    (dict(oblate=True, law="hybrid4", geometry="chord"), "circular"),
+])
+def test_oblate_refusals_reach_the_pipeline(tmp_path, fake_target, over,
+                                           pattern):
+    with pytest.raises(SystemExit, match=pattern):
+        pipeline.run(_args(tmp_path, **over), log=lambda m: None)
+    assert not any(tmp_path.iterdir())
+
+
 def test_a_lineage_never_switches_law(tmp_path, fake_target):
     assert pipeline.run(_args(tmp_path), log=lambda m: None) in FINISHED
     with pytest.raises(SystemExit, match="law='quadratic'"):

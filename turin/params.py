@@ -22,6 +22,10 @@ Under ``--law=hybrid4`` the limb darkening is ``q1 .. q4`` instead of
 ``7 + one per epoch``; :attr:`ParamLayout.n_shape` is where the epoch times
 start.
 
+Under ``--oblate`` (hybrid4, LinEph only) two columns follow ``T14``:
+``fc, fs = sqrt(f) (cos 2theta, sin 2theta)``, the projected flattening and
+long-axis sky angle of an oblate planet (:func:`oblate_from_fcfs`).
+
 ``b`` is sampled as a fraction of its k-dependent upper bound rather than
 directly, which is how a fixed box in model space can represent hurin's
 conditional-uniform (b, k) construction. The area and taper terms that make
@@ -61,6 +65,20 @@ LD_MODES = ("sampled", "collapsed")
 #: The LinEph sampled vector under ``--ld=collapsed``.
 LINEPH_BASE_COLLAPSED = ("dP", "dtau0", "k", "beta", "T14")
 
+#: Largest projected flattening an oblate fit allows (SquishierPlanet's).
+#: ``(fc, fs)`` live in the box ``[-sqrt(F_MAX), sqrt(F_MAX)]^2`` and the
+#: prior cuts it to the disc ``f <= F_MAX``. Uniform on the disc is exactly
+#: uniform in ``f`` and in ``theta`` (the ``sqrt(e) cos(omega)`` trick); the
+#: linear form ``f (cos 2theta, sin 2theta)`` would be ``p(f) ~ f``, which
+#: quadrupled SquishierPlanet's false-oblate weight. The 2theta is because an
+#: ellipse is unchanged by a half-turn.
+F_MAX = 0.6
+OBLATE_NAMES = ("fc", "fs")
+#: elome's oblate domain is ``k <= (1 - f)^1.5`` (at most two limb
+#: crossings); outside it the kernel returns NaN. The likelihood refuses
+#: points this close to the edge, before they reach the kernel.
+OBLATE_DOMAIN_MARGIN = 1e-6
+
 
 @dataclass
 class ParamLayout:
@@ -85,6 +103,8 @@ class ParamLayout:
     #: limb-darkening law (:data:`turin.model.LAWS`); it sets which
     #: coordinates the layout carries (:func:`turin.model.ld_names`)
     law: str = "quadratic"
+    #: an oblate planet: ``fc, fs`` follow ``T14`` (hybrid4, LinEph only)
+    oblate: bool = False
 
     @property
     def ld_names(self) -> tuple:
@@ -94,9 +114,10 @@ class ParamLayout:
 
     @property
     def n_shape(self) -> int:
-        """Columns before the epoch times: ``k, beta, T14`` plus the limb
-        darkening (5 quadratic, 7 hybrid4); a TTV vector's ``dtau`` start."""
-        return 3 + len(self.ld_names)
+        """Columns before the epoch times: ``k, beta, T14``, the oblate pair
+        if any, and the limb darkening (5 quadratic, 7 hybrid4); a TTV
+        vector's ``dtau`` start."""
+        return 3 + 2 * self.oblate + len(self.ld_names)
 
     @property
     def dim(self) -> int:
@@ -126,10 +147,12 @@ class ParamLayout:
         return anvil.Transform(self.specs())
 
 
-def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None, law="quadratic"):
+def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None, law="quadratic",
+                  oblate=False):
     """Bounds for the shape parameters, in hurin's order after (dP, dtau0):
-    ``k, beta, T14`` and the law's limb-darkening coordinates, each uniform
-    on [0, 1] (Kipping's ``q1, q2``; hybrid4's stick-breaking ``q1..q4``)."""
+    ``k, beta, T14``, ``fc, fs`` if oblate, and the law's limb-darkening
+    coordinates, each uniform on [0, 1] (Kipping's ``q1, q2``; hybrid4's
+    stick-breaking ``q1..q4``)."""
     if T14_max is None:
         # hurin: three times the archive duration, which is generous but
         # finite; callers may override from a physical density limit
@@ -138,11 +161,13 @@ def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None, law="quadratic"):
         ("k", k_min, k_max),
         ("beta", 0.0, 1.0),
         ("T14", 0.0, float(T14_max)),
-    ) + tuple((n, 0.0, 1.0) for n in ld_names(law))
+    ) + tuple((n, -math.sqrt(F_MAX), math.sqrt(F_MAX))
+              for n in (OBLATE_NAMES if oblate else ())) \
+        + tuple((n, 0.0, 1.0) for n in ld_names(law))
 
 
 def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
-                  law="quadratic"):
+                  law="quadratic", oblate=False):
     """Parameter layout for the linear-ephemeris fit.
 
     ``ld="collapsed"`` drops the limb-darkening coordinates from the sampled
@@ -158,8 +183,10 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
         raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
     if ld == "collapsed" and law not in ("quadratic", "hybrid4"):
         raise ValueError(f"--ld=collapsed is not implemented for {law}")
+    if oblate and law != "hybrid4":
+        raise ValueError(f"an oblate planet takes --law=hybrid4, not {law}")
     rows = [("dP", -DP_HALF, DP_HALF), ("dtau0", -DTAU0_HALF, DTAU0_HALF)]
-    rows += list(_shape_bounds(eph, T14_max=T14_max, law=law))
+    rows += list(_shape_bounds(eph, T14_max=T14_max, law=law, oblate=oblate))
     if ld == "collapsed":
         rows = [r for r in rows if r[0] not in ld_names(law)]
     names = tuple(r[0] for r in rows)
@@ -171,11 +198,12 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
     return ParamLayout(mode="lineph", names=names, lo=lo, hi=hi,
                        report_offset=off, b_prior=b_prior,
                        P_ref=float(eph["period"]),
-                       tau0_ref=float(eph["epoch"]), ld=ld, law=law)
+                       tau0_ref=float(eph["epoch"]), ld=ld, law=law,
+                       oblate=bool(oblate))
 
 
 def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
-               law="quadratic"):
+               law="quadratic", oblate=False):
     """Parameter layout for the per-epoch-timing fit.
 
     ``tau_half`` is the half-width of each epoch's timing prior, in days:
@@ -185,6 +213,11 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
     if law not in LAWS:
         raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
+    if oblate:
+        raise ValueError("an oblate planet is LinEph-only: a TTV fit would pay "
+                         "the oblate kernel (~40-85x) on every grid-Gibbs "
+                         "sweep, and oblateness is a shape property LinEph "
+                         "measures from every epoch together")
     rows = list(_shape_bounds(eph, T14_max=T14_max, law=law))
     n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
     centers = np.asarray(centering["centers_abs"], dtype=np.float64)
@@ -210,6 +243,29 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         report_offset=np.array(off), b_prior=b_prior,
         P_ref=float(eph["period"]), tau0_ref=float(eph["epoch"]),
         n_arr=n_arr, centers_abs=centers, law=law)
+
+
+def oblate_from_fcfs(fc, fs):
+    """``(f, theta)`` from the sampled ``(fc, fs)``: ``f = fc^2 + fs^2``,
+    ``theta = atan2(fs, fc) / 2`` in radians, on [-pi/2, pi/2] (MLX)."""
+    return fc * fc + fs * fs, 0.5 * mx.arctan2(fs, fc)
+
+
+def oblate_from_fcfs_np(fc, fs):
+    """Host replica of :func:`oblate_from_fcfs`, with ``theta`` in degrees
+    (the products' unit; elome's ``TransitModel`` also takes degrees)."""
+    fc = np.asarray(fc, dtype=np.float64)
+    fs = np.asarray(fs, dtype=np.float64)
+    return fc * fc + fs * fs, np.degrees(0.5 * np.arctan2(fs, fc))
+
+
+def oblate_ok(k, f):
+    """Where an oblate point is allowed: inside the disc ``f <= F_MAX`` and
+    elome's domain ``k <= (1 - f)^1.5`` (with a hair of margin), as a mask
+    from the parameters alone, so the likelihood can keep the kernel away
+    from NaN rather than clean it up afterwards (MLX)."""
+    edge = (1.0 - mx.minimum(f, 1.0)) ** 1.5 * (1.0 - OBLATE_DOMAIN_MARGIN)
+    return (f <= F_MAX) & (k < edge)
 
 
 def bk_log_prior(beta, k, b_prior="transiting"):

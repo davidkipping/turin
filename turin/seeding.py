@@ -198,6 +198,94 @@ class MapResult:
         return mx.array(u.astype(np.float32))
 
 
+#: Smallest flattening the chains of an oblate fit are centred on. elome's
+#: float32 kernel takes the spherical forms below f = 1e-5, where d/df = 0,
+#: and f = fc^2 + fs^2 has a stationary point at the origin anyway: a centre
+#: at f ~ 0 would start every chain where (fc, fs) feel no gradient.
+#: f = 1e-4 (fc = 0.01) is 10x clear of that band and far inside any
+#: posterior width in f (SquishierPlanet: sd(f) ~ 0.05 at 10 ppm).
+F_FLOOR = 1e-4
+
+
+def floor_oblateness(u, transform, layout, f_floor=F_FLOOR):
+    """``u`` (unconstrained, ``(dim,)``) with its oblateness raised to at
+    least ``f_floor``, keeping ``theta`` (``theta = 0`` from the origin)."""
+    v = np.array(transform.model_np(np.asarray(u, dtype=np.float64)[None, :])[0])
+    i, j = layout.index("fc"), layout.index("fs")
+    f = v[i] ** 2 + v[j] ** 2
+    if f >= f_floor:
+        return np.asarray(u, dtype=np.float64)
+    if f > 0:
+        v[[i, j]] *= np.sqrt(f_floor / f)
+    else:
+        v[i], v[j] = np.sqrt(f_floor), 0.0
+    return np.array(transform.from_model_np(v), dtype=np.float64)
+
+
+def laplace_starts(target, u_map, n_chains, *, seed=0, scale=0.5,
+                   sigma_cap=0.5, pull_nats=25.0, rounds=12):
+    """Chain starts spread over the Laplace approximation at ``u_map``.
+
+    SquishierPlanet's ChEES froze every chain started in a small ball around
+    an oblate MAP; this follows its ``elome_run.laplace_start``. The Hessian
+    of the float32 log-density is central-differenced from batched gradients
+    (one call of ``2 dim`` rows), twice: along the axes, then along the first
+    pass's eigenvectors at 0.3 sigma. Starts are ``u_map + scale * N(0,
+    H^-1)``, each sigma capped at ``sigma_cap`` unconstrained units (a flat
+    or wrong-signed direction would otherwise fling chains to the box
+    edges), and any start more than ``pull_nats`` below the MAP is pulled
+    halfway back, up to ``rounds`` times.
+
+    Returns ``(u0 (n_chains, dim) float32 mx.array, info dict)``.
+    """
+    u_map = np.asarray(u_map, dtype=np.float64)
+    dim = u_map.size
+    grad = mx.grad(lambda u: mx.sum(target.log_prob(u)))
+
+    def hessian(basis, steps):
+        rows = np.concatenate([u_map + steps[:, None] * basis.T,
+                               u_map - steps[:, None] * basis.T])
+        g = np.array(grad(mx.array(rows, dtype=mx.float32)), dtype=np.float64)
+        dg = (g[:dim] - g[dim:]) / (2.0 * steps[:, None])    # rows: d g / d b_j
+        Hb = dg @ basis                                       # basis-coords
+        Hb = 0.5 * (Hb + Hb.T)
+        return basis @ Hb @ basis.T
+
+    eye = np.eye(dim)
+    H = hessian(eye, np.full(dim, 1e-3))
+    ok = np.all(np.isfinite(H))
+    if ok:
+        lam, P = np.linalg.eigh(-H)
+        sig = 1.0 / np.sqrt(np.maximum(lam, 1.0 / sigma_cap**2))
+        H2 = hessian(P, 0.3 * sig)
+        ok = np.all(np.isfinite(H2))
+        if ok:
+            H = H2
+    info = {"fallback": not ok}
+    if not ok:
+        u0 = u_map[None, :] + 1e-3 * np.random.default_rng(seed).standard_normal(
+            (n_chains, dim))
+        return mx.array(u0.astype(np.float32)), info
+    lam, P = np.linalg.eigh(-H)
+    info["n_flat"] = int(np.sum(lam <= 1.0 / sigma_cap**2))
+    sig = 1.0 / np.sqrt(np.maximum(lam, 1.0 / sigma_cap**2))
+    rng = np.random.default_rng(seed)
+    u = u_map + scale * (rng.standard_normal((n_chains, dim)) * sig) @ P.T
+    lp_map = float(np.array(target.log_prob(
+        mx.array(u_map[None, :], dtype=mx.float32)))[0])
+    pulled = 0
+    for _ in range(rounds):
+        lp = np.array(target.log_prob(mx.array(u, dtype=mx.float32)),
+                      dtype=np.float64)
+        bad = ~(lp > lp_map - pull_nats)
+        if not bad.any():
+            break
+        pulled += int(bad.sum())
+        u[bad] = u_map + 0.5 * (u[bad] - u_map)
+    info.update(pulled=pulled, sigma=sig)
+    return mx.array(u.astype(np.float32)), info
+
+
 def find_map(target, u_starts, *, n_iter=400, lr=0.05, clip=10.0):
     """Batched gradient ascent on ``target.log_prob``, all starts at once.
 
@@ -266,9 +354,14 @@ def default_shape_start(eph, layout):
     T14_hi = float(layout.hi[layout.index("T14")])
     # every limb-darkening coordinate starts mid-box: Kipping's (0.5, 0.5),
     # and for hybrid4 a point well inside the weight simplex
-    return {"k": k0, "beta": float(np.clip(beta0, 0.01, 0.95)),
-            "T14": float(np.clip(T14_0, 1e-4, 0.95 * T14_hi)),
-            **{n: 0.5 for n in _model.ld_names(layout.law)}}
+    start = {"k": k0, "beta": float(np.clip(beta0, 0.01, 0.95)),
+             "T14": float(np.clip(T14_0, 1e-4, 0.95 * T14_hi)),
+             **{n: 0.5 for n in _model.ld_names(layout.law)}}
+    if getattr(layout, "oblate", False):
+        # round: the MAP's starts spread (fc, fs) by ~0.1 either way, and
+        # floor_oblateness keeps the chains' centre off f = 0
+        start.update(fc=0.0, fs=0.0)
+    return start
 
 
 def initial_model_vector(layout, eph, *, shape=None, dtau=None, dP=0.0,

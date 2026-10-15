@@ -287,7 +287,8 @@ def model_grid(lp, v_row, *, half_span=None, span_durations=3.0, T14=None,
         else:
             q = tuple(mx.full((1, 1), float(x), dtype=mx.float64) for x in ld)
         f = _model.transit_flux(
-            grid, mid=mx.zeros((1, 1), dtype=mx.float64), k=p["k"], b=p["b"],
-            T14=p["T14"], q=q, law=lp.law, period=p["period"],
-            geometry=lp.geometry)
+            grid, mid=mx.zeros((1, 1), dtype=mx.float64),
+            k=p.get("k_flux", p["k"]), b=p["b"], T14=p["T14"], q=q,
+            law=lp.law, period=p["period"], geometry=lp.geometry,
+            f=p.get("f_flux"), theta=p.get("theta"))
         return tt, np.array(f, dtype=np.float64)[0, 0]

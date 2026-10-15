@@ -42,6 +42,7 @@ import math
 import mlx.core as mx
 import numpy as np
 
+from . import likelihood as _lik
 from . import model as _model
 from . import profile as _profile
 from . import simplexmass as _sm
@@ -302,14 +303,18 @@ class MarginalHybridLogProb(ProfiledTransitLogProb):
         dP, dtau0, k, beta, T14 = (col(n) for n in
                                    ("dP", "dtau0", "k", "beta", "T14"))
         b = _model.impact_parameter(beta, k, lay.b_prior)
-        return dict(dP=dP, dtau0=dtau0, dtau=None, k=k, beta=beta, b=b,
-                    T14=T14, period=lay.P_ref + dP)
+        p = dict(dP=dP, dtau0=dtau0, dtau=None, k=k, beta=beta, b=b,
+                 T14=T14, period=lay.P_ref + dP)
+        if lay.oblate:
+            p.update(_lik.oblate_fields(col("fc"), col("fs"), k))
+        return p
 
     def _gen_blocks(self, p):
         return [_GenBlock(blk.design, _model.generator_flux_devs(
                     blk.grid, mid=self.mid_times(blk.grid, p, blk.lo, blk.hi),
-                    k=p["k"], b=p["b"], T14=p["T14"], period=p["period"],
-                    law=LAW))
+                    k=p.get("k_flux", p["k"]), b=p["b"], T14=p["T14"],
+                    period=p["period"], law=LAW, f=p.get("f_flux"),
+                    theta=p.get("theta")))
                 for blk in self.blocks]
 
     def _gauss(self, x, g, R):
@@ -542,7 +547,7 @@ class HybridOmegaSampler:
         return cur, acc / max(self.n_steps, 1), on_face
 
     def step(self, v_model):
-        """Draw ``x`` for every row of ``v_model (C, 5)`` (model space).
+        """Draw ``x`` for every row of ``v_model (C, dim)`` (model space).
         Returns ``(x (C, 4), accept (C,), x_star_on_face (C,) bool)``."""
         v_model = np.asarray(v_model, dtype=np.float64)
         out = [self._draw_batch(v_model[s:s + self.batch])
