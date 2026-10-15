@@ -198,6 +198,17 @@ class MapResult:
         return mx.array(u.astype(np.float32))
 
 
+#: MAP iterations for an oblate fit (round fits keep ``find_map``'s 400, so
+#: their starts stay bitwise). The (fc, fs) valley is long and curved: on
+#: the 30 ppm injection of ``tests/test_oblate.py`` with hybrid4 on the
+#: curvature basis (0.1.67), 400 iterations stopped 6,400 nats below the
+#: truth (collapsed; 1,970 sampled) in the wrong basin (f ~ 0.15-0.5), and
+#: the chains were still climbing at the draw cap. 1,500 stops 78-152 short
+#: (collapsed, two seeds; 5-7 sampled), which warmup absorbs; 28 s against
+#: 7 s at 128 starts. A smaller step (0.01) or a step decayed to 1e-4 was
+#: worse at either length; from the truth, Adam stays within 6 nats of it.
+N_ITER_OBLATE = 1500
+
 #: Smallest flattening the chains of an oblate fit are centred on. elome's
 #: float32 kernel takes the spherical forms below f = 1e-5, where d/df = 0,
 #: and f = fc^2 + fs^2 has a stationary point at the origin anyway: a centre

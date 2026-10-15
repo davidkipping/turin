@@ -123,10 +123,12 @@ def w_to_omega(w):
 
 
 def x_to_q(x):
-    """``x (..., D)`` -> the sampled-mode coordinates ``q1..q4`` (..., D)."""
-    from elome.ld import q_from_simplex_np
+    """``x (..., D)`` -> the sampled-mode coordinates ``q1..q4`` (..., D),
+    through elome's inverse of the curvature-basis map (``hybrid4_to_q_np``;
+    ``omega_to_w`` keeps ``w`` on the simplex, where it is defined)."""
+    from elome.ld import hybrid4_to_q_np
 
-    return np.clip(q_from_simplex_np(omega_to_w(x_to_omega(x))), 0.0, 1.0)
+    return np.clip(hybrid4_to_q_np(omega_to_w(x_to_omega(x))), 0.0, 1.0)
 
 
 def q_to_x(q):

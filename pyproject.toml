@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turin"
-version = "0.1.66"
+version = "0.1.67"
 description = "GPU transit fitting for Kepler and TESS: profile-likelihood polynomial detrending with elome and anvil on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,7 +19,7 @@ dependencies = [
     "requests>=2.31",
     "matplotlib>=3.7",
     "corner>=2.2",
-    "elome>=0.16.2",
+    "elome>=0.17.1",
     "anvil-mcmc @ git+https://github.com/davidkipping/anvil.git",
 ]
 

@@ -1,14 +1,17 @@
 """The hybrid4 limb-darkening law (``--law=hybrid4``).
 
 hybrid4 is elome's (and SquishierPlanet's, LDhybrid v1.0's) rational law,
-``I/I(1) = 1 - sum_j w_j T_j(mu)`` with four shape weights. turin samples
-it as SquishierPlanet does: ``q1..q4`` uniform on the unit cube, mapped by
-stick-breaking onto the simplex ``w_j >= 0, sum w_j <= 1``, uniform there.
+``I/I(1) = 1 - sum_j w_j S_j(mu)`` with four weights on its curvature
+basis (LDhybrid's ``docs/upstream/hybrid4_curvature_simplex.md``; elome >=
+0.17, turin 0.1.67). turin samples it as LDhybrid does: ``q1..q4`` uniform
+on the unit cube, mapped onto the simplex ``w_j >= 0, sum w_j <= 1``,
+uniform there, depth ``s = sum w = q1^(1/4)`` first.
 
 The references here are independent of turin's route: elome's own frontend
-(``TransitModel``, contact-rule exposures) for the light curve, a
-stick-breaking written out in the test for the map, the flat Dirichlet's
-moments for uniformity, and float64 for the float32 path.
+(``TransitModel``, contact-rule exposures) for the light curve, the brief's
+map and check values written out in the test, the four profile conditions
+evaluated from the brief's basis for what the simplex means, the flat
+Dirichlet's moments for uniformity, and float64 for the float32 path.
 """
 
 from __future__ import annotations
@@ -35,16 +38,49 @@ EXP = 29.4 / 1440
 TIMES = np.linspace(-0.25, 0.25, 601)
 
 
-def _stick(q):
-    """Stick-breaking written out independently of turin and elome."""
+def _curvature_w(q):
+    """LDhybrid's hybrid4 q -> w, written out from the brief, independently
+    of turin and elome: depth s = q1^(1/4) first, then stick-breaking."""
     q = np.asarray(q, dtype=np.float64)
-    n = q.shape[-1]
-    w, rest = [], np.ones(q.shape[:-1])
-    for j in range(n):
-        f = q[..., j] ** (1.0 / (n - j))
-        w.append((1.0 - f) * rest)
-        rest = rest * f
-    return np.stack(w, axis=-1)
+    s = q[..., 0] ** 0.25
+    a, b = q[..., 1] ** (1 / 3), q[..., 2] ** 0.5
+    return np.stack([s * (1 - a), s * a * (1 - b),
+                     s * a * b * (1 - q[..., 3]), s * a * b * q[..., 3]], -1)
+
+
+#: The brief's basis, rows S1..S4 over T = (1 - mu^4, (1 - mu^2)^2, Pi_e0,
+#: Pi_e1), and the poles it was built on.
+EPS4 = (0.028601207249486824, 0.38582417584735224)
+BASIS4 = np.array([
+    [0.5, 0.5, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0006260842489149928, 0.001404013755411423, 1.020963273947444,
+     -0.02299337195177007],
+    [-0.08116019831892918, -0.2568535772254558, -0.0005906631447752816,
+     1.33860443868916]])
+
+
+def _profile_conditions(w, x):
+    """I, g = dI/dx, g', g'' at x = mu^2 for curvature-basis weights ``w``
+    (..., 4), from the brief's basis and the pole shapes
+    Pi_e(x) = a ((x + e)^-2 - (1 + e)^-2), a = 1 / (e^-2 - (1 + e)^-2)."""
+    a = [1.0 / (e ** -2 - (1 + e) ** -2) for e in EPS4]
+    x = np.asarray(x)[:, None]
+    T = [1 - x ** 2, (1 - x) ** 2] + [
+        a[i] * ((x + e) ** -2 - (1 + e) ** -2) for i, e in enumerate(EPS4)]
+    dT = [-2 * x, -2 * (1 - x)] + [
+        -2 * a[i] * (x + e) ** -3 for i, e in enumerate(EPS4)]
+    d2T = [-2 + 0 * x, 2 + 0 * x] + [
+        6 * a[i] * (x + e) ** -4 for i, e in enumerate(EPS4)]
+    d3T = [0 * x, 0 * x] + [
+        -24 * a[i] * (x + e) ** -5 for i, e in enumerate(EPS4)]
+    c = np.atleast_2d(w) @ BASIS4                       # weights on T
+    out = []
+    for terms, sign, base in ((T, -1, 1.0), (dT, -1, 0.0), (d2T, -1, 0.0),
+                              (d3T, -1, 0.0)):
+        M_ = np.stack([t[:, 0] for t in terms], -1)     # (n_x, 4)
+        out.append(base + sign * c @ M_.T)              # (n_w, n_x)
+    return out                                          # I, g, g', g''
 
 
 # -- the parametrisation ----------------------------------------------------
@@ -75,9 +111,9 @@ def test_names_and_layouts():
     assert col.law == "hybrid4" and col.ld_names == ()
 
 
-def test_q_maps_onto_the_weight_simplex_as_squishierplanet_does():
+def test_q_maps_onto_the_curvature_simplex_as_ldhybrid_does():
     q = np.random.default_rng(3).uniform(size=(5000, 4))
-    want = _stick(q)
+    want = _curvature_w(q)
     np.testing.assert_allclose(M.ld_weights_np(q), want, rtol=0, atol=1e-15)
     cols = [mx.array(q[:, j:j + 1], dtype=mx.float64) for j in range(4)]
     with mx.stream(mx.cpu):
@@ -95,8 +131,62 @@ def test_q_maps_onto_the_weight_simplex_as_squishierplanet_does():
             sp = None
         finally:
             sys.path.remove(sp_dir)
-        if sp is not None:
-            np.testing.assert_allclose(want, sp.simplex_from_q(q), atol=1e-15)
+        if sp is not None and hasattr(sp, "hybrid4_from_q"):
+            np.testing.assert_allclose(want, sp.hybrid4_from_q(q), atol=1e-15)
+
+    # the brief's check values, elome's own maps, and the way back
+    w5 = M.ld_weights_np(np.full(4, 0.5))
+    np.testing.assert_allclose(
+        w5, [0.1734764882, 0.1954827707, 0.2359685782, 0.2359685782],
+        atol=1e-10)
+    np.testing.assert_allclose(
+        w5 @ BASIS4, [0.0677347237, 0.2219429445, 0.2407758742, 0.3104428728],
+        atol=1e-10)
+    from elome.hybrid import HYBRID4_BASIS, HYBRID4_EPS
+    from elome.ld import hybrid4_from_q_np, hybrid4_to_q_np
+    np.testing.assert_allclose(HYBRID4_EPS, EPS4, rtol=0, atol=1e-15)
+    np.testing.assert_allclose(HYBRID4_BASIS, BASIS4, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(hybrid4_from_q_np(q), want, rtol=0, atol=1e-15)
+    np.testing.assert_allclose(hybrid4_to_q_np(want), q, rtol=0, atol=1e-9)
+    # not the stick-breaking map turin used before 0.1.67
+    assert np.abs(want[:, 0] - (1 - q[:, 0] ** 0.25)).max() > 0.1
+    # depth first: 1 - I(0) = sum w = q1^(1/4)
+    np.testing.assert_allclose(want.sum(-1), q[:, 0] ** 0.25, atol=1e-15)
+
+
+def test_the_curvature_simplex_is_exactly_the_physical_profiles():
+    """Inside: every q gives I >= 0, g >= 0, g' <= 0, g'' >= 0 on [0, 1]
+    (x = mu^2). The vertices are the brief's. Just outside each of the five
+    faces, some condition fails, so the region is not merely sufficient."""
+    x = np.linspace(0.0, 1.0, 2001)
+    q = np.random.default_rng(5).uniform(size=(4000, 4))
+    I, g, g1, g2 = _profile_conditions(M.ld_weights_np(q), x)
+    tol = 1e-9
+    assert I.min() >= -tol and g.min() >= -tol
+    assert g1.max() <= tol and g2.min() >= -tol
+
+    I, g, g1, g2 = _profile_conditions(np.eye(4), x)
+    np.testing.assert_allclose(I[:, -1], 1.0, atol=1e-12)         # I(1) = 1
+    np.testing.assert_allclose(I[2:, 0], 0.0, atol=1e-12)         # S3, S4
+    np.testing.assert_allclose(g[2:, -1], 0.0, atol=1e-9)
+    np.testing.assert_allclose(g1[2:, -1], 0.0, atol=1e-9)
+    np.testing.assert_allclose(g2[2, -1], 0.0, atol=1e-9)         # S3
+    np.testing.assert_allclose(g2[3, 0], 0.0, atol=1e-6)          # S4
+
+    centre = np.full(4, 0.2)
+    faces = [np.eye(4)[j] for j in range(4)] + [-np.ones(4) / 4]
+    for n in faces:                     # w_j = 0 faces, then sum w = 1
+        on = centre.copy()
+        if n.sum() > 0:
+            on[n > 0] = 0.0
+            on = on * (1 / on.sum()) * 0.8 if on.sum() else on
+            out = on - 1e-3 * n
+        else:
+            on = centre / centre.sum()
+            out = on * (1 + 1e-3)
+        I, g, g1, g2 = _profile_conditions(out, x)
+        worst = min(I.min(), g.min(), -g1.max(), g2.min())
+        assert worst < -1e-6, (n, worst)
 
 
 def test_uniform_q_gives_uniform_weights_on_the_simplex():
@@ -136,7 +226,7 @@ def _elome_flux(q=Q_T, k=K_T, b=B_T):
     pars.inc = math.degrees(math.acos(b / aRs))
     pars.ecc, pars.w = 0.0, 90.0
     pars.limb_dark = "hybrid4"
-    pars.u = [float(x) for x in _stick(np.asarray(q))]
+    pars.u = [float(x) for x in _curvature_w(np.asarray(q))]
     return TransitModel(pars, TIMES, dtype=mx.float64, exp_time=EXP,
                         integration="contact", n_gl=M.N_GL).light_curve(pars)
 
@@ -249,7 +339,11 @@ def test_truth_beats_a_shifted_law(dataset):
         layout, cen, ed, orders, num_resample=7, exposure_time=EXP,
         n_chains_hint=4)
     off = V_TRUE.copy()
-    off[5:] = (0.15, 0.85, 0.2, 0.9)
+    # a much weaker limb, I(0) 0.53 against 0.14 (198 nats). Not an arbitrary
+    # q: (0.15, 0.85, 0.2, 0.9), this test's choice before the curvature
+    # basis (0.1.67), lands on a law whose light curve this data cannot tell
+    # from the truth's (1.7 nats the other way), though its weights differ
+    off[5:] = (0.05, 0.5, 0.5, 0.5)
     with mx.stream(mx.cpu):
         L = np.array(hi(mx.array(np.stack([V_TRUE, off]), dtype=mx.float64)))
     assert L[0] - L[1] > 20.0, L

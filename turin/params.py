@@ -156,7 +156,7 @@ def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None, law="quadratic",
     """Bounds for the shape parameters, in hurin's order after (dP, dtau0):
     ``k, beta, T14``, ``fc, fs`` if oblate, and the law's limb-darkening
     coordinates, each uniform on [0, 1] (Kipping's ``q1, q2``; hybrid4's
-    stick-breaking ``q1..q4``)."""
+    curvature-basis ``q1..q4``, :func:`turin.model.ld_weights`)."""
     if T14_max is None:
         # hurin: three times the archive duration, which is generous but
         # finite; callers may override from a physical density limit

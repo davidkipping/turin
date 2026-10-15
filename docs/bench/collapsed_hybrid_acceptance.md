@@ -1,5 +1,11 @@
 # Collapsed hybrid4: real-target acceptance
 
+> **Measured on hybrid4's old basis** (turin 0.1.62-0.1.64, elome 0.16.2):
+> weights on `1 - mu^4`, `(1 - mu^2)^2` and the two poles, stick-broken from
+> `q`. Since turin 0.1.67 (elome >= 0.17) the weights are on LDhybrid's
+> curvature basis, a different simplex of profiles; nothing here has been
+> re-measured on it.
+
 `--law=hybrid4 --ld=collapsed` against `--law=hybrid4` (sampled), LinEph, on
 the user's five-target suite: KOI-4016.01, KOI-4087.01, KOI-1430.03,
 KOI-1361.01, KOI-2650.01.

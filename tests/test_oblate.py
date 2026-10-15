@@ -117,7 +117,7 @@ def test_oblate_light_curve_matches_elomes_frontend(b, th):
     pars.inc = math.degrees(math.acos(b / aRs))
     pars.ecc, pars.w = 0.0, 90.0
     pars.limb_dark = "hybrid4"
-    pars.u = [float(x) for x in H4._stick(np.asarray(H4.Q_T))]
+    pars.u = [float(x) for x in H4._curvature_w(np.asarray(H4.Q_T))]
     pars.f, pars.theta = F_T, th                  # the frontend takes degrees
     ref = TransitModel(pars, H4.TIMES, dtype=mx.float64, exp_time=H4.EXP,
                        integration="contact", n_gl=M.N_GL).light_curve(pars)
@@ -154,7 +154,7 @@ def test_oblate_light_curve_matches_squishierplanet(b, th):
         pytest.skip("SquishierPlanet is not cloned beside turin")
     laws, model = sp
     aRs = _a_rs(b)
-    w = H4._stick(np.asarray(H4.Q_T))
+    w = H4._curvature_w(np.asarray(H4.Q_T))
     ref = model.light_curve(np.asarray(H4.TIMES), laws.hybrid("hybrid4", w),
                             r_eff=H4.K_T, f=F_T, theta=math.radians(th),
                             period=H4.P_REF, a=aRs, i=math.acos(b / aRs),
@@ -431,7 +431,8 @@ def test_lineph_injection_recovery_oblate_collapsed():
     v0 = seeding.initial_model_vector(lay, eph)
     starts = T.from_model_np(v0)[None, :] + 0.25 * rng.standard_normal(
         (64, lay.dim))
-    map_res = seeding.find_map(tr, starts.astype(np.float32))
+    map_res = seeding.find_map(tr, starts.astype(np.float32),
+                               n_iter=seeding.N_ITER_OBLATE)
     u_c = seeding.floor_oblateness(map_res.u_best, T, lay)
     frozen = LH.freeze_layout(lo, T.model_np(u_c[None, :])[0])
     tr, T, lo, _ = likelihood.build_target(

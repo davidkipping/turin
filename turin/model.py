@@ -55,7 +55,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 import elome
-from elome.ld import q_to_u, simplex_from_q
+from elome.ld import q_to_u
 from elome.metal import flux_dev_metal
 from elome.orbit import separation_circular
 from elome.trig import sincos
@@ -120,11 +120,16 @@ GEOMETRIES = ("circular", "chord")
 #: Limb-darkening laws (``--law``). ``quadratic``, the default, is sampled
 #: through Kipping's (2013) ``q1, q2``. ``hybrid4`` is elome's (and
 #: SquishierPlanet's, LDhybrid v1.0's) rational law: even powers of mu plus
-#: double poles on the alpha = 25/16 ladder, written in its shape basis,
-#: ``I/I(1) = 1 - sum_j w_j T_j(mu)``. Its physical region used here is the
-#: simplex ``w_j >= 0, sum w_j <= 1``, sampled through ``q1..q4`` in the
-#: unit cube by stick-breaking (:func:`ld_weights`), uniform in ``w`` as
-#: Kipping's map is uniform in the quadratic triangle.
+#: double poles on the alpha = 25/16 ladder, written in its **curvature
+#: basis** (elome >= 0.17), ``I/I(1) = 1 - sum_j w_j S_j(mu)``. In that basis
+#: the simplex ``w_j >= 0, sum w_j <= 1`` is exactly the set of hybrid4
+#: profiles that are positive, monotonic, concave in mu^2 and of convex slope
+#: in mu^2 (LDhybrid's ``docs/upstream/hybrid4_curvature_simplex.md``). It is
+#: sampled through ``q1..q4`` in the unit cube (:func:`ld_weights`), uniform
+#: in ``w`` as Kipping's map is uniform in the quadratic triangle. Before
+#: turin 0.1.67 the weights were on the shapes ``T_j`` (1 - mu^4,
+#: (1 - mu^2)^2 and the two poles), a different simplex of profiles, reached
+#: by stick-breaking.
 LAWS = ("quadratic", "hybrid4")
 _N_LD = {"quadratic": 2, "hybrid4": 4}
 
@@ -140,32 +145,35 @@ def ld_weights(q, law="hybrid4"):
     """``q`` -> the law's coefficients, MLX, differentiable.
 
     ``q`` is a sequence of ``(n_chains, 1)`` columns. For ``hybrid4`` the
-    result is ``w``, ``(n_chains, 4)``: SquishierPlanet's ``simplex_from_q``
-    (``w_j = (1 - q_j^(1/(n-j))) prod_{i<j} q_i^(1/(n-i))``), as elome ships
-    it, matching to 7e-18 in float64. A uniform ``q`` gives a uniform ``w``
-    on the simplex.
+    result is ``w``, ``(n_chains, 4)``, on the curvature basis: elome's
+    ``hybrid4_from_q``, which draws the depth ``s = sum w = 1 - I(0) =
+    q1^(1/4)`` first and then stick-breaks it over the four shapes
+    (``w = s (1 - a, a (1 - b), a b (1 - q4), a b q4)``, ``a = q2^(1/3)``,
+    ``b = q3^(1/2)``). A uniform ``q`` gives a uniform ``w`` on the simplex.
+    Not ``simplex_from_q``: uniform on the same simplex, but other ``w`` for
+    the same ``q``.
     """
     if law == "quadratic":
         raise ValueError("the quadratic law's coefficients are "
                          "limb_dark_coeffs(q1, q2)")
     ld_names(law)
-    return simplex_from_q(mx.concatenate(list(q), axis=-1))
+    from elome.ld import hybrid4_from_q     # elome >= 0.17 (capabilities)
+
+    return hybrid4_from_q(mx.concatenate(list(q), axis=-1))
 
 
 def ld_weights_np(q, law="hybrid4"):
     """Float64 host replica of :func:`ld_weights`: ``q`` ``(..., n)`` ->
-    ``w`` ``(..., n)``, for reporting the physical weights."""
+    ``w`` ``(..., n)``, for reporting the physical weights. Clamped at
+    1e-12 as the MLX map is, so it reports what the sampler evaluated."""
     q = np.maximum(np.asarray(q, dtype=np.float64), 1e-12)
     n = q.shape[-1]
     if n != _N_LD[law]:
         raise ValueError(f"{law} has {_N_LD[law]} coordinates, not {n}")
-    w = np.empty_like(q)
-    stick = np.ones(q.shape[:-1])
-    for j in range(n):
-        f = q[..., j] ** (1.0 / (n - j))
-        w[..., j] = (1.0 - f) * stick
-        stick = stick * f
-    return w
+    s = q[..., 0] ** 0.25
+    a, b, q4 = q[..., 1] ** (1.0 / 3.0), np.sqrt(q[..., 2]), q[..., 3]
+    return np.stack([s * (1.0 - a), s * a * (1.0 - b),
+                     s * a * b * (1.0 - q4), s * a * b * q4], axis=-1)
 
 
 def limb_dark_coeffs(q1, q2):
@@ -574,7 +582,9 @@ def generator_flux_devs(grid, *, mid, k, b, T14, period, law="hybrid4",
     """Light-curve deviations of a hybrid law's generator laws.
 
     Returns ``[F_0 - 1, ..., F_n - 1]``, each ``(n_chains, n_epochs,
-    max_pts)``, for the generators ``{1, 1 - T_j}`` of the law's shape basis
+    max_pts)``, for the generators ``{1, 1 - S_j}`` of the law's shape basis
+    (for hybrid4 its curvature basis, elome >= 0.17: the five vertices of the
+    exact positive/monotonic/concave/convex-slope region)
     (coefficients ``c_g = (1, -e_g)`` in elome's ``ld_basis`` contract
     ``flux - 1 = (B @ c) / (N @ c)``). Every law on the weight simplex
     ``w_j >= 0, sum w_j <= 1`` is the convex mix ``sum_g omega_g (F_g - 1)``

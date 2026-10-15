@@ -123,14 +123,17 @@ currently published on GitHub.** When turin starts relying on a new
 upstream feature, raise `MIN_ANVIL` in the same change; do not add
 detection plus a fallback.
 
-**elome has no runtime gate.** MetalPlanet was renamed Elómë (package
-`elome`, `../elome`, on PyPI) in its 0.14.0, and the old `metalplanet`
-import alias was removed in 0.16.0. Every elome release has everything
-turin uses, `ld_basis` included, so the `MIN_METALPLANET` (0.7.0) check
-that `--ld=collapsed` used to make became vacuous and was removed in
-0.1.60; `pyproject.toml` pins `elome>=0.16.2`, the version verified. Should
-turin need a newer elome feature, gate the feature that needs it, not the
-package (the rule `MIN_METALPLANET` followed).
+**elome is gated per feature, and only for hybrid4.** MetalPlanet was
+renamed Elómë (package `elome`, `../elome`, on PyPI) in its 0.14.0, and the
+old `metalplanet` import alias was removed in 0.16.0. Every elome release
+has `ld_basis`, so the `MIN_METALPLANET` (0.7.0) check that `--ld=collapsed`
+used to make became vacuous and was removed in 0.1.60. Since 0.1.67
+`--law=hybrid4` needs `capabilities.MIN_ELOME_HYBRID4` = 0.17.0
+(`require_elome_for_law`, called in `pipeline.run`): from 0.17.0 elome reads
+hybrid4's weights on LDhybrid's curvature basis, and an older one reads the
+same four numbers on other shapes. `pyproject.toml` pins `elome>=0.17.1`,
+the version verified. Should turin need a newer elome feature, gate the
+feature that needs it, not the package.
 
 ## Architecture
 
@@ -305,11 +308,29 @@ straddling a contact is wrong at any step size.
 
 `--law=quadratic` (default, Kipping `q1, q2`) or `--law=hybrid4`: the
 four-weight rational law of LDhybrid v1.0 as elome and SquishierPlanet
-define it, sampled as SquishierPlanet does, through `q1..q4` uniform on
-[0, 1] and stick-broken onto the simplex `w_j >= 0, sum w_j <= 1`
-(`model.ld_weights` -> `elome.ld.simplex_from_q`; `ld_weights_np` is the
-float64 replica). Uniform `q` gives uniform `w` (a flat 5-component
-Dirichlet; checked by moments). The law lives on the layout (`ParamLayout.law`,
+define it, with its weights on the **curvature basis** since 0.1.67 (LDhybrid's
+`docs/upstream/hybrid4_curvature_simplex.md`; elome >= 0.17): there the
+simplex `w_j >= 0, sum w_j <= 1` is exactly the profiles that are positive,
+monotonic, concave in mu^2 and of convex slope in mu^2. Sampled as LDhybrid
+does, through `q1..q4` uniform on [0, 1], depth `s = sum w = q1^(1/4)` first
+and then stick-breaking over the four shapes (`model.ld_weights` ->
+`elome.ld.hybrid4_from_q`; `ld_weights_np` is the float64 replica, clamped as
+the MLX map is). Uniform `q` gives uniform `w` (a flat 5-component
+Dirichlet; checked by moments).
+
+**The 0.1.67 basis change (MODEL_REV 10).** Before it the weights were on
+`T = (1 - mu^4, (1 - mu^2)^2, Pi_e0, Pi_e1)`, stick-broken from `q` by
+`simplex_from_q` -- a different simplex of profiles. Only the q -> w map
+changed in turin: the light curves for a given curvature-basis `w`, the
+generators `{1, 1 - S_j}` (`ld_basis` columns) and `F*` come from elome
+(`hybrid_norms`), so collapsed hybrid4's value is **bitwise** what 0.1.66
+gave on elome 0.17.1, and sampled hybrid4's equals 0.1.66's at the
+re-expressed `q` to 8.5e-14 (KOI-518.02, fp64). Quadratic stays bitwise.
+Everything measured on hybrid4 before 0.1.67 -- KOI-448.02's grazing split
+below, the five-target collapsed acceptance -- was on the old simplex and
+has not been re-measured. Note that 0.1.61-0.1.66 run on elome >= 0.17
+fitted the new simplex (stick-broken `q`, curvature-basis `w`); on elome
+< 0.17, the old one. The law lives on the layout (`ParamLayout.law`,
 `.ld_names`, `.n_shape` = 3 + number of LD coordinates), and everything
 downstream reads it from there: `likelihood.unpack` takes columns **by
 name**, and every former hard-coded `5:` (TTV times, grid-Gibbs, seeding,
@@ -321,8 +342,11 @@ log-density, gradient and per-epoch terms **bitwise identical**, hence no
 
 Verified against references that do not share turin's route: elome's
 `TransitModel` frontend with the contact rule (fp64 1e-13, fp32 2e-6,
-grazing included); the stick-breaking written out in the test and
-SquishierPlanet's `simplex_from_q` (1e-15); float32 log-density and
+grazing included); the map and LDhybrid's check values written out in the
+test, elome's numpy maps and SquishierPlanet's `hybrid4_from_q` (1e-15); the
+four profile conditions evaluated from the brief's basis, holding on random
+`q` and failing just outside each of the five faces (the region is exact,
+not sufficient); float32 log-density and
 gradient against float64; the per-epoch factorisation and a grid-Gibbs
 sweep that leaves all 7 shape columns untouched; and a slow 256-chain
 injection-recovery of a hybrid4 truth (every parameter within 3 sigma).
@@ -384,6 +408,14 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   so round starts stay bitwise. Known weakness, measured: on a very sharp
   posterior (30 ppm, 1-min cadence) `find_map` stops ~130 log-units short of
   the peak, and at 10 ppm ~9,000, where warmup was then spent descending.
+  On the curvature basis (0.1.67) the same 30 ppm injection's 400-iteration
+  search stopped **6,400** short in the wrong basin (f ~ 0.15-0.5), and the
+  injection test failed unconverged (R-hat 7.5; 0.1.66 on elome 0.17.1 too,
+  R-hat 31; it passes on elome 0.16.4, so the law's new truth made the
+  valley harder, not a model fault). Oblate fits now take
+  `seeding.N_ITER_OBLATE` = 1,500 iterations: 78-152 short collapsed, 5-7
+  sampled. A smaller or decayed Adam step was worse; from the truth, Adam
+  holds it to 6 nats. Real targets at that SNR may still need more.
 - **`--PL=auto`** resolves to exact without probing under `--oblate`.
 - **Products.** `fc, fs` sampled (R-hat, ESS); `f`, `theta` (degrees),
   semi-axes `A, B` derived, after `w1..w4` and before `loglike`; a log line
@@ -412,7 +444,7 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
 ### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62; fixed 0.1.64)
 
 `ldmarg`'s collapsed Gibbs over a 4-simplex: five generator curves
-`{1, 1-T_j}` from one `ld_basis` launch (`model.generator_flux_devs`; any
+`{1, 1-S_j}` (the curvature simplex's vertices) from one `ld_basis` launch (`model.generator_flux_devs`; any
 hybrid4 law is `sum omega_g F_g`, 9e-18), induced prior
 `-5 log sum omega_g/F*_g`, the baseline profiled exactly, `L(x)`'s quadratic
 model integrated over the simplex. `ldmarg.py` is untouched (bitwise). What
@@ -444,7 +476,8 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   `test_no_transit_gives_the_flat_answer_in_both_precisions` (a mutation to
   0 fails it).
 - **The prior is normalised** (`LOG_PRIOR_NORM` = log 4! - sum log F*,
-  closed form, = -0.768476). Collapsed `loglike` was 0.7685 above sampled
+  closed form; -0.768476 on the old basis, -1.258593 on the curvature basis
+  since 0.1.67, Monte Carlo checked). Collapsed `loglike` was 0.7685 above sampled
   mode's; it is now on the same scale. Harmless before (a constant), and
   wrong to describe as model error, which is how 0.1.63's review first
   read the offset.
@@ -475,6 +508,12 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   importance sampling of the true L, plus an exponential proposal for a
   vertex-piled case. Lesson: a reference must fit the target's geometry.
   Uniform-q SNIS had an effective sample size of 1-60 at narrow thetas.
+  On the curvature basis (0.1.67) the refined q box failed too: q1 =
+  depth^4 is thin and long-tailed, and the box cut its tail (q1's sd 0.0076
+  against 0.017 at k 0.095, b 0.7, which made the sampler look 2x too
+  wide). The box reference now importance-samples in x with the prior weight
+  explicit (ESS 700-4,700; the sampler within 0.06 sd and 8% width at every
+  test theta).
 - **The value's error is GHK's rule error, not the quadratic model's.**
   The model is accurate wherever measured: the draws' acceptance is 0.9+,
   and true minus model was 0.00 at a vertex case. With a consistent layout
@@ -601,6 +640,18 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 `u1`/`u2` became optional keywords in the same release but stayed
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
+
+**Checked against elome 0.17.1** (`59fff57`), turin 0.1.67. 0.16.3 seeds the
+oblate kernels' quartics by Ferrari's closed form (oblate float32 1.2-1.6x
+faster, not bitwise; spherical and float64 bitwise); 0.16.4 fixes NaN
+float32 gradients for small, nearly circular oblate planets (`r f` below
+~1.5e-7; turin's `F_FLOOR` start, 1e-4, was above it for `k > 1.5e-3`);
+0.17.0 put hybrid4's weights on the curvature basis (see "The
+limb-darkening law"), and 0.17.1 is fixes from its review (`hybrid4_to_q_np`
+raises off the simplex; the numpy maps no longer clamp). Measured: the 10
+quadratic quantities on KOI-518.02 (LinEph sampled and collapsed, TTV,
+value, gradient, per-epoch) are **bitwise** turin 0.1.66 on elome 0.16.2.
+The oblate figures in "Oblate planets" were measured on 0.16.2.
 
 **Checked against elome 0.16.2** (`476cb45`), turin 0.1.60, after the
 rename. 0.13.x added oblate planets (keyword-only `f=`, `theta=`, hybrid

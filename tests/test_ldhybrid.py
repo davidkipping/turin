@@ -550,22 +550,34 @@ def test_float32_tracks_float64_across_a_ball_reaching_no_transit(weak):
 
 
 def _box_reference(hi, v):
-    """Exact conditional of q: SNIS of the true L, uniform over q, then
-    uniform over a box (mean +/- 8 sd) around that; no turin sampling."""
-    S = qmc.Sobol(4, scramble=True, seed=9).random(2 ** 17)
+    """Exact conditional of q: SNIS of the true L times the prior, uniform
+    over x's bounding box, then twice over a box (mean +/- 8 sd) around
+    that; no turin sampling. In x, where the conditional is near-Gaussian,
+    not in q: under the curvature basis (0.1.67) q1 = depth^4 gives a thin,
+    long-tailed q1 that a q box cut short (q1's sd 0.0076 against 0.017 at
+    k 0.095, b 0.7), with an ESS of 226 where x's is 1,700."""
+    S = qmc.Sobol(4, scramble=True, seed=9).random(2 ** 18)
 
     def snis(lo_b, hi_b):
-        Q = np.clip(lo_b + S * (hi_b - lo_b), 1e-12, 1 - 1e-12)
+        X = lo_b + S * (hi_b - lo_b)
+        lp = LH.log_prior_x_np(X)
+        X, lp = X[np.isfinite(lp)], lp[np.isfinite(lp)]
         with mx.stream(mx.cpu):
-            L = np.array(hi.loglik_grid(v, LH.q_to_x(Q)))
-        w = np.exp(L - L.max())
+            L = np.array(hi.loglik_grid(v, X))
+        w = np.exp(L + lp - np.max(L + lp))
         w /= w.sum()
+        xm = w @ X
+        Q = LH.x_to_q(X)
         mu = w @ Q
-        return mu, np.sqrt(w @ (Q - mu) ** 2), 1.0 / np.sum(w ** 2)
+        return (xm, np.sqrt(w @ (X - xm) ** 2), mu,
+                np.sqrt(w @ (Q - mu) ** 2), 1.0 / np.sum(w ** 2))
 
-    mu, sd, _ = snis(np.zeros(4), np.ones(4))
-    s = np.maximum(sd, 0.01)
-    return snis(np.clip(mu - 8 * s, 0, 1), np.clip(mu + 8 * s, 0, 1))
+    xm, xs, *_ = snis(np.zeros(4), np.ones(4))
+    for _ in range(2):
+        s = np.maximum(xs, 1e-3)
+        xm, xs, mu, sd, ess = snis(np.clip(xm - 8 * s, 0, 1),
+                                   np.clip(xm + 8 * s, 0, 1))
+    return mu, sd, ess
 
 
 def _vertex_reference(hi, v):

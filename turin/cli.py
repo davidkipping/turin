@@ -134,8 +134,9 @@ usage: turin --KOI-448.02 [options]
                           measures a worst-case light-curve error of 1.0 ppm
                           on PHOENIX J-band stars, against 65 for quadratic),
                           sampled through q1..q4 in the unit cube, mapped
-                          uniformly onto its weight simplex (SquishierPlanet's
-                          stick-breaking); the weights w1..w4 are reported as
+                          uniformly onto its curvature simplex (elome >= 0.17,
+                          LDhybrid's q: q1 = depth^4); the weights w1..w4, on
+                          the curvature basis, are reported as
                           derived. Needs circular geometry. With
                           --ld=collapsed (LinEph only) the four weights are
                           integrated out, as for the quadratic law

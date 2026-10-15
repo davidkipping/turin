@@ -103,6 +103,7 @@ def run(args, log=print):
                       resolve_ld)
 
     resolve_ld(args)
+    _caps.require_elome_for_law(args.law)
     problem = (oblate_problem(args) or law_problem(args)
                or collapsed_ld_problem(args))
     if problem:
@@ -596,7 +597,9 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         u_starts = (transform.from_model_np(v0)[None, :]
                     + 0.25 * rng.standard_normal((n_starts, layout.dim)))
         t0 = time.perf_counter()
-        map_res = _seeding.find_map(target_obj, u_starts.astype(np.float32))
+        map_res = _seeding.find_map(
+            target_obj, u_starts.astype(np.float32),
+            **({"n_iter": _seeding.N_ITER_OBLATE} if layout.oblate else {}))
         log(f"    MAP log-density {map_res.log_prob_best:.3f} "
             f"in {time.perf_counter() - t0:.1f}s")
         if map_res.multimodal_warning:

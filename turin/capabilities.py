@@ -12,10 +12,11 @@ rather than letting an old install fail somewhere deep in a fit.
 
 When turin starts relying on a new upstream feature, raise
 :data:`MIN_ANVIL` in the same change, rather than adding detection plus a
-fallback. elome has no runtime gate: every release under that name (0.14.0
-on) has everything turin uses, ``ld_basis`` for ``--ld=collapsed``
-included, and ``pyproject.toml`` pins the version turin was verified
-against. (Under its old name, MetalPlanet >= 0.7.0 was checked for
+fallback. elome is gated per feature, not as a package: ``--law=hybrid4``
+needs :data:`MIN_ELOME_HYBRID4` (:func:`require_elome_for_law`), and every
+other elome release under that name (0.14.0 on) has everything turin uses,
+``ld_basis`` included; ``pyproject.toml`` pins the version turin was
+verified against. (Under its old name, MetalPlanet >= 0.7.0 was checked for
 ``--ld=collapsed`` alone; that gate became vacuous with the rename.)
 """
 
@@ -43,6 +44,13 @@ MIN_ANVIL = (0, 7, 1)
 
 UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
                 'git+https://github.com/davidkipping/anvil.git"')
+#: The oldest elome whose hybrid4 weights are on LDhybrid's curvature basis
+#: (0.17.0, with ``hybrid4_from_q``). Earlier releases read the same four
+#: numbers as weights on other shapes -- a different simplex of profiles --
+#: so turin 0.1.67's ``q1..q4`` would mean something else there; the gate
+#: refuses rather than fail on the import inside a fit.
+MIN_ELOME_HYBRID4 = (0, 17, 0)
+
 #: The install command for elome. Separate constant on purpose: pointing a
 #: missing-elome message at the anvil command sends the reader to the wrong
 #: package.
@@ -70,6 +78,25 @@ def require_anvil():
             f"turin needs anvil >= {need}, but {have} is installed. "
             f"Upgrade with:\n  {UPGRADE_HINT}")
     return have
+
+
+def elome_hybrid4_ok(version):
+    return version_tuple(version) >= MIN_ELOME_HYBRID4
+
+
+def require_elome_for_law(law):
+    """Exit with the upgrade command if ``law`` needs a newer elome."""
+    if law != "hybrid4":
+        return
+    import elome
+
+    have = getattr(elome, "__version__", "unknown")
+    if not elome_hybrid4_ok(have):
+        need = ".".join(map(str, MIN_ELOME_HYBRID4))
+        raise SystemExit(
+            f"turin: --law=hybrid4 needs elome >= {need} (hybrid4's weights "
+            f"on LDhybrid's curvature basis), but {have} is installed. "
+            f"Upgrade with:\n  {ELOME_HINT}")
 
 
 @dataclass(frozen=True)
@@ -105,6 +132,11 @@ class Capabilities:
                "used for geometry=circular)" if self.elome_flux_dev_from_tau
                else " MISSING: exposures would be supersampled, ~2% of a "
                "depth and dF/dP ~100x wrong  ->  " + ELOME_HINT),
+            f"  {'yes' if elome_hybrid4_ok(self.elome_version) else 'NO ':3s}  "
+            f"elome >= {'.'.join(map(str, MIN_ELOME_HYBRID4))} (--law=hybrid4 "
+            "on the curvature basis)"
+            + ("" if elome_hybrid4_ok(self.elome_version)
+               else f"  ->  {ELOME_HINT}"),
         ])
 
 

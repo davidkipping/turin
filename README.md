@@ -165,16 +165,21 @@ verdict mean "this would distort the answer".
 Kipping's (2013) `q1, q2`. `--law=hybrid4` is the four-weight rational law
 of LDhybrid v1.0, as defined in [Elómë](https://github.com/davidkipping/elome)
 and SquishierPlanet: even powers of μ plus two double poles,
-`I/I(1) = 1 - sum_j w_j T_j(mu)`. On PHOENIX J-band stars SquishierPlanet
+`I/I(1) = 1 - sum_j w_j S_j(mu)`, with the weights on its **curvature
+basis** (LDhybrid, Elómë >= 0.17; turin >= 0.1.67). On PHOENIX J-band stars SquishierPlanet
 measures its worst-case light-curve error at 1.0 ppm, against 65 ppm for
 the quadratic law. Elómë evaluates it on the same tau kernel, with the same
 in-kernel exposure integration.
 
-It is sampled the way SquishierPlanet samples it, and the way turin samples
-the quadratic law: four coordinates `q1..q4`, each uniform on [0, 1], mapped
-by stick-breaking onto the weight simplex `w_j >= 0, sum w_j <= 1`.
-A uniform cube gives a uniform simplex, as Kipping's map gives a uniform
-quadratic triangle. The summary and chains carry `q1..q4` (sampled, with
+In that basis the simplex `w_j >= 0, sum w_j <= 1` is **exactly** the set of
+hybrid4 profiles that are positive, monotonic, concave in μ² and of convex
+slope in μ², not just a sufficient region. It is sampled the way LDhybrid
+samples it, and the way turin samples the quadratic law: four coordinates
+`q1..q4`, each uniform on [0, 1], with `q1 = (1 - I(0))^4` the depth at the
+limb and the rest stick-breaking it over the four shapes. A uniform cube
+gives a uniform simplex, as Kipping's map gives a uniform quadratic
+triangle. Its `q` and `w` are those of LDhybrid's tables, so priors from
+them apply directly. The summary and chains carry `q1..q4` (sampled, with
 R-hat and ESS) and the physical weights `w1..w4` (derived, like `b`).
 
 - **Works in both fit modes**, `lineph` and `ttv`, with grid-Gibbs, and with
@@ -182,8 +187,14 @@ R-hat and ESS) and the physical weights `w1..w4` (derived, like `b`).
 - **Needs circular geometry** (`chord` exists for hurin parity, and hurin
   has only the quadratic law).
 - A lineage never changes law: resuming with another `--law` is refused.
-- Weights fitted with older hybrid4 definitions (Elómë < 0.15's pole
-  ladder) are not interchangeable with these.
+- Weights fitted with older hybrid4 definitions are not interchangeable
+  with these: neither Elómë < 0.15's pole ladder nor turin < 0.1.67's basis
+  (weights on `1 - mu^4`, `(1 - mu^2)^2` and the two poles, stick-broken from
+  `q`). Old weights convert with `w = w_old @ inv(HYBRID4_BASIS)`; old `q` do
+  not convert one to one, so recompute them from `w`. That old simplex was a
+  different set of profiles (it included some convex in μ², and missed some
+  concave ones), so a posterior that sat against its edges can move. turin
+  refuses to resume a hybrid4 run from before 0.1.67, and needs Elómë >= 0.17.
 - **A caution for weak grazing transits.** Four free weights can make a
   transit V-shaped, so on a low-SNR grazing system hybrid4 can admit a
   second explanation the quadratic law does not: a small planet on a central
@@ -192,7 +203,7 @@ R-hat and ESS) and the physical weights `w1..w4` (derived, like `b`).
   chains between that and `k = 0.027, b = 0.27`, with `q1` against its wall,
   and had not converged after three rounds (R-hat 1.26). On a typical
   target (KOI-518.02) the two laws cost the same and both converged in one
-  round.
+  round. (Measured with turin < 0.1.67's hybrid4 simplex.)
 
 ### Collapsed limb darkening (`--ld=collapsed`)
 
@@ -273,7 +284,8 @@ mode's chains are byte-identical to those from before the feature existed
 
 The same idea for hybrid4's four weights, which take five generator light
 curves and live on a 4-simplex instead of a triangle. Every hybrid4 law is a
-convex mix of the generators `{1, 1 - T_j}` (exact, to 9e-18), and uniform
+convex mix of the generators `{1, 1 - S_j}`, the vertices of its curvature
+simplex (exact, to 9e-18), and uniform
 `q1..q4` induce the prior `-5 log sum_g omega_g/F*_g` on the mixing weights.
 The baseline is profiled exactly as always, and the profiled likelihood is
 integrated over the simplex under its quadratic model about its exact

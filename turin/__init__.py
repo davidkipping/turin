@@ -7,7 +7,7 @@ The version here is the runtime source of truth (the install is editable);
 keep it in sync with pyproject.toml and add a VERSIONS.md row per commit.
 """
 
-__version__ = "0.1.66"
+__version__ = "0.1.67"
 
 #: Revision of the *likelihood itself*, as distinct from the package version.
 #:
@@ -22,4 +22,6 @@ __version__ = "0.1.66"
 #: MODEL_REV catches the model changing underneath an unchanged command line.
 #: Following hurin, which added the same mechanism in 0.1.68 after a
 #: limb-darkening fix silently altered its likelihood.
-MODEL_REV = 9
+MODEL_REV = 10
+# 10 (0.1.67): hybrid4's q1..q4 are LDhybrid's curvature-basis coordinates
+#   (elome >= 0.17), so a hybrid4 vector's density changed; quadratic bitwise.

@@ -127,13 +127,24 @@ def test_anvil_version_gate(version, ok):
     assert capabilities.anvil_ok(version) is ok
 
 
-def test_there_is_no_elome_gate():
+def test_elome_is_gated_for_hybrid4_alone(monkeypatch):
     """Every elome release (0.14.0 on) has ld_basis, so the old
-    MetalPlanet >= 0.7.0 check for --ld=collapsed is gone rather than kept
-    vacuous: no gate function, no ld_basis line asking for an upgrade."""
-    assert not hasattr(capabilities, "require_elome")
+    MetalPlanet >= 0.7.0 check for --ld=collapsed is gone. The one elome
+    gate is hybrid4's curvature basis (0.17.0): an older elome reads the
+    same weights on other shapes, so --law=hybrid4 is refused there, and the
+    quadratic law is not."""
+    import elome
+
     assert not hasattr(capabilities, "MIN_METALPLANET")
     assert "MetalPlanet" not in capabilities.detect().summary()
+    assert capabilities.MIN_ELOME_HYBRID4 == (0, 17, 0)
+    assert "yes  elome >= 0.17.0" in capabilities.detect().summary()
+    capabilities.require_elome_for_law("hybrid4")
+    monkeypatch.setattr(elome, "__version__", "0.16.2")
+    with pytest.raises(SystemExit, match="pip install -U elome"):
+        capabilities.require_elome_for_law("hybrid4")
+    capabilities.require_elome_for_law("quadratic")
+    assert "NO   elome >= 0.17.0" in capabilities.detect().summary()
 
 
 def test_require_anvil_names_the_upgrade_command(monkeypatch):
