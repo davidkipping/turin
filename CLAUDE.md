@@ -457,7 +457,8 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   agreed on f and theta but was unconverged after 4,500 draws/chain (~100
   min): one chain trapped at acceptance 0.007 (2,279 of the run's 2,603
   divergences), R-hat 1.18 on `q2`. That is the case for collapsed as the
-  `--oblate` default (one seed each, not 0.1.44's two). README: not yet.
+  `--oblate` default (one seed each, not 0.1.44's two). README section
+  "Oblate planets" since 0.1.69.
 
 ### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62; fixed 0.1.64)
 

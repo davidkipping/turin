@@ -90,6 +90,7 @@ analytically inside every log-density evaluation — a profile likelihood — so
 | `lineph --ld=collapsed` | `dP, dtau0, k, beta, T14` | limb darkening integrated out; `q1, q2` drawn from their conditional (see below) |
 | either, `--law=hybrid4` | `q1, q2, q3, q4` in place of `q1, q2` | the hybrid4 law; weights `w1..w4` derived (see below) |
 | `lineph --law=hybrid4 --ld=collapsed` | `dP, dtau0, k, beta, T14` | hybrid4's weights integrated out; `q1..q4` drawn from their conditional |
+| `lineph --law=hybrid4 --oblate` | adds `fc, fs` after `T14` | an oblate planet; `f`, `theta`, `A`, `B` derived (see "Oblate planets") |
 
 `beta` is the impact parameter as a fraction of its k-dependent bound, which
 is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
@@ -343,6 +344,104 @@ the sampled vector, or for a target whose sampled fit mixes poorly in `k`.
 Products, restrictions and the resume guard are as for the quadratic law,
 with `q1..q4` and derived `w1..w4`.
 
+### Oblate planets (`--oblate`)
+
+A rotating planet is flattened, and its silhouette on the star is an ellipse
+rather than a circle. `--oblate` fits that ellipse: its flattening
+`f = 1 - B/A` (A and B the semi-axes) and the sky angle `theta` of its long
+axis, alongside the usual geometry. The light curves come from Elómë's
+oblate kernel, on the GPU with the same in-kernel exposure integration.
+The idea and its design checks come from SquishierPlanet.
+
+```bash
+turin --KOI-1.01 --law=hybrid4 --oblate --modes=lineph
+```
+
+**What the parameters mean:**
+
+- `k` is the **area-equivalent radius**, `sqrt(A B)`: the round planet that
+  blocks the same light, so it stays comparable with a round fit's `k`.
+- `T14` keeps the round relation to `a/R*`, so it is the duration of that
+  area-equivalent circle, not the ellipse's. The derived `b` and
+  `log10_rho` follow from the same relation.
+- `f` and `theta` are sampled as `fc, fs = sqrt(f) (cos 2theta,
+  sin 2theta)`, which is uniform in `f` on [0, 0.6] and in `theta`. `theta`
+  covers a half-turn, so it is reported in degrees on [-90, 90).
+
+**Requirements:**
+
+- `--law=hybrid4`. A limb-darkening law with too little freedom pushes its
+  misfit into the shape. In SquishierPlanet's tests a two-parameter law
+  made a round planet at b = 0.3 look oblate (f = 0.082 +/- 0.016) and
+  moved a true `theta` of 30 degrees to 63, while hybrid4 stayed within 0.8
+  sigma. That is SquishierPlanet's measurement, not one turin repeats.
+- LinEph only (`--modes=lineph`), circular geometry.
+- `--ld=collapsed` is the default under `--oblate`; `--ld=sampled` is still
+  available. On a synthetic oblate planet, collapsed converged in one round
+  (517 s), while sampled mode had one of 512 chains stuck in the
+  limb-darkening coordinates and had not converged after 100 minutes. That
+  is one seed per mode.
+- A lineage never switches: resuming with or without `--oblate` against a
+  run made the other way is refused.
+
+**The signal is in ingress and egress.** An ellipse and a circle of the same
+area block the same light once the planet is fully on the disc. What
+differs is how the planet crosses the limb. So oblateness needs data that
+resolve ingress: short cadence, many transits, or a large planet. Kepler's
+29.4-minute long cadence smears most of it. For scale: on a synthetic
+K-dwarf transit with SquishierPlanet's PHOENIX limb darkening (k = 0.15,
+a/R* = 20, b = 0.7, 60 s cadence, three transits at 17 ppm, the
+information of one at 10 ppm), turin measured f = 0.1006 +/- 0.0029 and
+theta = 29.7 +/- 1.5 degrees against the injected 0.1 and 30, every other
+parameter within 0.6 sigma.
+
+**Upper limits.** A round planet's `f` piles up at 0, so the run log
+reports f's median, its 16-84% range and a 95% upper limit. The limit
+depends on the prior: uniform in `f` up to 0.6.
+
+**A false solution, and `--rhostar`.** SquishierPlanet found that a round
+planet at b = 0.3 is nearly degenerate with an oblate planet aligned with
+its orbit (theta near 0) on a central chord (b near 0), which fits only
+2-3 log-likelihood units worse. Being broader, that family held about 20%
+of the posterior in their tests. turin always logs the posterior share of
+that family (b < 0.1, |theta| < 15 degrees, f > 0.05), and warns above 5%.
+The false solution needs a different a/R*, so a prior on the stellar
+density suppresses it. `--rhostar=MEAN,SIGMA` is a Gaussian prior on
+log10(rho*/kg m^-3), the unit of the `logrho` product (the Sun is 3.149).
+SquishierPlanet's measurement of what it buys, which turin has not
+repeated:
+
+| a/R* known to | rho* known to | `--rhostar` sigma | false-solution share |
+|---|---|---|---|
+| no prior | | | 0.20-0.23 |
+| 5% | ~15% | ~0.065 | 0.18 |
+| 3% | ~9% | ~0.039 | 0.09 |
+| 1% | ~3% | ~0.013 | ~0 |
+
+`--rhostar` works for any fit, oblate or not, and a lineage keeps whatever
+prior it started with.
+
+**How the fit is started.** Oblate posteriors are narrow and can have
+several basins, and a plain multi-start search found the wrong one on 2 of
+4 seeds. The MAP search uses 512 starts, then a second search from 128
+points around the best, about a minute more than a round fit. Chains start
+spread over a Laplace approximation at the MAP, never exactly at f = 0,
+where `f` has no gradient.
+
+**Limits:**
+
+- Points where the planet is too large for its flattening
+  (k > (1 - f)^1.5) are outside the model and get zero probability.
+- The (b, k) prior's grazing bound uses `k`, not the ellipse's projected
+  extent, so grazing oblate planets are approximate.
+- turin's oblate code has been checked against Elómë's own frontend (to
+  1e-13) and SquishierPlanet's independent light curves (to 1e-12). It
+  has been tested on synthetic transits, not yet on real targets.
+- An oblate evaluation costs more than a round one: at 512 chains and 860
+  points, 224 ms collapsed and 164 ms sampled, against 81 ms for collapsed
+  hybrid4 on a round planet. That was measured before Elómë 0.16.3 made its
+  oblate kernels 1.2-1.6x faster.
+
 ### Weak transits and grid-Gibbs
 
 A transit observed at low signal-to-noise, or with a data gap across it, has a
@@ -407,6 +506,9 @@ cannot pool chains drawn both ways.
                              darkening out (LinEph only), see above
 --law=quadratic|hybrid4      limb-darkening law (default quadratic), see above;
                              with --ld=collapsed for LinEph too
+--oblate                     an oblate planet (f, theta); needs --law=hybrid4
+                             and --modes=lineph; implies --ld=collapsed
+--rhostar=MEAN,SIGMA         Gaussian prior on log10(rho*/kg m^-3), any fit
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache
@@ -421,7 +523,8 @@ working. Seven products per LinEph fit, nine per TTV fit:
 ```
 <T>_<mode>_summary.csv        parameters, percentiles, R-hat, bulk/tail ESS
 <T>_<mode>_chains.csv.tar.gz  the full joint posterior, plus b, log10_rho, loglike
-                              (and w1..w4 before loglike under --law=hybrid4)
+                              (and w1..w4 before loglike under --law=hybrid4;
+                              then f, theta, A, B under --oblate)
 <T>_<mode>_logrho.csv         the stellar-density posterior
 <T>_<mode>_lcdata.csv         time, flux, flux_err, model_flux
 <T>_<mode>_fold.pdf           phase-folded transit, baseline divided out
