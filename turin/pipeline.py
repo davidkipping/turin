@@ -9,6 +9,7 @@ hurin's behaviour, and the reason its resume state exists.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -62,6 +63,14 @@ def _ghk_kw(layout, state):
             or getattr(state, "ghk_layout", None) is None):
         return {}
     return dict(ghk_layout=state.ghk_layout, ghk_points=state.ghk_points)
+
+def _rhostar(args):
+    """The ``--rhostar`` prior as the layout and the resume guard carry it:
+    ``(mean, sigma)``, or ``()`` for none (so "none" is a value a resumed
+    lineage is checked against, not a skipped guard)."""
+    prior = getattr(args, "rhostar", None)
+    return tuple(float(x) for x in prior) if prior else ()
+
 
 def _model_ld_names(law):
     from .model import ld_names
@@ -189,7 +198,8 @@ def replot(args, prepared, outdir, *, log=print):
                     ttv_max=args.ttv_max_days, gibbsgrid=_gibbsgrid(mode, args),
                     ld=getattr(args, "ld", "sampled"),
                     law=getattr(args, "law", "quadratic"),
-                    oblate=getattr(args, "oblate", False))
+                    oblate=getattr(args, "oblate", False),
+                    rhostar=_rhostar(args))
         chains_path = _outputs.product_path(outdir, target, mode, "chains",
                                             "csv.tar.gz")
         summary_path = _outputs.product_path(outdir, target, mode, "summary",
@@ -306,11 +316,13 @@ def _mode_layout(mode, args, prepared, centering, epoch_data):
                 2.0 * prepared.cadence_days)
         return _params.ttv_layout(prepared.eph, centering, tau_half,
                                   b_prior=args.b_prior,
-                                  law=getattr(args, "law", "quadratic")), tau_half
+                                  law=getattr(args, "law", "quadratic"),
+                                  rhostar=_rhostar(args)), tau_half
     return _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
                                  ld=getattr(args, "ld", "sampled"),
                                  law=getattr(args, "law", "quadratic"),
-                                 oblate=getattr(args, "oblate", False)), None
+                                 oblate=getattr(args, "oblate", False),
+                                 rhostar=_rhostar(args)), None
 
 
 def transit_snrs(prepared, centering, shape, *, b_prior="transiting",
@@ -445,7 +457,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             gibbsgrid=_gibbsgrid(mode, args),
             ld=getattr(args, "ld", "sampled"),
             law=getattr(args, "law", "quadratic"),
-            oblate=getattr(args, "oblate", False))
+            oblate=getattr(args, "oblate", False),
+            rhostar=_rhostar(args))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -496,6 +509,10 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         profile_mode=provisional, ld_mode=layout.ld, **build_kw)
     log(f"  log-density: dim {layout.dim}, "
         f"{len(lp.blocks)} epoch block(s) of <= {lp.block_size}")
+    if layout.rhostar:
+        m, sd = layout.rhostar
+        log(f"  prior: log10(rho*/kg m^-3) ~ N({m:g}, {sd:g}), through the "
+            f"fitted a/R* (rho* known to ~{100 * math.log(10) * sd:.0f}%)")
     if layout.ld == "collapsed":
         log(f"  limb darkening ({layout.law}): collapsed -- integrated out of "
             f"the log-density; {', '.join(_model_ld_names(layout.law))} drawn "
@@ -824,6 +841,25 @@ def _oblate_draws(layout, phys, names):
     return ["f", "theta", "A", "B"], np.column_stack([f, theta, A, A * (1 - f)])
 
 
+#: SquishierPlanet's false oblate mode: a family of aligned oblate planets
+#: (theta ~ 0, f ~ 0.19) on a central chord (b ~ 0), 2 log-likelihood units
+#: worse than a round truth at b = 0.3 but broad enough to hold ~20% of the
+#: mass under a uniform-in-f prior. Its posterior share is always logged
+#: under --oblate; above ALIGNED_WARN_SHARE it is a warning.
+ALIGNED_B_MAX = 0.1
+ALIGNED_THETA_MAX = 15.0
+ALIGNED_F_MIN = 0.05
+ALIGNED_WARN_SHARE = 0.05
+
+
+def aligned_central_share(f, theta_deg, b):
+    """Share of draws in the aligned-oblate-on-a-central-chord family."""
+    f, th, b = (np.asarray(x, dtype=np.float64) for x in (f, theta_deg, b))
+    return float(np.mean((b < ALIGNED_B_MAX)
+                         & (np.abs(th) < ALIGNED_THETA_MAX)
+                         & (f > ALIGNED_F_MIN)))
+
+
 def _ml_row(results, lp, transform):
     """The maximum-likelihood draw over every draw, in model space.
 
@@ -916,6 +952,21 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
             f"f < {f95:.4f} (95%); prior uniform in f on [0, "
             f"{_params.F_MAX:g}] and in theta; T14 is the area-equivalent "
             "circle's duration")
+        share = aligned_central_share(ob_draws[:, 0], ob_draws[:, 1], b_draws)
+        log(f"  aligned oblate on a central chord (b < {ALIGNED_B_MAX:g}, "
+            f"|theta| < {ALIGNED_THETA_MAX:g} deg, f > {ALIGNED_F_MIN:g}): "
+            f"{100 * share:.1f}% of draws")
+        if share > ALIGNED_WARN_SHARE:
+            log(f"  WARNING: {100 * share:.0f}% of the posterior is an "
+                "aligned oblate planet on a central chord, which mimics a "
+                "round planet at larger b (SquishierPlanet: ~20% of the mass "
+                "for a round planet at b = 0.3 with no density prior). Read "
+                "it as the b-f-theta degeneracy, not a detection, unless a "
+                "stellar-density prior keeps it: "
+                + ("this fit has one, at "
+                   f"{100 * math.log(10) * layout.rhostar[1]:.0f}%"
+                   if layout.rhostar else
+                   "try --rhostar=MEAN,SIGMA (log10 kg m^-3)"))
 
     _outputs.export_summary(outdir, target, mode, summary, log=log)
     _outputs.export_logrho(outdir, target, mode, rho, log=log)
@@ -970,6 +1021,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         ld=layout.ld, law=layout.law, oblate=layout.oblate,
+        rhostar=layout.rhostar,
         ghk_layout=getattr(lp, "ghk_layout", None),
         ghk_points=getattr(lp, "ghk_points", None),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,

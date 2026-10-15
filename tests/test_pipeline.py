@@ -236,6 +236,7 @@ def test_oblate_lineph_end_to_end(tmp_path, fake_target, monkeypatch, ld):
     assert "--PL=exact (" in text
     assert "Laplace approximation" in text
     assert "oblateness: f median" in text and "(95%)" in text
+    assert "aligned oblate on a central chord" in text
     out = str(tmp_path)
     rows = _summary_rows(os.path.join(out, "KOI-1.01_lineph_summary.csv"))
     names = list(rows)
@@ -287,6 +288,18 @@ def test_a_lineage_never_switches_oblateness(tmp_path, fake_target):
     with pytest.raises(SystemExit, match="oblate=False"):
         pipeline.run(_args(tmp_path, law="hybrid4", ld="sampled",
                            oblate=True, extend1=True), log=lambda m: None)
+
+
+def test_rhostar_prior_runs_logs_and_guards_its_lineage(tmp_path,
+                                                       fake_target):
+    logs = []
+    assert pipeline.run(_args(tmp_path, rhostar=(3.2, 0.05)),
+                        log=logs.append) in FINISHED
+    assert any("prior: log10(rho*/kg m^-3) ~ N(3.2, 0.05)" in l for l in logs)
+    state = outputs.load_resume(str(tmp_path), "KOI-1.01", "lineph")
+    assert state.rhostar == (3.2, 0.05)
+    with pytest.raises(SystemExit, match="rhostar"):
+        pipeline.run(_args(tmp_path, extend1=True), log=lambda m: None)
 
 
 @pytest.mark.parametrize("over,pattern", [

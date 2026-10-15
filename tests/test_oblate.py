@@ -451,3 +451,71 @@ def test_lineph_injection_recovery_oblate_collapsed():
     f, th = params.oblate_from_fcfs_np(d[:, 5], d[:, 6])
     assert abs(np.median(f) - F_T) < 3 * f.std() and f.std() < 0.02
     assert abs(np.median(th) - TH_T) < 3 * th.std() and th.std() < 10.0
+
+
+# -- the stellar-density prior and the degeneracy warning (0.1.66) ---------------
+
+@pytest.mark.parametrize("oblate, ld", [(True, "collapsed"), (True, "sampled"),
+                                        (False, "sampled"), (False, "collapsed")])
+def test_rhostar_prior_is_a_gaussian_in_log10_rho(data, oblate, ld):
+    """The density with ``--rhostar=m,s`` minus the density without is
+    ``-0.5 ((log10 rho* - m)/s)^2``, with log10 rho* the ``logrho``
+    product's quantity (the host float64 reporting function, not the MLX
+    one under test), for every layout it can sit on."""
+    ed, cen, _, _, orders = data
+    prior = (3.2, 0.05)
+    lays = [params.lineph_layout(H4.EPH, law="hybrid4", oblate=oblate,
+                                 ld=ld, rhostar=r) for r in ((), prior)]
+    vals = []
+    rng = np.random.default_rng(4)
+    V = np.tile(_vec(), (5, 1))
+    V[:, 2:5] *= 1 + 0.02 * rng.standard_normal((5, 3))
+    if not oblate:
+        V = np.delete(V, [5, 6], axis=1)
+    V = V[:, :lays[0].dim]
+    for lay in lays:
+        _, _, _, hi = likelihood.build_target(
+            lay, cen, ed, orders, num_resample=7, exposure_time=H4.EXP,
+            n_chains_hint=8)
+        with mx.stream(mx.cpu):
+            vals.append(np.array(hi(mx.array(V, dtype=mx.float64))))
+    k, beta, T14 = V[:, 2], V[:, 3], V[:, 4]
+    b = M.impact_parameter(beta, k, "transiting")
+    rho = M.log10_rho_from_T14(T14, H4.P_REF + V[:, 0], k, b)
+    want = -0.5 * ((rho - prior[0]) / prior[1]) ** 2
+    np.testing.assert_allclose(vals[1] - vals[0], want, rtol=1e-9, atol=1e-9)
+    assert lays[1].rhostar == prior and lays[0].rhostar == ()
+
+
+def test_rhostar_parses_and_is_refused_when_malformed():
+    from turin import cli
+    a = cli.parse_args(["--KOI-1.01", "--rhostar=3.149,0.04"])
+    assert a.rhostar == (3.149, 0.04) and not a.oblate
+    assert cli.parse_args(["--KOI-1.01"]).rhostar is None
+    for bad in ("3.15", "3.15,0", "3.15,-1", "a,b", "3.15,0.1,2"):
+        with pytest.raises(SystemExit, match="MEAN,SIGMA"):
+            cli.parse_args(["--KOI-1.01", f"--rhostar={bad}"])
+
+
+def test_rhostar_is_a_guard_with_none_as_a_value():
+    from turin import outputs
+    from test_cli_outputs import _state
+    assert outputs.ResumeState.rhostar == () and \
+        "rhostar" in outputs.ResumeState.GUARDS
+    st = _state(rhostar=(3.2, 0.05))
+    st.check(rhostar=(3.2, 0.05))                       # must not raise
+    with pytest.raises(SystemExit, match="--rhostar=3.2,0.05"):
+        st.check(rhostar=())
+    with pytest.raises(SystemExit, match="no --rhostar"):
+        _state().check(rhostar=(3.2, 0.05))
+    with pytest.raises(SystemExit, match="no --oblate"):
+        _state().check(oblate=True)
+
+
+def test_aligned_central_share_counts_the_false_mode_family():
+    from turin import pipeline
+    f = np.array([0.19, 0.19, 0.19, 0.01, 0.19])
+    th = np.array([2.0, -14.0, 40.0, 0.0, 3.0])
+    b = np.array([0.02, 0.05, 0.02, 0.0, 0.4])
+    # in: rows 0 and 1; out: theta too large, f too small, b too large
+    assert pipeline.aligned_central_share(f, th, b) == pytest.approx(0.4)

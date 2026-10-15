@@ -629,6 +629,19 @@ def transit_flux(grid, **kw):
     return 1.0 + transit_flux_dev(grid, **kw)
 
 
+#: log10(3 pi / G) in SI, for the stellar density from a/R* and the period
+LOG10_3PI_OVER_G = math.log10(3.0 * math.pi / 6.67430e-11)
+
+
+def log10_rho_mx(T14, period, k, b):
+    """log10(rho* / kg m^-3) in MLX, from the same a/R* the circular model
+    fits with: :func:`log10_rho_from_T14`'s quantity, for a prior inside the
+    log-density. The constant is a Python float (anvil's float32 rule)."""
+    aRs = a_over_rstar(T14, period, k, b)
+    return (LOG10_3PI_OVER_G - 2.0 * mx.log10(period * 86400.0)
+            + 3.0 * mx.log10(aRs))
+
+
 def log10_rho_from_T14(T14, period, k, b):
     """log10 of the mean stellar density in kg/m^3, from the fitted duration.
 

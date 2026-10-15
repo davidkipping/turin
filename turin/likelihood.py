@@ -211,6 +211,9 @@ class ProfiledTransitLogProb:
             term = term + _params.ttv_log_prior(p["dtau"], self.layout.P_ref)
         if self.layout.oblate:
             term = term + oblate_log_prior(p)
+        if self.layout.rhostar:
+            term = term + _params.rhostar_log_prior(
+                p["T14"], p["period"], p["k"], p["b"], self.layout.rhostar)
         return term
 
     def __call__(self, v):

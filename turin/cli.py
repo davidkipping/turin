@@ -14,6 +14,7 @@ either an approximation or a mistake (see ``docs/hurin-differences.md``).
 from __future__ import annotations
 
 import difflib
+import math
 import os
 import re
 import sys
@@ -69,6 +70,7 @@ _VALUE_FLAGS = {
     "--gibbsgrid": "gibbsgrid",
     "--ld": "ld",
     "--law": "law",
+    "--rhostar": "rhostar",
 }
 
 USAGE = f"""turin {__version__} — GPU transit fitting for Kepler and TESS
@@ -147,6 +149,12 @@ usage: turin --KOI-448.02 [options]
                           circular geometry; implies --ld=collapsed unless
                           --ld=sampled is given. The oblate kernel costs
                           ~40-85x a round one
+  --rhostar=MEAN,SIGMA    Gaussian prior on log10(rho*/kg m^-3), the unit
+                          of the logrho product (the Sun is 3.149), through
+                          the fitted a/R*: rho* = 3 pi (a/R*)^3 / (G P^2).
+                          Any fit mode and law. Under --oblate it suppresses
+                          the aligned-oblate-on-a-central-chord mode that
+                          mimics a round planet at larger b
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -197,6 +205,8 @@ class Args:
     ld: str | None = None
     law: str = "quadratic"
     oblate: bool = False
+    #: Gaussian prior on log10(rho*/kg m^-3): (mean, sigma), or None
+    rhostar: tuple | None = None
     modes: tuple = MODES
     cache_dir: str | None = None
     outdir: str | None = None
@@ -357,6 +367,13 @@ def _assign(args, field_name, flag, raw):
             value = float(raw)
             if not value >= 0:
                 raise ValueError
+        elif field_name == "rhostar":
+            parts = raw.split(",")
+            if len(parts) != 2:
+                raise ValueError
+            value = (float(parts[0]), float(parts[1]))
+            if not (math.isfinite(value[0]) and value[1] > 0):
+                raise ValueError
         elif field_name == "modes_raw":
             value = tuple(m.strip() for m in raw.split(",") if m.strip())
             if not value:
@@ -368,6 +385,9 @@ def _assign(args, field_name, flag, raw):
             if not value:
                 raise ValueError
     except ValueError:
+        if field_name == "rhostar":
+            _fail(f"{flag} needs MEAN,SIGMA in log10(rho*/kg m^-3), sigma "
+                  f"> 0 (the Sun is 3.149), got {raw!r}")
         nonneg = least == 0 or field_name == "ttv_snr_min"
         _fail(f"{flag} needs a {'non-negative' if nonneg else 'positive'} "
               f"{'integer' if field_name in ints else 'value'}, got {raw!r}")

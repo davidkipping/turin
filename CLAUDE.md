@@ -342,7 +342,7 @@ darkening (k 0.027, q1 on its wall), unconverged at R-hat 1.26; on
 KOI-518.02 the laws cost the same. That target is atypical (the user's
 point): do not generalise from it.
 
-### Oblate planets (`--oblate`, 0.1.65)
+### Oblate planets (`--oblate`, 0.1.65-0.1.66)
 
 Step 3 of SquishierPlanet's `docs/upstream/turin_oblate_prompt.md`, built on
 the user's request with two decisions taken with them: a ρ⋆ prior and a
@@ -394,8 +394,20 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   fp32 2e-6) and SquishierPlanet's float64 `model.light_curve` (1e-12).
   Injection (f = 0.1, θ = 30°, b = 0.7, 30 ppm, 1-min cadence, collapsed):
   f = 0.099 ± 0.004, θ = 30.9 ± 2.2°, converged in one round.
-- **Pending:** the ρ⋆ prior, the degeneracy warning, real-target and
-  synthetic acceptance (the brief's tests 2-6), README.
+- **ρ⋆ prior (0.1.66, any mode and law):** `--rhostar=MEAN,SIGMA`, a
+  Gaussian in log10(ρ⋆/kg m⁻³) -- the `logrho` product's unit -- through the
+  fitted a/R* (`model.log10_rho_mx`, `params.rhostar_log_prior`). A resume
+  guard whose "none" is the value `()`, not a skipped guard, so a run with a
+  prior can never continue one without. Checked against the host reporting
+  function on all four (oblate x ld) layouts to 1e-9. The brief's table:
+  a/R* known to 3% (ρ⋆ to ~9%, sigma ~0.04 dex) cut SquishierPlanet's
+  false-oblate share from 0.20 to 0.09.
+- **Degeneracy warning (0.1.66):** under `--oblate` the log always gives the
+  posterior share of the aligned-oblate-on-a-central-chord family
+  (`b < 0.1`, `|theta| < 15°`, `f > 0.05`; `pipeline.aligned_central_share`)
+  and warns above 5%, naming `--rhostar`. The ridge sampler is not built.
+- **Pending:** real-target and synthetic acceptance (the brief's tests 2-6),
+  README.
 
 ### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62; fixed 0.1.64)
 

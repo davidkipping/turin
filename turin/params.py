@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 import mlx.core as mx
 import numpy as np
 
+from . import model as _model
 from .model import B_PRIORS, LAWS, ld_names
 
 #: Half-width of the dP and dtau0 priors, in days. hurin's values; kept
@@ -105,6 +106,9 @@ class ParamLayout:
     law: str = "quadratic"
     #: an oblate planet: ``fc, fs`` follow ``T14`` (hybrid4, LinEph only)
     oblate: bool = False
+    #: Gaussian prior on log10(rho*/kg m^-3) as ``(mean, sigma)``; ``()``
+    #: for none (:func:`rhostar_log_prior`)
+    rhostar: tuple = ()
 
     @property
     def ld_names(self) -> tuple:
@@ -167,7 +171,7 @@ def _shape_bounds(eph, k_min=0.0, k_max=1.0, T14_max=None, law="quadratic",
 
 
 def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
-                  law="quadratic", oblate=False):
+                  law="quadratic", oblate=False, rhostar=()):
     """Parameter layout for the linear-ephemeris fit.
 
     ``ld="collapsed"`` drops the limb-darkening coordinates from the sampled
@@ -199,11 +203,11 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
                        report_offset=off, b_prior=b_prior,
                        P_ref=float(eph["period"]),
                        tau0_ref=float(eph["epoch"]), ld=ld, law=law,
-                       oblate=bool(oblate))
+                       oblate=bool(oblate), rhostar=_rhostar(rhostar))
 
 
 def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
-               law="quadratic", oblate=False):
+               law="quadratic", oblate=False, rhostar=()):
     """Parameter layout for the per-epoch-timing fit.
 
     ``tau_half`` is the half-width of each epoch's timing prior, in days:
@@ -242,7 +246,28 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         mode="ttv", names=names, lo=np.array(lo), hi=np.array(hi),
         report_offset=np.array(off), b_prior=b_prior,
         P_ref=float(eph["period"]), tau0_ref=float(eph["epoch"]),
-        n_arr=n_arr, centers_abs=centers, law=law)
+        n_arr=n_arr, centers_abs=centers, law=law,
+        rhostar=_rhostar(rhostar))
+
+
+def _rhostar(prior):
+    """``(mean, sigma)`` as floats, or ``()`` for no prior."""
+    if not prior:
+        return ()
+    mean, sigma = (float(x) for x in prior)
+    if not sigma > 0:
+        raise ValueError(f"the rho* prior needs sigma > 0, got {sigma}")
+    return (mean, sigma)
+
+
+def rhostar_log_prior(T14, period, k, b, prior):
+    """``-0.5 ((log10 rho* - mean)/sigma)^2``, shape ``(n_chains,)``: a
+    Gaussian prior on the stellar density implied by the fitted transit
+    (``model.log10_rho_mx``, the ``logrho`` product's quantity). Its
+    normalisation is a constant and is left out."""
+    mean, sigma = prior
+    z = (_model.log10_rho_mx(T14, period, k, b) - mean) / sigma
+    return (-0.5 * z * z)[:, 0]
 
 
 def oblate_from_fcfs(fc, fs):

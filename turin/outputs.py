@@ -352,9 +352,13 @@ class ResumeState:
     #: state written before it existed was round; a lineage can never switch
     #: (two more parameters, a different model).
     oblate: bool = False
+    #: the ``--rhostar`` prior, ``(mean, sigma)`` in log10(rho*/kg m^-3), or
+    #: ``()`` for none -- the default, so every older state reads "no prior"
+    #: and a run with a prior can never continue one without (or vice versa)
+    rhostar: tuple = ()
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
-              "gibbsgrid", "ld", "law", "oblate")
+              "gibbsgrid", "ld", "law", "oblate", "rhostar")
 
     def check_model_rev(self, log=None):
         """Refuse to continue chains sampled under an older likelihood.
@@ -398,8 +402,13 @@ class ResumeState:
                 same = stored == given
             if not same:
                 flag = f"--{name.replace('_', '-')}"
-                use = ((flag if stored else f"no {flag}")
-                       if isinstance(stored, bool) else f"{flag}={stored!r}")
+                if isinstance(stored, bool):
+                    use = flag if stored else f"no {flag}"
+                elif isinstance(stored, tuple):
+                    use = (f"{flag}={','.join(f'{x:g}' for x in stored)}"
+                           if stored else f"no {flag}")
+                else:
+                    use = f"{flag}={stored!r}"
                 raise SystemExit(
                     f"{self.target} {self.mode}: this run was made with "
                     f"{name}={stored!r}, but you asked for {given!r}. "
