@@ -591,9 +591,9 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         u0 = mx.array(np.asarray(prior_state.last_u, dtype=np.float32))
         log(f"  restarting from the previous {u0.shape[0]} final positions")
     else:
-        log(f"  finding the MAP from {min(256, 4 * cfg.n_chains // 4)} starts...")
         rng = np.random.default_rng(args.seed)
-        n_starts = 128
+        n_starts = _seeding.N_STARTS_OBLATE if layout.oblate else 128
+        log(f"  finding the MAP from {n_starts} starts...")
         u_starts = (transform.from_model_np(v0)[None, :]
                     + 0.25 * rng.standard_normal((n_starts, layout.dim)))
         t0 = time.perf_counter()
@@ -602,6 +602,13 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             **({"n_iter": _seeding.N_ITER_OBLATE} if layout.oblate else {}))
         log(f"    MAP log-density {map_res.log_prob_best:.3f} "
             f"in {time.perf_counter() - t0:.1f}s")
+        if layout.oblate:
+            t0 = time.perf_counter()
+            map_res, gain = _seeding.polish_map(target_obj, map_res,
+                                                seed=args.seed + 2)
+            log(f"    polished from {_seeding.POLISH_STARTS} starts around "
+                f"it: {map_res.log_prob_best:.3f} (+{gain:.3f}) in "
+                f"{time.perf_counter() - t0:.1f}s")
         if map_res.multimodal_warning:
             log(f"    WARNING: the best starts disagree by "
                 f"{map_res.top_spread:.1f} log-units — the posterior probably "
@@ -950,9 +957,9 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     ob_names, ob_draws = _oblate_draws(layout, phys, names)
     if ob_names:
         summary.update(_outputs.summarize(ob_draws, ob_names))
-        f95 = float(np.percentile(ob_draws[:, 0], 95))
-        log(f"  oblateness: f median {np.median(ob_draws[:, 0]):.4f}, "
-            f"f < {f95:.4f} (95%); prior uniform in f on [0, "
+        f16, f50, f84, f95 = np.percentile(ob_draws[:, 0], [16, 50, 84, 95])
+        log(f"  oblateness: f median {f50:.4f} (16-84%: {f16:.4f}-{f84:.4f}), "
+            f"95% upper limit {f95:.4f}; prior uniform in f on [0, "
             f"{_params.F_MAX:g}] and in theta; T14 is the area-equivalent "
             "circle's duration")
         share = aligned_central_share(ob_draws[:, 0], ob_draws[:, 1], b_draws)

@@ -235,7 +235,7 @@ def test_oblate_lineph_end_to_end(tmp_path, fake_target, monkeypatch, ld):
     text = "\n".join(logs)
     assert "--PL=exact (" in text
     assert "Laplace approximation" in text
-    assert "oblateness: f median" in text and "(95%)" in text
+    assert "oblateness: f median" in text and "95% upper limit" in text
     assert "aligned oblate on a central chord" in text
     out = str(tmp_path)
     rows = _summary_rows(os.path.join(out, "KOI-1.01_lineph_summary.csv"))

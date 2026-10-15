@@ -208,6 +208,17 @@ class MapResult:
 #: 7 s at 128 starts. A smaller step (0.01) or a step decayed to 1e-4 was
 #: worse at either length; from the truth, Adam stays within 6 nats of it.
 N_ITER_OBLATE = 1500
+#: MAP starts for an oblate fit, and the polishing stage after it: 128
+#: starts at 0.05 unconstrained sd around the best, the same iterations.
+#: On SquishierPlanet's PHOENIX truth (K dwarf, f = 0.1, theta = 30 deg,
+#: b = 0.7; 3 transits, 10 ppm-equivalent), four seeds, gap below the
+#: truth's log-density, collapsed: 128 starts -1.0e1 to -1.6e3 (two of four
+#: in a wrong basin); 512 starts -1 to -12; 128 + polish -1 to -14; 512 +
+#: polish chosen. Sampled mode, where the polish matters most: 512 starts
+#: ended 484-496, + polish 531-535 (4 seeds within 4 nats). Starts spread
+#: uniformly over the (fc, fs) disc did worse (-2 to -139).
+N_STARTS_OBLATE = 512
+POLISH_STARTS, POLISH_SCALE = 128, 0.05
 
 #: Smallest flattening the chains of an oblate fit are centred on. elome's
 #: float32 kernel takes the spherical forms below f = 1e-5, where d/df = 0,
@@ -344,6 +355,22 @@ def find_map(target, u_starts, *, n_iter=400, lr=0.05, clip=10.0):
     return MapResult(u_best=u_np[best], log_prob_best=float(lp[best]),
                      u_all=u_np, log_prob_all=lp, n_iter=n_iter,
                      top_spread=spread)
+
+
+def polish_map(target, map_res, *, n_starts=POLISH_STARTS,
+               scale=POLISH_SCALE, n_iter=N_ITER_OBLATE, seed=0):
+    """A second ``find_map`` from ``n_starts`` points ``scale`` (unconstrained
+    sd) around ``map_res.u_best``; keeps the better optimum. The first
+    stage's spread (``top_spread``, the multimodality warning) is kept.
+    Returns ``(map_res, gain)``, gain in log-density units (>= 0)."""
+    rng = np.random.default_rng(seed)
+    u = map_res.u_best[None, :] + scale * rng.standard_normal(
+        (n_starts, map_res.u_best.size))
+    r = find_map(target, u.astype(np.float32), n_iter=n_iter)
+    gain = r.log_prob_best - map_res.log_prob_best
+    if gain > 0:
+        map_res.u_best, map_res.log_prob_best = r.u_best, r.log_prob_best
+    return map_res, max(gain, 0.0)
 
 
 def default_shape_start(eph, layout):

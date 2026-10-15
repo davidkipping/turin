@@ -416,10 +416,19 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   `seeding.N_ITER_OBLATE` = 1,500 iterations: 78-152 short collapsed, 5-7
   sampled. A smaller or decayed Adam step was worse; from the truth, Adam
   holds it to 6 nats. Real targets at that SNR may still need more.
+  **Starts and a polish (0.1.68).** Even at 1,500 iterations, 128 starts
+  left 2 of 4 seeds in a wrong basin (10 to 1,650 nats below the truth) on
+  SquishierPlanet's PHOENIX K-dwarf truth (f = 0.1, theta = 30 deg,
+  b = 0.7; 3 transits, 10 ppm-equivalent, collapsed). Oblate fits now take
+  `seeding.N_STARTS_OBLATE` = 512 starts, then `polish_map`: 128 starts at
+  0.05 unconstrained sd around the best, keeping the better. Four seeds:
+  1-14 nats below the truth collapsed; sampled 531-535 against 484-496
+  without the polish. 70-80 s more search. Starts spread over the (fc, fs)
+  disc were worse.
 - **`--PL=auto`** resolves to exact without probing under `--oblate`.
 - **Products.** `fc, fs` sampled (R-hat, ESS); `f`, `theta` (degrees),
   semi-axes `A, B` derived, after `w1..w4` and before `loglike`; a log line
-  with `f`'s median and 95% upper limit and the prior.
+  with `f`'s median, 16-84% range and 95% upper limit, and the prior.
 - **Known limitation, not solved:** the b-k grazing bound and taper use `k`,
   not the projected extent `A = k/√(1-f)`.
 - References in `tests/test_oblate.py`: elome's `TransitModel` (fp64 1e-13,
@@ -438,8 +447,17 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   posterior share of the aligned-oblate-on-a-central-chord family
   (`b < 0.1`, `|theta| < 15°`, `f > 0.05`; `pipeline.aligned_central_share`)
   and warns above 5%, naming `--rhostar`. The ridge sampler is not built.
-- **Pending:** real-target and synthetic acceptance (the brief's tests 2-6),
-  README.
+- **Acceptance: deliberately not done.** The brief's tests 2-6 (PHOENIX
+  bias, the b = 0.3 false-oblate share and the rho* table, a real-target
+  f -> 0 fit) are SquishierPlanet's science questions, not checks of turin's
+  code; the user stopped them (2026-10-15) after two runs. Those two, on
+  the PHOENIX truth above through `pipeline.run`: **collapsed** converged in
+  one round, 517 s end to end, f = 0.1006 +/- 0.0029, theta = 29.7 +/-
+  1.5 deg, every parameter within 0.6 sd, certify 0.09 MCSE; **sampled**
+  agreed on f and theta but was unconverged after 4,500 draws/chain (~100
+  min): one chain trapped at acceptance 0.007 (2,279 of the run's 2,603
+  divergences), R-hat 1.18 on `q2`. That is the case for collapsed as the
+  `--oblate` default (one seed each, not 0.1.44's two). README: not yet.
 
 ### Collapsed hybrid4 (`--law=hybrid4 --ld=collapsed`, `ldhybrid.py`, 0.1.62; fixed 0.1.64)
 

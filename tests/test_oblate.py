@@ -414,6 +414,29 @@ def _injection(seed=21):
     return ed, cen, eph, np.full(ed["n_epochs"], 1), truth
 
 
+def test_polish_map_keeps_the_better_optimum():
+    """A second stage around the first stage's best: it gains on a search
+    stopped short, and never moves a converged optimum to a worse one."""
+    class Bowl:
+        c = mx.array([[0.3, -0.2, 0.1]])
+        w = mx.array([[1e4, 1.0, 1e2]])
+
+        def log_prob(self, u):
+            return -mx.sum(self.w * (u - self.c) ** 2, axis=-1)
+
+    bowl = Bowl()
+    u = np.random.default_rng(0).normal(0, 1, (16, 3)).astype(np.float32)
+    short = seeding.find_map(bowl, u, n_iter=5)
+    before = short.log_prob_best
+    res, gain = seeding.polish_map(bowl, short, n_starts=16, n_iter=400)
+    assert gain > 0 and res.log_prob_best == pytest.approx(before + gain)
+    assert res.log_prob_best > -1e-3
+    best = res.u_best.copy()
+    res, gain = seeding.polish_map(bowl, res, n_starts=16, scale=1.0,
+                                   n_iter=3)
+    assert gain == 0.0 and np.array_equal(res.u_best, best)
+
+
 @pytest.mark.slow
 def test_lineph_injection_recovery_oblate_collapsed():
     """f = 0.1, theta = 30 deg, b = 0.7 (the brief's injection), collapsed
@@ -430,9 +453,10 @@ def test_lineph_injection_recovery_oblate_collapsed():
     rng = np.random.default_rng(0)
     v0 = seeding.initial_model_vector(lay, eph)
     starts = T.from_model_np(v0)[None, :] + 0.25 * rng.standard_normal(
-        (64, lay.dim))
+        (seeding.N_STARTS_OBLATE, lay.dim))
     map_res = seeding.find_map(tr, starts.astype(np.float32),
                                n_iter=seeding.N_ITER_OBLATE)
+    map_res, _ = seeding.polish_map(tr, map_res, seed=2)
     u_c = seeding.floor_oblateness(map_res.u_best, T, lay)
     frozen = LH.freeze_layout(lo, T.model_np(u_c[None, :])[0])
     tr, T, lo, _ = likelihood.build_target(
