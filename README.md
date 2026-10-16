@@ -432,8 +432,17 @@ where `f` has no gradient.
 
 - Points where the planet is too large for its flattening
   (k > (1 - f)^1.5) are outside the model and get zero probability.
-- The (b, k) prior's grazing bound uses `k`, not the ellipse's projected
-  extent, so grazing oblate planets are approximate.
+- For grazing oblate planets the light curve is exact but the (b, k)
+  prior is the round planet's. It caps `b` at `1 + k` and puts its grazing
+  taper on the band `1 - k < b < 1 + k`, while an ellipse grazes out to
+  `1 + h`, with `h` its half-width across the chord (between `k` and the
+  semi-major axis `A = k/sqrt(1 - f)`, depending on `theta`). So the barely
+  grazing sliver `1 + k < b < 1 + h`, at most `k (1/sqrt(1 - f) - 1)` wide
+  (5% of `k` at f = 0.1, 20% at 0.3), has zero prior, and the grazing odds
+  are slightly off. This is deliberate: oblate fits use the same prior as
+  spherical ones, so the two stay directly comparable. It matters only when
+  the data put `b` at the grazing edge. turin's oblate light-curve tests
+  cover non-grazing geometries (b = 0.3, 0.7) only.
 - turin's oblate code has been checked against Elómë's own frontend (to
   1e-13) and SquishierPlanet's independent light curves (to 1e-12). It
   has been tested on synthetic transits, not yet on real targets.

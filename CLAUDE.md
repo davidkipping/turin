@@ -429,8 +429,13 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
 - **Products.** `fc, fs` sampled (R-hat, ESS); `f`, `theta` (degrees),
   semi-axes `A, B` derived, after `w1..w4` and before `loglike`; a log line
   with `f`'s median, 16-84% range and 95% upper limit, and the prior.
-- **Known limitation, not solved:** the b-k grazing bound and taper use `k`,
-  not the projected extent `A = k/√(1-f)`.
+- **Known limitation, kept on purpose:** the b-k grazing bound and taper use
+  `k`, not the ellipse's half-width across the chord `h(theta)` (between `k`
+  and `A = k/√(1-f)`), so `1 + k < b < 1 + h` has zero prior and the grazing
+  odds are slightly off. The light curve is exact. The user decided
+  (2026-10-16) not to fix it: oblate fits keep the spherical prior so the two
+  stay homogeneous. Documented in the README's oblate limits (0.1.70). The
+  oblate light-curve tests cover b = 0.3, 0.7 only, none grazing.
 - References in `tests/test_oblate.py`: elome's `TransitModel` (fp64 1e-13,
   fp32 2e-6) and SquishierPlanet's float64 `model.light_curve` (1e-12).
   Injection (f = 0.1, θ = 30°, b = 0.7, 30 ppm, 1-min cadence, collapsed):
