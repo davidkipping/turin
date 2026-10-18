@@ -100,12 +100,13 @@ def _gibbsgrid(mode, args):
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
-    from .cli import (collapsed_ld_problem, law_problem, oblate_problem,
-                      resolve_ld)
+    from .cli import (collapsed_ld_problem, law_problem, mle_problem,
+                      oblate_problem, resolve_ld, resolve_mle)
 
+    resolve_mle(args)
     resolve_ld(args)
     _caps.require_elome_for_law(args.law)
-    problem = (oblate_problem(args) or law_problem(args)
+    problem = (mle_problem(args) or oblate_problem(args) or law_problem(args)
                or collapsed_ld_problem(args))
     if problem:
         raise SystemExit(f"turin: {problem}")
@@ -135,6 +136,11 @@ def run(args, log=print):
     cv = _prep.cv_orders(prepared.epoch_data, prepared.eph["duration"],
                          tau_shift_max=args.ttv_max_days or 0.0,
                          log=lambda m: log(f"  {m}"))
+
+    if getattr(args, "mle", False):
+        code = _run_mle(args, prepared, cv, outdir, log=log)
+        log(f"[{target}] done in {time.perf_counter() - t_start:.1f}s")
+        return code
 
     lineph_ml = None
     outcome = {}             # mode -> final Verdict, or a note if skipped
@@ -420,6 +426,78 @@ TTV_SNR_MIN = 3.0
 #: An epoch counts as having data in transit above this expected SNR (a
 #: transit that fell entirely in a gap scores exactly 0).
 _SNR_COVERED = 1e-3
+
+
+def _run_mle(args, prepared, cv, outdir, *, log):
+    """``--mle``: a maximum-likelihood LinEph fit (:mod:`turin.mle`), and
+    under ``--oblate`` the round model too, with their comparison. No
+    sampling, no resume state: products are ``{target}_lineph_mle_*``."""
+    from . import mle as _mle
+
+    target = prepared.target
+    epoch_data = prepared.epoch_data
+    centering = _prep.centering_constants(epoch_data, prepared.eph)
+    orders = np.asarray(cv["orders"])
+    _outputs.set_run_status("MLE (Laplace sds)")
+    log(f"[{target}] lineph maximum likelihood: {epoch_data['n_epochs']} "
+        f"epochs, {int(epoch_data['mask'].sum())} points; the likelihood "
+        f"alone, limb darkening ({args.law}) profiled")
+    build_kw = dict(num_resample=prepared.num_resample,
+                    exposure_time=prepared.exposure_time,
+                    geometry=args.geometry, n_chains_hint=_mle.N_STARTS)
+    fit_kw = dict(law=args.law, b_prior=args.b_prior, build_kw=build_kw,
+                  seed=args.seed, log=log)
+    if args.oblate:
+        # round first: the oblate search starts from it too (nested at f = 0)
+        rnd = _mle.fit(prepared, centering, epoch_data, orders, oblate=False,
+                       **fit_kw)
+        fits = [_mle.fit(prepared, centering, epoch_data, orders, oblate=True,
+                         round_fit=rnd, **fit_kw), rnd]
+    else:
+        fits = [_mle.fit(prepared, centering, epoch_data, orders,
+                         oblate=False, **fit_kw)]
+    for f in fits:
+        _log_mle(f, log)
+        if f.top_spread > _seeding.TOP_SPREAD_WARN:
+            log(f"    WARNING: the best starts disagree by "
+                f"{f.top_spread:.1f} log-units — more than one basin")
+    main = fits[0]
+    _outputs.export_mle(outdir, target, "fit", main, log=log)
+
+    lay = main.layout
+    v_theta = main.v_model[:lay.dim]
+    model, baseline, q_ml = _ml_model(main.lp, v_theta, collapsed=True)
+    _outputs.export_lcdata(outdir, target, _mle.MODE, epoch_data, model,
+                           log=log)
+    _fold_figure("lineph", target, outdir, main.lp, v_theta, lay, centering,
+                 epoch_data, baseline, log=log, ld=q_ml, stem=_mle.MODE)
+
+    if args.oblate:
+        _outputs.export_mle(outdir, target, "round", fits[1], log=log)
+        cmp = _mle.compare(main, fits[1])
+        _outputs.export_mle_compare(outdir, target, cmp, log=log)
+        log(f"  oblate vs round: dlnL = {cmp['dlnL']:.3f}, "
+            f"dBIC = {cmp['dBIC']:.2f}, dAIC = {cmp['dAIC']:.2f} "
+            f"(negative favours oblate; no p-value: at f = 0 theta is "
+            f"undefined and f is on its boundary)")
+        if cmp["aligned_central"]:
+            log("  WARNING: the oblate optimum is an aligned oblate planet "
+                "on a central chord (b < 0.1, |theta| < 15 deg, f > 0.05), "
+                "the family that mimics a round planet at larger b; "
+                "compare a --rhostar posterior before reading f as a "
+                "detection")
+    return 0
+
+
+def _log_mle(fit, log):
+    log(f"  {fit.label}: ln L = {fit.lnL:.3f}, BIC = {fit.bic:.2f} "
+        f"({fit.n_params} parameters incl. baseline, {fit.n_points} points)")
+    for name, val, sd, at_bound in fit.rows:
+        err = "" if not np.isfinite(sd) else f" +/- {sd:.4g}"
+        log(f"    {name:>10s} = {val:.10g}{err}"
+            + ("  [on bound]" if at_bound else ""))
+    for note in fit.notes:
+        log(f"    note: {note}")
 
 
 def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
@@ -773,6 +851,15 @@ def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
     except Exception as exc:
         log(f"    corner plot skipped: {exc}")
 
+    _fold_figure(mode, target, outdir, lp, v_ml, layout, centering,
+                 epoch_data, baseline, log=log, ld=ld)
+
+
+def _fold_figure(mode, target, outdir, lp, v_ml, layout, centering,
+                 epoch_data, baseline, *, log, ld=None, stem=None):
+    """The fold PDF at one parameter vector. ``stem`` names the product
+    (``mode`` by default; ``--mle`` writes ``lineph_mle``)."""
+    stem = stem or mode
     mid_abs = _mid_times_absolute(mode, v_ml, layout, centering)
     try:
         # span the folded data itself, whatever the window width
@@ -783,11 +870,11 @@ def _write_figures(mode, target, outdir, names, phys, b_draws, lp, v_ml,
                                    half_span=1.001 * np.max(np.abs(offsets)),
                                    ld=ld)
         _plots.fold_plot(
-            _outputs.product_path(outdir, target, mode, "fold", "pdf"),
+            _outputs.product_path(outdir, target, stem, "fold", "pdf"),
             epoch_data=epoch_data, mid_times=mid_abs, baseline=baseline,
             model_grid_t=tt, model_grid_f=tf,
             period=layout.P_ref + (v_ml[0] if mode == "lineph" else 0.0),
-            title=f"{target} {mode}", colour=_plots.MODE_COLOURS[mode],
+            title=f"{target} {stem}", colour=_plots.MODE_COLOURS[mode],
             n_bins_from=epoch_data["n_epochs"], log=log)
     except Exception as exc:
         log(f"    fold plot skipped: {exc}")

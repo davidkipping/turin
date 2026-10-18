@@ -39,6 +39,17 @@ def test_defaults_match_the_documented_ones():
     assert a.ld == "sampled"
 
 
+def test_mle_runs_lineph_alone():
+    """--mle drops the TTV fit from the default modes (a TTV maximum
+    likelihood is not offered), and leaves --ld to the pipeline's default,
+    which --mle ignores (its limb darkening is profiled)."""
+    a = cli.parse_args(["--KOI-1.01", "--mle"])
+    assert a.mle and a.modes == ("lineph",)
+    a = cli.parse_args(["--KOI-1.01", "--mle", "--law=hybrid4", "--oblate"])
+    assert a.mle and a.oblate and a.modes == ("lineph",)
+    assert not cli.parse_args(["--KOI-1.01"]).mle
+
+
 def test_nongrazing_is_an_alias():
     assert cli.parse_args(["--KOI-1.01", "--nongrazing"]).b_prior == "nongrazing"
 
@@ -99,6 +110,15 @@ def test_modes_subset():
     (["--KOI-1.01", "--oblate", "--law=hybrid4"], "LinEph-only"),
     (["--KOI-1.01", "--oblate", "--law=hybrid4", "--modes=lineph",
       "--geometry=chord"], "circular"),
+    # maximum likelihood
+    (["--KOI-1.01", "--mle", "--modes=ttv"], "LinEph-only"),
+    (["--KOI-1.01", "--mle", "--rhostar=3.2,0.05"], "prior"),
+    (["--KOI-1.01", "--mle", "--ld=sampled"], "profiles the limb"),
+    (["--KOI-1.01", "--mle", "--geometry=chord"], "circular"),
+    (["--KOI-1.01", "--mle", "--PL=ratio"], "envelope theorem"),
+    (["--KOI-1.01", "--mle", "--extend1"], "lineage"),
+    (["--KOI-1.01", "--mle", "--replot"], "lineage"),
+    (["--KOI-1.01", "--mle", "--oblate"], "law=hybrid4"),
 ])
 def test_bad_arguments_are_rejected(argv, pattern):
     with pytest.raises(SystemExit, match=pattern):

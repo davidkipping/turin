@@ -767,3 +767,73 @@ def test_transit_snrs_follow_the_data_present(fake_target):
     others = np.arange(s3.size) != i
     assert s3[i] < 1e-3
     np.testing.assert_allclose(s3[others], s2[others], rtol=1e-5)
+
+
+# -- maximum likelihood (--mle) -------------------------------------------------
+
+def _mle_rows(path):
+    rows = {}
+    with open(path) as fh:
+        fh.readline()
+        line2 = fh.readline()
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            name, *rest = line.strip().split(",")
+            rows[name] = rest
+    return line2, rows
+
+
+def test_mle_fits_without_sampling_and_leaves_a_lineage_alone(tmp_path,
+                                                              fake_target):
+    """--mle writes its own fit, lcdata and fold products, stamped as an
+    MLE; recovers the injection; and never touches an MCMC lineage of the
+    same target (its resume state is left byte for byte)."""
+    out = str(tmp_path)
+    lineage = os.path.join(out, "KOI-1.01_lineph_resume.pkl")
+    with open(lineage, "wb") as fh:
+        fh.write(b"not a real state")
+    logs = []
+    assert pipeline.run(_args(tmp_path, mle=True), log=logs.append) == 0
+    names = sorted(os.listdir(out))
+    for suffix in ("_lineph_mle_fit.csv", "_lineph_mle_lcdata.csv",
+                   "_lineph_mle_fold.pdf"):
+        assert any(n.endswith(suffix) for n in names), (suffix, names)
+    assert not any(n.endswith("_lineph_summary.csv") for n in names)
+    with open(lineage, "rb") as fh:
+        assert fh.read() == b"not a real state"
+    text = "\n".join(logs)
+    assert "maximum likelihood" in text and "MAP log-density" not in text
+
+    line2, rows = _mle_rows(os.path.join(out, "KOI-1.01_lineph_mle_fit.csv"))
+    assert line2.startswith("# turin ") and "MLE (Laplace sds)" in line2
+    assert list(rows)[:7] == ["dP", "dtau0", "k", "beta", "T14", "q1", "q2"]
+    for n in ("b", "log10_rho", "lnL", "n_points", "n_params", "BIC", "AIC"):
+        assert n in rows
+    k, k_sd = float(rows["k"][0]), rows["k"][1]
+    assert abs(k - K_TRUE) < 0.1 * K_TRUE
+    assert k_sd != "" and 0 < float(k_sd) < 0.05 * K_TRUE
+    lnL, n_par = float(rows["lnL"][0]), int(rows["n_params"][0])
+    n_pts = int(rows["n_points"][0])
+    assert float(rows["BIC"][0]) == pytest.approx(
+        n_par * np.log(n_pts) - 2 * lnL, rel=1e-9)
+
+
+def test_mle_oblate_fits_the_round_model_too(tmp_path, fake_target):
+    """--mle --oblate (hybrid4): the oblate fit, the round fit and their
+    comparison. The injection is round, so the nested oblate fit gains
+    almost nothing, and BIC prefers round."""
+    out = str(tmp_path)
+    logs = []
+    assert pipeline.run(_args(tmp_path, mle=True, law="hybrid4", oblate=True),
+                        log=logs.append) == 0
+    _, fit = _mle_rows(os.path.join(out, "KOI-1.01_lineph_mle_fit.csv"))
+    _, rnd = _mle_rows(os.path.join(out, "KOI-1.01_lineph_mle_round.csv"))
+    assert {"fc", "fs", "f", "theta", "A", "B", "w1", "w4"} <= set(fit)
+    assert "fc" not in rnd and "w1" in rnd
+    _, cmp = _mle_rows(os.path.join(out, "KOI-1.01_lineph_mle_compare.csv"))
+    dlnL = float(cmp["dlnL"][0])
+    assert dlnL == pytest.approx(float(fit["lnL"][0]) - float(rnd["lnL"][0]))
+    assert -1e-2 < dlnL < 5.0
+    assert float(cmp["dBIC"][0]) > 0
+    assert "oblate vs round: dlnL" in "\n".join(logs)

@@ -148,6 +148,7 @@ turin/
   likelihood.py   epoch-block-chunked Gaussian logL, priors, anvil Transform/target
   params.py       LinEph/TTV parameter specs, b-k prior modes, derived quantities
   seeding.py      template-sweep tau seeds; MAP and chain starts via anvil.optimize
+  mle.py          --mle: maximum likelihood (LinEph, round or oblate), LD profiled, Laplace sds
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
@@ -935,6 +936,60 @@ oblate), which anvil's own benchmark shows ending every start short.
   than 10 (`seeding.top_spread`).
 - Both anvil points above are findings, not briefs; whether either goes
   upstream is the user's call.
+
+### Maximum likelihood (`--mle`, `mle.py`, 0.1.72-0.1.73)
+
+A fit without sampling, built on the user's request with three decisions
+taken with them: the **likelihood alone** (priors off, `--rhostar`
+refused), **LinEph only** (TTV lands in local timing optima, see "The MAP
+search"), and **`--oblate` also fits the round model** and reports
+ΔlnL/ΔBIC/ΔAIC (no p-value: at f = 0 theta is undefined and f is on its
+boundary, so Wilks does not apply). Products are `{T}_lineph_mle_*`
+(`fit`, `lcdata`, `fold`, and `round`/`compare` under `--oblate`); no
+resume state, no lineage, so an MCMC lineage of the same target is never
+touched (pinned by a test).
+
+- **`build_target(likelihood_only=True)`**: `prior=False` on the
+  likelihood classes keeps only `oblate_log_prior` (a 0/-inf domain mask
+  that must stay: outside the domain `oblate_fields` feeds the kernel a
+  stand-in point, so the likelihood there is finite but meaningless);
+  `model_log_norm = log_const` so anvil's `log_value` is the absolute ln L.
+  Sampling targets are untouched (bitwise, 16 quantities).
+- **Limb darkening profiled, at the user's suggestion**: every law is a
+  convex mix of `ld_basis` generator curves, so `ProfileLDLogProb` /
+  `ProfileHybridLogProb` maximise `L(theta, x)` over the simplex by
+  `N_PROFILE` = 4 passes of the collapsed modes' own Newton step + exact QP
+  (a sequential QP; 4 passes reach rounding on three real targets x two
+  laws), detached, with the envelope-theorem gradient. Exact for a maximum;
+  *not* for sampling (it drops the LD volume -- the 0.1.39 bias), which is
+  why the collapsed modes integrate. Verified against a brute-force simplex
+  maximum (lattice/Dirichlet + float64 SLSQP, every quadratic case and
+  hybrid4 round/oblate), float64 finite differences, and the joint
+  (theta, q) likelihood, which cannot beat it (on hybrid4 the joint search
+  from wide starts ended 0.010 nats short, weights on faces).
+- **Uncertainties** come from the joint (theta, q) likelihood's curvature
+  at the profile's optimum (`anvil.optimize` started there converges in
+  place), as 4,000 Laplace draws in u through the transform, so derived
+  rows get sds the same way. A parameter on a bound, or loading most on a
+  direction flatter than `mle.MIN_CURVATURE` = 0.25 (sd in u > 2), is
+  **held** at the optimum (no sd), and so is every derived row that uses
+  it; the other sds are conditional on it. That is common: b near 0
+  (KOI-518.02 measured -0.02/+0.05 along beta, float32 noise) and weak
+  limb darkening. The conditional sds can be far narrower than the
+  posterior: KOI-518.02 k 4.2e-4 vs MCMC 1.2e-3, T14 2.9e-3 vs 5.5e-3 (P and
+  tau0 within 15%). Documented in the README, not fixed: a profile-
+  likelihood interval would be the fix if the user wants one.
+- **The oblate search starts from the round optimum too** (fitted first;
+  `mle.N_ROUND_SEEDS` = 8 starts at f = `F_FLOOR`, alongside the 128-start
+  ball). Without them KOI-1430.03's oblate fit ended 0.076 nats *below*
+  the round one -- impossible for nested models; with them, 1.40 above.
+  The pipeline test asserts dlnL > -0.01.
+- The user's suite, `--mle --law=hybrid4 --oblate` (Kepler long cadence):
+  dlnL 0.001-1.40 and dBIC +11.6 to +16.0 (round preferred) on all five;
+  f's optimum drifts to the F_MAX edge (0.56-0.599), where the likelihood is
+  nearly flat in f, and the fit notes it. The comparison, not f's value, is
+  the result. Wall time: 5-6 s round (quadratic), 20-60 s oblate (both
+  fits), data loading included.
 
 ### Known upstream hazards
 

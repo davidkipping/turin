@@ -91,6 +91,7 @@ analytically inside every log-density evaluation — a profile likelihood — so
 | either, `--law=hybrid4` | `q1, q2, q3, q4` in place of `q1, q2` | the hybrid4 law; weights `w1..w4` derived (see below) |
 | `lineph --law=hybrid4 --ld=collapsed` | `dP, dtau0, k, beta, T14` | hybrid4's weights integrated out; `q1..q4` drawn from their conditional |
 | `lineph --law=hybrid4 --oblate` | adds `fc, fs` after `T14` | an oblate planet; `f`, `theta`, `A`, `B` derived (see "Oblate planets") |
+| `--mle` (LinEph) | `dP, dtau0, k, beta, T14` [+ `fc, fs`], limb darkening profiled | a maximum-likelihood fit instead of sampling (see "Maximum likelihood") |
 
 `beta` is the impact parameter as a fraction of its k-dependent bound, which
 is how a fixed box represents hurin's conditional-uniform (b, k) prior; `b`
@@ -449,6 +450,84 @@ has no gradient.
   hybrid4 on a round planet. That was measured before Elómë 0.16.3 made its
   oblate kernels 1.2-1.6x faster.
 
+### Maximum likelihood (`--mle`)
+
+`--mle` replaces sampling with a maximum-likelihood fit of the LinEph
+model, round or `--oblate`. It takes seconds rather than minutes:
+
+```bash
+turin --KOI-518.02 --mle
+turin --KOI-1361.01 --mle --law=hybrid4 --oblate
+```
+
+**What is maximised.** The likelihood alone. turin's priors are off: the
+(b, k) prior's area and grazing terms, and `--rhostar` (refused under
+`--mle`). The hard limits stay: each parameter's box, the impact
+parameter's bound under `--bprior` (`b <= 1 + k`, or `1 - k` with
+`--nongrazing`), and for an oblate planet the domain where it fits inside
+the star.
+
+**The limb darkening is profiled.** Every limb-darkening law turin fits is
+a weighted mix of a few fixed light curves, the same structure the
+collapsed modes use. So at each geometry the best limb darkening is a small
+exact optimisation over the allowed weights, and the optimiser only has to
+search the geometry. For a maximum this gives exactly the joint best fit.
+It also reaches a limb darkening on the edge of the allowed region
+directly, which is common: hybrid4's best weights sat on a face for 94-100%
+of the geometries tested. (Profiling would be biased for *sampling*, which
+is why `--ld=collapsed` integrates instead.)
+
+**Uncertainties are Laplace sds**: the curvature of the likelihood at the
+best fit, over every parameter including the limb darkening, propagated to
+the derived rows. Read them with three limits in mind:
+
+- **A parameter on a bound has no sd** (`at_bound` = 1), and the other sds
+  are then those with it fixed there.
+- **Where the likelihood is flat, no sd is given, and the others are
+  conditional on that parameter.** That happens for b near 0 and for a
+  poorly constrained limb darkening. The conditional sds can be much
+  narrower than the posterior. On KOI-518.02, with b unconstrained near 0,
+  the MLE sds of k and T14 were 4.2e-4 and 2.9e-3, against the posterior's
+  1.2e-3 and 5.5e-3; P and tau0 agreed to within 15%. **For error bars to
+  publish, sample.**
+- **A flat likelihood also makes the best-fit value of that parameter
+  arbitrary.** KOI-1361.01's oblate fit put f at 0.599, the edge of its
+  range, for 0.07 in ln L. The log and the products say so.
+
+**Oblate planets: the comparison is the result.** `--mle --oblate` also
+fits the round planet, same law and data (first, so the oblate search can
+start from it as well), and reports ΔlnL = lnL(oblate) -
+lnL(round), ΔBIC and ΔAIC (negative favours oblate). The models are nested,
+so ΔlnL >= 0. No p-value is given: at f = 0 the angle is undefined and f
+sits on its boundary, so the usual chi-squared calibration does not apply.
+For the evidence, calibrate ΔlnL with injections, or sample. If the oblate
+optimum is an aligned planet on a central chord, the family that mimics a
+round planet at larger b, the log warns.
+
+On the five Kepler long-cadence targets of turin's test suite, every
+oblate fit gained 0.001-1.4 in ln L for its two extra parameters, BIC
+preferred round by 12-16, and f's best value drifted to the edge of its
+range. At that cadence the likelihood barely tells f apart. A fit takes
+5-6 s round and 20-60 s with `--oblate` (both fits), data loading included.
+
+**Not offered for TTV fits.** On 3 of 6 targets tested, the optimiser
+settled in a local optimum of the transit times 0.35-3.2 log-likelihood
+units below the best.
+
+**Products** (`<T>_lineph_mle_*`, so they never mix with a sampled
+lineage's files):
+
+```
+<T>_lineph_mle_fit.csv       Parameter, MLE, Std, at_bound; then b, log10_rho
+                             (w1..w4, f, theta, A, B as they apply), lnL,
+                             n_points, n_params (baseline coefficients
+                             included), BIC, AIC
+<T>_lineph_mle_lcdata.csv    time, flux, flux_err, model_flux
+<T>_lineph_mle_fold.pdf      phase-folded transit at the best fit
+<T>_lineph_mle_round.csv     --oblate: the round fit, same columns
+<T>_lineph_mle_compare.csv   --oblate: lnL of each, dlnL, dBIC, dAIC
+```
+
 ### Weak transits and grid-Gibbs
 
 A transit observed at low signal-to-noise, or with a data gap across it, has a
@@ -516,6 +595,8 @@ cannot pool chains drawn both ways.
 --oblate                     an oblate planet (f, theta); needs --law=hybrid4
                              and --modes=lineph; implies --ld=collapsed
 --rhostar=MEAN,SIGMA         Gaussian prior on log10(rho*/kg m^-3), any fit
+--mle                        maximum likelihood instead of sampling (LinEph,
+                             round or --oblate), see above
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache

@@ -49,6 +49,7 @@ _BOOL_FLAGS = {
     "--capabilities": "show_capabilities",
     "--replot": "replot",
     "--oblate": "oblate",
+    "--mle": "mle",
 }
 _VALUE_FLAGS = {
     "--chains": "chains",
@@ -156,6 +157,14 @@ usage: turin --KOI-448.02 [options]
                           Any fit mode and law. Under --oblate it suppresses
                           the aligned-oblate-on-a-central-chord mode that
                           mimics a round planet at larger b
+  --mle                   maximum likelihood instead of sampling, LinEph
+                          only: the likelihood alone (no priors; the
+                          parameter boxes and the oblate domain stay), the
+                          limb darkening profiled over its simplex, Laplace
+                          sds. With --oblate the round model is fitted too
+                          and compared (dlnL, dBIC). Takes seconds. Not with
+                          --rhostar, --ld, --extend*, --replot, --PL=ratio
+                          or hybrid, or --geometry=chord
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -206,6 +215,8 @@ class Args:
     ld: str | None = None
     law: str = "quadratic"
     oblate: bool = False
+    #: --mle: a maximum-likelihood fit instead of sampling (turin.mle)
+    mle: bool = False
     #: Gaussian prior on log10(rho*/kg m^-3): (mean, sigma), or None
     rhostar: tuple | None = None
     modes: tuple = MODES
@@ -261,6 +272,10 @@ def parse_args(argv=None):
 
     if args.nongrazing:
         args.b_prior = "nongrazing"
+    if args.mle and args.ld is not None:
+        _fail(f"--mle profiles the limb darkening over its simplex; "
+              f"--ld={args.ld} does not apply to it")
+    resolve_mle(args)
     _choice("bprior", args.b_prior, B_PRIORS)
     _choice("sampler", args.sampler, SAMPLERS)
     _choice("PL", args.profile_mode, PL_CHOICES)
@@ -271,7 +286,7 @@ def parse_args(argv=None):
     _choice("law", args.law, LAW_CHOICES)
     for mode in args.modes:
         _choice("modes", mode, MODES)
-    problem = (oblate_problem(args) or law_problem(args)
+    problem = (mle_problem(args) or oblate_problem(args) or law_problem(args)
                or collapsed_ld_problem(args))
     if problem:
         _fail(problem)
@@ -289,6 +304,42 @@ def resolve_ld(args):
     if getattr(args, "ld", None) is None:
         args.ld = "collapsed" if getattr(args, "oblate", False) else "sampled"
     return args.ld
+
+
+def resolve_mle(args):
+    """Under ``--mle`` the run is LinEph only: a requested TTV fit is dropped
+    here (``--modes=ttv`` alone is refused by :func:`mle_problem`).
+    Idempotent; the pipeline calls it too."""
+    if getattr(args, "mle", False) and "lineph" in args.modes:
+        args.modes = ("lineph",)
+
+
+def mle_problem(args):
+    """Why ``--mle`` cannot run in this combination, or None."""
+    if not getattr(args, "mle", False):
+        return None
+    if "lineph" not in args.modes:
+        return ("--mle is LinEph-only: a TTV maximum likelihood lands in "
+                "local timing optima (0.35-3.2 nats below the best on 3 of "
+                "6 targets measured), so it is not offered")
+    if getattr(args, "rhostar", None):
+        return ("--mle maximises the likelihood alone, and --rhostar is a "
+                "prior; drop one")
+    if args.geometry != "circular":
+        return ("--mle needs --geometry=circular: its limb darkening is "
+                "profiled through elome's ld_basis, which exists only on "
+                "the tau kernel")
+    if args.profile_mode in ("ratio", "hybrid"):
+        return (f"--mle needs --PL=exact (or auto), not "
+                f"--PL={args.profile_mode}: the profiled limb darkening's "
+                f"gradient comes from the envelope theorem, which needs the "
+                f"exact flux-space baseline")
+    for flag, name in (("--extend1", "extend1"), ("--extend2", "extend2"),
+                       ("--replot", "replot")):
+        if getattr(args, name, False):
+            return (f"{flag} continues a sampled lineage; --mle has none "
+                    f"(it writes its own {{target}}_lineph_mle_* products)")
+    return None
 
 
 def oblate_problem(args):
