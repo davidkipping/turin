@@ -16,14 +16,11 @@ limb darkening on the simplex's faces directly, which the joint search in
 1. ``anvil.optimize`` (``objective="mle"``) over theta from
    :data:`N_STARTS` starts around the input ephemeris.
 2. The limb darkening at the optimum, ``q`` from the profile's ``x*``.
-3. Uncertainties from the **joint** likelihood over (theta, q) at that
-   point: ``anvil.optimize`` started there converges in place and returns
-   its curvature. The reported sds are Laplace sds, from
-   :data:`N_LAPLACE_DRAWS` draws of that Gaussian in u mapped through the
-   transform, so derived rows (``b``, ``log10_rho``, ``w``, ``f``, ...) get
-   them the same way. A parameter whose optimum is on a bound has none, and
-   the others are then the sds on that face.
-4. Under ``--oblate``, the round model is fitted too and the two compared.
+3. Under ``--oblate``, the round model is fitted first, the oblate search
+   starts from its optimum at f ~ 0, and the two are compared.
+
+The result is the best fit and nothing else: no uncertainties (the user's
+decision -- an MLE is the best fit, error bars come from sampling).
 """
 
 from __future__ import annotations
@@ -42,8 +39,6 @@ from . import seeding as _seeding
 #: Starts for the search (a 0.25 sd ball in u around the input ephemeris,
 #: as the sampler's MAP search).
 N_STARTS = 128
-#: Laplace draws behind every reported sd.
-N_LAPLACE_DRAWS = 4000
 #: Product mode stem: ``{target}_lineph_mle_{name}.{ext}``, apart from any
 #: MCMC lineage's ``{target}_lineph_*``.
 MODE = "lineph_mle"
@@ -51,12 +46,12 @@ MODE = "lineph_mle"
 
 @dataclass
 class MleFit:
-    """One maximum-likelihood fit. ``rows``: (name, value, sd, at_bound) in
-    physical units, the joint layout's parameters then the derived ones."""
+    """One maximum-likelihood fit. ``rows``: (name, value) in physical
+    units, the parameters (limb darkening included) then the derived ones."""
 
     label: str
     layout: object               # theta-only (profiled) layout
-    joint_layout: object         # theta + q layout
+    joint_layout: object         # theta + q layout (the rows' names)
     lp: object                   # float32 profiled likelihood (for curves)
     v_model: np.ndarray          # joint model-space best fit
     rows: list
@@ -77,21 +72,28 @@ class MleFit:
         return 2.0 * self.n_params - 2.0 * self.lnL
 
     def value(self, name):
-        return next(r[1] for r in self.rows if r[0] == name)
+        return dict(self.rows)[name]
 
 
-#: Seeds an oblate search gets from the round optimum: f = F_FLOOR at this
-#: many angles. Without them the search can miss the nested round solution
-#: where the likelihood is nearly flat in f: KOI-1430.03 (Kepler long
-#: cadence) ended 0.076 nats *below* the round fit, at f = 0.598.
-N_ROUND_SEEDS = 8
+#: An oblate search starts from the round optimum (the user's scheme): its
+#: geometry plus this sd in u, and f = F_FLOOR (just off f = 0, where
+#: (fc, fs) feel no gradient) at random angles. Measured against a ball
+#: around the input ephemeris (alone, and with 8 round seeds), 3 seeds
+#: each: on six PHOENIX truths (f = 0, 0.1; theta 0-60; b 0.3, 0.7) all
+#: reach the same ln L (within 0.01), this one 20-40% faster; on the user's
+#: five Kepler targets (f unconstrained, optima on a flat ridge at the
+#: F_MAX edge) it is best on KOI-1430.03 (7957.49 against the ball's
+#: 7956.95-7957.43, which once ended *below* the round fit), level on
+#: 4087.01 and 1361.01, and 0.04-0.27 short of the ball's best seed on
+#: 2650.01 and 4016.01. It cannot end below the round fit.
+ROUND_SEED_SD = 0.02
 
 
 def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
         build_kw, seed=0, log=print, round_fit=None):
-    """Fit one model; returns an :class:`MleFit`. An oblate fit given the
-    round one (``round_fit``) also starts from it, at f = ``F_FLOOR``, so
-    it cannot end below it."""
+    """Fit one model; returns an :class:`MleFit`. An oblate fit needs the
+    round one (``round_fit``): every start is its optimum, at f =
+    ``F_FLOOR`` (see :data:`ROUND_SEED_SD`)."""
     import anvil
 
     label = ("oblate" if oblate else "round") + f" {law}"
@@ -102,16 +104,21 @@ def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
     tr, T, lo, hi = _likelihood.build_target(lay, centering, epoch_data,
                                              orders, **kw)
     rng = np.random.default_rng(seed)
-    v0 = _seeding.initial_model_vector(lay, eph)
-    starts = (T.from_model_np(v0)[None, :]
-              + 0.25 * rng.standard_normal((N_STARTS, lay.dim)))
-    if oblate and round_fit is not None:
+    if oblate:
+        if round_fit is None:
+            raise ValueError("an oblate maximum-likelihood fit starts from "
+                             "the round one: pass round_fit")
+        ang = rng.uniform(0.0, 2.0 * math.pi, N_STARTS)
+        V = np.tile(np.r_[round_fit.v_model[:5], 0.0, 0.0], (N_STARTS, 1))
         r = math.sqrt(_seeding.F_FLOOR)
-        ang = 2.0 * math.pi * np.arange(N_ROUND_SEEDS) / N_ROUND_SEEDS
-        V = np.tile(np.r_[round_fit.v_model[:5], 0.0, 0.0], (N_ROUND_SEEDS, 1))
-        V[:, lay.index("fc")], V[:, lay.index("fs")] = r * np.cos(ang), \
-            r * np.sin(ang)
-        starts = np.concatenate([starts, T.from_model_np(V)])
+        V[:, lay.index("fc")] = r * np.cos(ang)
+        V[:, lay.index("fs")] = r * np.sin(ang)
+        starts = T.from_model_np(V)
+        starts[:, :5] += ROUND_SEED_SD * rng.standard_normal((N_STARTS, 5))
+    else:
+        v0 = _seeding.initial_model_vector(lay, eph)
+        starts = (T.from_model_np(v0)[None, :]
+                  + 0.25 * rng.standard_normal((N_STARTS, lay.dim)))
     res = anvil.optimize(tr, starts, objective="mle", seed=seed,
                          max_rows=_seeding.MAX_ROWS)
     n_conv = int(np.sum(res.status == "converged"))
@@ -124,43 +131,15 @@ def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
                                             dtype=mx.float64))
     q = np.array([float(np.asarray(c)[0]) for c in q])
 
-    # the joint likelihood there: in place, for the curvature
     jlay = _params.lineph_layout(eph, b_prior=b_prior, law=law, oblate=oblate)
-    jtr, jT, _, _ = _likelihood.build_target(jlay, centering, epoch_data,
-                                             orders, **kw)
-    v_joint = np.r_[res.model, np.clip(q, 1e-7, 1.0 - 1e-7)]
-    joint = anvil.optimize(jtr, jT.from_model_np(v_joint), n_starts=8,
-                           start_spread=1e-4, objective="mle", seed=seed,
-                           max_rows=_seeding.MAX_ROWS)
-    notes = []
-    if joint.log_value > res.log_value + 0.01:
-        # the profile is exact, so this should not happen; say so if it does
-        notes.append(f"the joint search found ln L {joint.log_value:.3f}, "
-                     f"{joint.log_value - res.log_value:.3f} above the profile")
-
-    at_bound = np.asarray(joint.at_bound, dtype=bool)
-    draws, held, why = _laplace_draws(joint, jT, jlay, at_bound, rng)
-    if why:
-        notes.append(why)
     names = list(jlay.names)
     v_best = np.r_[res.model, q]
-    best_phys = jT.to_physical(v_best[None, :])
-    phys = jT.to_physical(draws) if draws is not None else None
-
-    rows = []
-    for i, n in enumerate(names):
-        sd = (float(np.std(phys[:, i])) if phys is not None and not held[i]
-              else float("nan"))
-        rows.append((n, float(best_phys[0, i]), sd, bool(at_bound[i])))
-    held_names = {n for n, h in zip(names, held) if h}
-    for n, val, d in _derived(jlay, best_phys, phys, names):
-        # a derived row inherits "no sd" from any held parameter it uses
-        sd = (float(np.std(d)) if d is not None
-              and not (_DERIVED_FROM(n, jlay) & held_names) else float("nan"))
-        rows.append((n, val, sd, False))
-
+    best_phys = jlay.transform().to_physical(v_best[None, :])
+    rows = [(n, float(best_phys[0, i])) for i, n in enumerate(names)]
+    rows += [(n, val) for n, val in _derived(jlay, best_phys, names)]
+    notes = []
     if oblate:
-        f_best = next(r[1] for r in rows if r[0] == "f")
+        f_best = dict(rows)["f"]
         if f_best > 0.99 * _params.F_MAX:
             notes.append(f"f = {f_best:.3f} is at the edge of its range "
                          f"(F_MAX = {_params.F_MAX}): the likelihood barely "
@@ -174,89 +153,17 @@ def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
         top_spread=_seeding.top_spread(res), notes=notes)
 
 
-#: Smallest curvature (nats per unit u squared) a direction must have for
-#: a Laplace sd: below it the sd in u exceeds 2, most of a bounded
-#: parameter's box. KOI-518.02 (b ~ 0, where L is flat in b) measured
-#: -0.02 and +0.05 along beta (with q2), float32 noise; its constrained
-#: directions are 1e3-1e5.
-MIN_CURVATURE = 0.25
-
-
-def _laplace_draws(joint, transform, layout, at_bound, rng):
-    """``(draws, held, note)``: ``N_LAPLACE_DRAWS`` model-space draws from
-    the Laplace Gaussian in u at the joint optimum, and the parameters held
-    at the optimum instead of drawn.
-
-    Held: any on a bound, and -- one at a time, until the curvature is
-    negative definite with every direction above :data:`MIN_CURVATURE` --
-    the parameter loading most on the flattest direction. That is the
-    likelihood being flat (b near 0) or not concave (an oblate fit of a
-    round planet: f = fc^2 + fs^2 is stationary at f = 0) along it, where
-    the curvature says nothing about the width. The other sds are then
-    conditional on the held values."""
-    held = at_bound.copy()
-    H = joint.hessian_u
-    if H is None or not np.all(np.isfinite(H[np.ix_(~held, ~held)])):
-        return None, held, "no curvature at the optimum: sds not available"
-    names = list(layout.names)
-    flat = []
-    while (~held).any():
-        free = np.flatnonzero(~held)
-        A = -H[np.ix_(free, free)]
-        lam, P = np.linalg.eigh(0.5 * (A + A.T))
-        if lam[0] > MIN_CURVATURE:
-            break
-        j = free[int(np.argmax(np.abs(P[:, 0])))]
-        held[j] = True
-        flat.append(names[j])
-    else:
-        return None, held, "no direction is constrained: sds not available"
-    note = None
-    if flat:
-        note = (f"no Laplace sd for {', '.join(flat)}: the likelihood is "
-                f"flat or not concave there at the optimum (e.g. b near 0, "
-                f"or f near 0 under --oblate); the other sds hold "
-                f"{'it' if len(flat) == 1 else 'them'} at the optimum")
-        if layout.oblate and {"fc", "fs"} & set(flat):
-            note += ". The round-vs-oblate comparison measures the evidence for f"
-    u = np.repeat(joint.u[None, :], N_LAPLACE_DRAWS, axis=0)
-    z = rng.standard_normal((N_LAPLACE_DRAWS, free.size))
-    u[:, free] += (z / np.sqrt(lam)) @ P.T
-    return transform.model_np(u), held, note
-
-
-def _DERIVED_FROM(name, layout):
-    """The fitted parameters a derived row depends on."""
-    if name == "b":
-        return {"beta", "k"}
-    if name == "log10_rho":
-        return {"dP", "T14", "k", "beta"}
-    if name.startswith("w"):
-        return set(layout.ld_names)
-    if name in ("f", "theta"):
-        return {"fc", "fs"}
-    return {"k", "fc", "fs"}                                   # A, B
-
-
-def _derived(layout, best_phys, phys, names):
-    """(name, value, draws or None) for the derived rows."""
+def _derived(layout, best_phys, names):
+    """(name, value) for the derived rows, at the best fit."""
     from .pipeline import _ld_weight_draws, _oblate_draws
 
-    out = []
-    b0 = _outputs.derived_b(best_phys, names, layout.b_prior)
-    rho0 = _outputs.log10_rho_draws(best_phys, names, layout.b_prior)
-    b = _outputs.derived_b(phys, names, layout.b_prior) if phys is not None \
-        else None
-    rho = (_outputs.log10_rho_draws(phys, names, layout.b_prior)
-           if phys is not None else None)
-    out += [("b", float(b0[0]), b), ("log10_rho", float(rho0[0]), rho)]
+    out = [("b", float(_outputs.derived_b(best_phys, names,
+                                          layout.b_prior)[0])),
+           ("log10_rho", float(_outputs.log10_rho_draws(
+               best_phys, names, layout.b_prior)[0]))]
     for fn in (_ld_weight_draws, _oblate_draws):
         n0, d0 = fn(layout, best_phys, names)
-        if not n0:
-            continue
-        _, d = fn(layout, phys, names) if phys is not None else (n0, None)
-        out += [(n, float(d0[0, j]), None if d is None else d[:, j])
-                for j, n in enumerate(n0)]
+        out += [(n, float(d0[0, j])) for j, n in enumerate(n0)]
     return out
 
 

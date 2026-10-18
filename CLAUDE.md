@@ -937,11 +937,11 @@ oblate), which anvil's own benchmark shows ending every start short.
 - Both anvil points above are findings, not briefs; whether either goes
   upstream is the user's call.
 
-### Maximum likelihood (`--mle`, `mle.py`, 0.1.72-0.1.73)
+### Maximum likelihood (`--mle`, `mle.py`, 0.1.72-0.1.74)
 
-A fit without sampling, built on the user's request with three decisions
-taken with them: the **likelihood alone** (priors off, `--rhostar`
-refused), **LinEph only** (TTV lands in local timing optima, see "The MAP
+A fit without sampling, built on the user's request with these decisions
+taken with them: **the best fit only**, no uncertainties (0.1.74); the
+**likelihood alone** (priors off, `--rhostar` refused), **LinEph only** (TTV lands in local timing optima, see "The MAP
 search"), and **`--oblate` also fits the round model** and reports
 ΔlnL/ΔBIC/ΔAIC (no p-value: at f = 0 theta is undefined and f is on its
 boundary, so Wilks does not apply). Products are `{T}_lineph_mle_*`
@@ -967,23 +967,23 @@ touched (pinned by a test).
   hybrid4 round/oblate), float64 finite differences, and the joint
   (theta, q) likelihood, which cannot beat it (on hybrid4 the joint search
   from wide starts ended 0.010 nats short, weights on faces).
-- **Uncertainties** come from the joint (theta, q) likelihood's curvature
-  at the profile's optimum (`anvil.optimize` started there converges in
-  place), as 4,000 Laplace draws in u through the transform, so derived
-  rows get sds the same way. A parameter on a bound, or loading most on a
-  direction flatter than `mle.MIN_CURVATURE` = 0.25 (sd in u > 2), is
-  **held** at the optimum (no sd), and so is every derived row that uses
-  it; the other sds are conditional on it. That is common: b near 0
-  (KOI-518.02 measured -0.02/+0.05 along beta, float32 noise) and weak
-  limb darkening. The conditional sds can be far narrower than the
-  posterior: KOI-518.02 k 4.2e-4 vs MCMC 1.2e-3, T14 2.9e-3 vs 5.5e-3 (P and
-  tau0 within 15%). Documented in the README, not fixed: a profile-
-  likelihood interval would be the fix if the user wants one.
-- **The oblate search starts from the round optimum too** (fitted first;
-  `mle.N_ROUND_SEEDS` = 8 starts at f = `F_FLOOR`, alongside the 128-start
-  ball). Without them KOI-1430.03's oblate fit ended 0.076 nats *below*
-  the round one -- impossible for nested models; with them, 1.40 above.
-  The pipeline test asserts dlnL > -0.01.
+- **The best fit only, no uncertainties** (the user's decision, 0.1.74:
+  "mle is just the best fit"). 0.1.73 reported Laplace sds from the joint
+  curvature and held flat directions; they were removed with
+  `MIN_CURVATURE` and the joint polish. What that taught, kept here: at
+  b near 0 the likelihood is flat in beta to float32 noise (KOI-518.02,
+  -0.02/+0.05 in u), and sds conditional on such a held parameter were
+  far narrower than the posterior (k 4.2e-4 vs MCMC 1.2e-3).
+- **The oblate search starts from the round fit only** (the user's
+  scheme, 0.1.74): round first, then all 128 starts at its geometry (0.02
+  sd in u) with f = `F_FLOOR` at random angles, in (fc, fs) as the sampler.
+  Measured (`mle.ROUND_SEED_SD`'s comment) against a ball around the input
+  ephemeris, alone and with 8 round seeds (0.1.73), 3 seeds each: six
+  PHOENIX truths all agree within 0.01 nats, round seeding 20-40% faster;
+  on the suite best on KOI-1430.03 (the ball alone once ended 0.076
+  *below* the round fit there), level on 4087.01 and 1361.01, 0.04-0.27
+  short of the ball's best seed on 2650.01 and 4016.01, whose optima lie
+  on a flat ridge at the F_MAX edge (no scheme was consistent there).
 - The user's suite, `--mle --law=hybrid4 --oblate` (Kepler long cadence):
   dlnL 0.001-1.40 and dBIC +11.6 to +16.0 (round preferred) on all five;
   f's optimum drifts to the F_MAX edge (0.56-0.599), where the likelihood is

@@ -806,13 +806,12 @@ def test_mle_fits_without_sampling_and_leaves_a_lineage_alone(tmp_path,
     assert "maximum likelihood" in text and "MAP log-density" not in text
 
     line2, rows = _mle_rows(os.path.join(out, "KOI-1.01_lineph_mle_fit.csv"))
-    assert line2.startswith("# turin ") and "MLE (Laplace sds)" in line2
+    assert line2.startswith("# turin ") and "maximum likelihood" in line2
     assert list(rows)[:7] == ["dP", "dtau0", "k", "beta", "T14", "q1", "q2"]
     for n in ("b", "log10_rho", "lnL", "n_points", "n_params", "BIC", "AIC"):
         assert n in rows
-    k, k_sd = float(rows["k"][0]), rows["k"][1]
-    assert abs(k - K_TRUE) < 0.1 * K_TRUE
-    assert k_sd != "" and 0 < float(k_sd) < 0.05 * K_TRUE
+    assert all(len(v) == 1 for v in rows.values())           # no error bars
+    assert abs(float(rows["k"][0]) - K_TRUE) < 0.1 * K_TRUE
     lnL, n_par = float(rows["lnL"][0]), int(rows["n_params"][0])
     n_pts = int(rows["n_points"][0])
     assert float(rows["BIC"][0]) == pytest.approx(

@@ -438,7 +438,7 @@ def _run_mle(args, prepared, cv, outdir, *, log):
     epoch_data = prepared.epoch_data
     centering = _prep.centering_constants(epoch_data, prepared.eph)
     orders = np.asarray(cv["orders"])
-    _outputs.set_run_status("MLE (Laplace sds)")
+    _outputs.set_run_status("maximum likelihood")
     log(f"[{target}] lineph maximum likelihood: {epoch_data['n_epochs']} "
         f"epochs, {int(epoch_data['mask'].sum())} points; the likelihood "
         f"alone, limb darkening ({args.law}) profiled")
@@ -448,7 +448,7 @@ def _run_mle(args, prepared, cv, outdir, *, log):
     fit_kw = dict(law=args.law, b_prior=args.b_prior, build_kw=build_kw,
                   seed=args.seed, log=log)
     if args.oblate:
-        # round first: the oblate search starts from it too (nested at f = 0)
+        # round first: every oblate start is its optimum at f ~ 0 (nested)
         rnd = _mle.fit(prepared, centering, epoch_data, orders, oblate=False,
                        **fit_kw)
         fits = [_mle.fit(prepared, centering, epoch_data, orders, oblate=True,
@@ -492,10 +492,8 @@ def _run_mle(args, prepared, cv, outdir, *, log):
 def _log_mle(fit, log):
     log(f"  {fit.label}: ln L = {fit.lnL:.3f}, BIC = {fit.bic:.2f} "
         f"({fit.n_params} parameters incl. baseline, {fit.n_points} points)")
-    for name, val, sd, at_bound in fit.rows:
-        err = "" if not np.isfinite(sd) else f" +/- {sd:.4g}"
-        log(f"    {name:>10s} = {val:.10g}{err}"
-            + ("  [on bound]" if at_bound else ""))
+    for name, val in fit.rows:
+        log(f"    {name:>10s} = {val:.10g}")
     for note in fit.notes:
         log(f"    note: {note}")
 

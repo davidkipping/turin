@@ -477,32 +477,31 @@ directly, which is common: hybrid4's best weights sat on a face for 94-100%
 of the geometries tested. (Profiling would be biased for *sampling*, which
 is why `--ld=collapsed` integrates instead.)
 
-**Uncertainties are Laplace sds**: the curvature of the likelihood at the
-best fit, over every parameter including the limb darkening, propagated to
-the derived rows. Read them with three limits in mind:
+**The best fit, nothing else.** There are no error bars: for those,
+sample. Where the likelihood is flat the best-fit value of that parameter
+is arbitrary. That is common for b near 0, a poorly measured limb
+darkening, and f at Kepler long cadence. KOI-1361.01's oblate fit put f at
+0.599, the edge of its range, for 0.07 in ln L, and the log and products
+note an f at its edge.
 
-- **A parameter on a bound has no sd** (`at_bound` = 1), and the other sds
-  are then those with it fixed there.
-- **Where the likelihood is flat, no sd is given, and the others are
-  conditional on that parameter.** That happens for b near 0 and for a
-  poorly constrained limb darkening. The conditional sds can be much
-  narrower than the posterior. On KOI-518.02, with b unconstrained near 0,
-  the MLE sds of k and T14 were 4.2e-4 and 2.9e-3, against the posterior's
-  1.2e-3 and 5.5e-3; P and tau0 agreed to within 15%. **For error bars to
-  publish, sample.**
-- **A flat likelihood also makes the best-fit value of that parameter
-  arbitrary.** KOI-1361.01's oblate fit put f at 0.599, the edge of its
-  range, for 0.07 in ln L. The log and the products say so.
-
-**Oblate planets: the comparison is the result.** `--mle --oblate` also
-fits the round planet, same law and data (first, so the oblate search can
-start from it as well), and reports ΔlnL = lnL(oblate) -
+**Oblate planets: the comparison is the result.** `--mle --oblate` first
+fits the round planet, then starts every oblate search from that best fit
+at f ~ 0 (the geometry slightly spread, the angle random), in (fc, fs)
+as the sampler does, and reports ΔlnL = lnL(oblate) -
 lnL(round), ΔBIC and ΔAIC (negative favours oblate). The models are nested,
 so ΔlnL >= 0. No p-value is given: at f = 0 the angle is undefined and f
 sits on its boundary, so the usual chi-squared calibration does not apply.
 For the evidence, calibrate ΔlnL with injections, or sample. If the oblate
 optimum is an aligned planet on a central chord, the family that mimics a
 round planet at larger b, the log warns.
+
+Starting from the round fit was measured against starting around the
+catalogue ephemeris. On six synthetic oblate and round planets (PHOENIX
+limb darkening, 1-minute cadence) both reach the same best fit, and the
+round start is 20-40% faster. On the Kepler targets below it is level or
+better on three, and up to 0.27 short of the other's luckiest start on
+two, where the best fits lie on a ridge of near-equal likelihood. It can
+never end below the round fit, which the ephemeris start once did.
 
 On the five Kepler long-cadence targets of turin's test suite, every
 oblate fit gained 0.001-1.4 in ln L for its two extra parameters, BIC
@@ -518,7 +517,7 @@ units below the best.
 lineage's files):
 
 ```
-<T>_lineph_mle_fit.csv       Parameter, MLE, Std, at_bound; then b, log10_rho
+<T>_lineph_mle_fit.csv       Parameter, MLE; then b, log10_rho
                              (w1..w4, f, theta, A, B as they apply), lnL,
                              n_points, n_params (baseline coefficients
                              included), BIC, AIC

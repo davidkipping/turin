@@ -200,19 +200,18 @@ def export_lcdata(outdir, target, mode, epoch_data, model, *, log=None):
 
 
 def export_mle(outdir, target, name, fit, *, log=None):
-    """A ``--mle`` fit (:class:`turin.mle.MleFit`): one row per parameter
-    (physical units, as the summary's), then the derived rows, then the
-    fit's ``lnL``, ``n_points``, ``n_params`` (the baseline coefficients
-    included), ``BIC`` and ``AIC``. ``Std`` is the Laplace sd, blank where
-    there is none; ``at_bound`` is 1 for an optimum on a bound. Notes are
-    ``#`` lines, which readers skip."""
-    rows = [f"{n},{v:.10e},{_fmt(sd)},{int(ab)}" for n, v, sd, ab in fit.rows]
-    rows += [f"lnL,{fit.lnL:.10e},,", f"n_points,{fit.n_points},,",
-             f"n_params,{fit.n_params},,", f"BIC,{fit.bic:.10e},,",
-             f"AIC,{fit.aic:.10e},,"]
+    """A ``--mle`` fit (:class:`turin.mle.MleFit`): the best fit, one row per
+    parameter (physical units, as the summary's, limb darkening included),
+    then the derived rows, then the fit's ``lnL``, ``n_points``,
+    ``n_params`` (the baseline coefficients included), ``BIC`` and ``AIC``.
+    No uncertainties. Notes are ``#`` lines, which readers skip."""
+    rows = [f"{n},{v:.10e}" for n, v in fit.rows]
+    rows += [f"lnL,{fit.lnL:.10e}", f"n_points,{fit.n_points}",
+             f"n_params,{fit.n_params}", f"BIC,{fit.bic:.10e}",
+             f"AIC,{fit.aic:.10e}"]
     rows += [f"# {note}" for note in fit.notes]
     return _write_csv(product_path(outdir, target, "lineph_mle", name, "csv"),
-                      "Parameter,MLE,Std,at_bound", rows, log)
+                      "Parameter,MLE", rows, log)
 
 
 def export_mle_compare(outdir, target, cmp, *, log=None):

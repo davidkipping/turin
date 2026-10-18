@@ -160,9 +160,10 @@ usage: turin --KOI-448.02 [options]
   --mle                   maximum likelihood instead of sampling, LinEph
                           only: the likelihood alone (no priors; the
                           parameter boxes and the oblate domain stay), the
-                          limb darkening profiled over its simplex, Laplace
-                          sds. With --oblate the round model is fitted too
-                          and compared (dlnL, dBIC). Takes seconds. Not with
+                          limb darkening profiled over its simplex; the best
+                          fit only, no error bars. With --oblate the round
+                          model is fitted too and compared (dlnL, dBIC).
+                          Takes seconds. Not with
                           --rhostar, --ld, --extend*, --replot, --PL=ratio
                           or hybrid, or --geometry=chord
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
