@@ -96,7 +96,7 @@ def test_capabilities_detect_and_summarize():
     assert isinstance(caps.elome_flux_dev_from_tau, bool)
     text = caps.summary()
     assert "anvil" in text and "elome" in text
-    assert "yes  anvil >= 0.7.1" in text
+    assert "yes  anvil >= 0.9.0" in text
 
 
 def test_capability_summary_does_not_claim_the_tau_kernel_is_unused():
@@ -120,8 +120,8 @@ def test_capability_summary_does_not_claim_the_tau_kernel_is_unused():
 
 
 @pytest.mark.parametrize("version,ok", [
-    ("0.7.1", True), ("0.7.1.dev2", True), ("0.7.2", True), ("0.8", True),
-    ("1.0", True), ("0.7.0", False), ("0.6.2", False), ("0.4.2", False),
+    ("0.9.0", True), ("0.9.0.dev2", True), ("0.9.1", True), ("0.10", True),
+    ("1.0", True), ("0.8.9", False), ("0.7.1", False), ("0.4.2", False),
     ("unknown", False)])
 def test_anvil_version_gate(version, ok):
     assert capabilities.anvil_ok(version) is ok
@@ -154,7 +154,7 @@ def test_require_anvil_names_the_upgrade_command(monkeypatch):
     monkeypatch.setattr(anvil, "__version__", "0.2.0")
     with pytest.raises(SystemExit, match="pip install -U"):
         capabilities.require_anvil()
-    assert "NO   anvil >= 0.7.1" in capabilities.detect().summary()
+    assert "NO   anvil >= 0.9.0" in capabilities.detect().summary()
 
 
 def test_assess_matches_a_per_parameter_diagnose_reference():
@@ -324,8 +324,8 @@ def test_lineph_injection_recovery():
     rng = np.random.default_rng(0)
     u_starts = (transform.from_model_np(v0)[None, :]
                 + 0.25 * rng.standard_normal((128, layout.dim)))
-    map_res = seeding.find_map(target, u_starts.astype(np.float32), n_iter=400)
-    assert np.isfinite(map_res.log_prob_best)
+    map_res = seeding.find_map(target, u_starts)
+    assert np.isfinite(map_res.value)
 
     cfg = sampling.SamplerConfig(n_chains=256, n_warmup=400, n_samples=300,
                                  max_samples=1200, seed=3).for_mode(layout.dim)
@@ -379,7 +379,7 @@ def test_ttv_injection_recovery_of_displaced_transits():
     rng = np.random.default_rng(4)
     u_starts = (transform.from_model_np(v0)[None, :]
                 + 0.1 * rng.standard_normal((128, layout.dim)))
-    map_res = seeding.find_map(target, u_starts.astype(np.float32), n_iter=400)
+    map_res = seeding.find_map(target, u_starts)
 
     cfg = sampling.SamplerConfig(n_chains=256, n_warmup=400, n_samples=300,
                                  max_samples=900, seed=5).for_mode(layout.dim)

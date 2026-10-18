@@ -13,6 +13,7 @@ collapsed value, and float64 for float32.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import sys
@@ -359,13 +360,20 @@ def test_floor_oblateness_keeps_chains_off_the_dead_zone(data):
     assert np.array_equal(seeding.floor_oblateness(u1, T, lay), u1)
 
 
-def test_laplace_starts_are_spread_and_finite(data):
+def test_chain_starts_are_spread_and_finite(data):
+    """Laplace starts at an oblate fit's optimum: finite, spread, each
+    principal sd capped at 0.5 x 0.5 in u, also where anvil gives no
+    covariance (a round planet's f ~ 0)."""
     lay, tr, _, _ = _targets(data, ld="collapsed")
     T = lay.transform()
     u_map = T.from_model_np(_vec()[:7])
-    u0, info = seeding.laplace_starts(tr, u_map, 64, seed=1)
+    rng = np.random.default_rng(1)
+    res = seeding.find_map(tr, u_map + 0.02 * rng.standard_normal((32, 7)))
+    u0, n_flat = seeding.chain_starts(res, 64, seed=1)
     u0 = np.array(u0, dtype=np.float64)
-    assert not info["fallback"]
+    # a round planet: the optimum is at f ~ 0, where (fc, fs) are not
+    # negative-definite, so anvil alone would refuse
+    assert res.cov_u is None and n_flat >= 1
     lp = np.array(tr.log_prob(mx.array(u0, dtype=mx.float32)))
     assert np.all(np.isfinite(lp))
     spread = u0.std(0)
@@ -377,9 +385,9 @@ def test_laplace_starts_are_spread_and_finite(data):
 def _injection(seed=21):
     """Three epochs at 1-minute cadence, no exposure smearing, 30 ppm: an
     oblate signal measurable in a test-sized dataset (sd(f) ~ 0.004
-    measured). At 10 ppm the posterior is so sharp (sd(k) = 3e-4) that the
-    MAP search stops ~9,000 log-units short of the peak and warmup is spent
-    descending; at 30 ppm it stops ~130 short, which warmup absorbs."""
+    measured). At 10 ppm the posterior is so sharp (sd(k) = 3e-4) that
+    turin's former Adam search stopped ~9,000 log-units short of the peak
+    (~130 at 30 ppm); anvil.optimize has no such shortfall."""
     from turin import prep
     k, b, f, th = 0.15, 0.7, F_T, TH_T
     P, epoch, dur_h = H4.P_REF, H4.EPOCH, H4.DUR_H
@@ -414,29 +422,6 @@ def _injection(seed=21):
     return ed, cen, eph, np.full(ed["n_epochs"], 1), truth
 
 
-def test_polish_map_keeps_the_better_optimum():
-    """A second stage around the first stage's best: it gains on a search
-    stopped short, and never moves a converged optimum to a worse one."""
-    class Bowl:
-        c = mx.array([[0.3, -0.2, 0.1]])
-        w = mx.array([[1e4, 1.0, 1e2]])
-
-        def log_prob(self, u):
-            return -mx.sum(self.w * (u - self.c) ** 2, axis=-1)
-
-    bowl = Bowl()
-    u = np.random.default_rng(0).normal(0, 1, (16, 3)).astype(np.float32)
-    short = seeding.find_map(bowl, u, n_iter=5)
-    before = short.log_prob_best
-    res, gain = seeding.polish_map(bowl, short, n_starts=16, n_iter=400)
-    assert gain > 0 and res.log_prob_best == pytest.approx(before + gain)
-    assert res.log_prob_best > -1e-3
-    best = res.u_best.copy()
-    res, gain = seeding.polish_map(bowl, res, n_starts=16, scale=1.0,
-                                   n_iter=3)
-    assert gain == 0.0 and np.array_equal(res.u_best, best)
-
-
 @pytest.mark.slow
 def test_lineph_injection_recovery_oblate_collapsed():
     """f = 0.1, theta = 30 deg, b = 0.7 (the brief's injection), collapsed
@@ -453,16 +438,15 @@ def test_lineph_injection_recovery_oblate_collapsed():
     rng = np.random.default_rng(0)
     v0 = seeding.initial_model_vector(lay, eph)
     starts = T.from_model_np(v0)[None, :] + 0.25 * rng.standard_normal(
-        (seeding.N_STARTS_OBLATE, lay.dim))
-    map_res = seeding.find_map(tr, starts.astype(np.float32),
-                               n_iter=seeding.N_ITER_OBLATE)
-    map_res, _ = seeding.polish_map(tr, map_res, seed=2)
-    u_c = seeding.floor_oblateness(map_res.u_best, T, lay)
+        (128, lay.dim))
+    map_res = seeding.find_map(tr, starts)
+    u_c = seeding.floor_oblateness(map_res.u, T, lay)
     frozen = LH.freeze_layout(lo, T.model_np(u_c[None, :])[0])
     tr, T, lo, _ = likelihood.build_target(
         lay, cen, ed, orders, num_resample=1, exposure_time=0.0,
         n_chains_hint=128, ghk_layout=frozen, ghk_points=lo.ghk_points)
-    u0, _ = seeding.laplace_starts(tr, u_c, 128, seed=1)
+    u0, _ = seeding.chain_starts(dataclasses.replace(map_res, u=u_c), 128,
+                                 seed=1)
     cfg = sampling.SamplerConfig(n_chains=128, n_warmup=300, n_samples=300,
                                  max_samples=1200).for_mode(lay.dim)
     res, verdict, _ = sampling.run_rounds(tr, list(lay.names), u0, cfg,

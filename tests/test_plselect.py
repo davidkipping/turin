@@ -51,9 +51,9 @@ def make_target(k_true=0.032, order=2, n_periods=30, seed=1):
     m = seeding.find_map(
         target,
         (u0[None, :] + 0.1 * np.random.default_rng(0).standard_normal(
-            (64, layout.dim))).astype(np.float32), n_iter=200)
+            (64, layout.dim))))
     return dict(layout=layout, centering=cen, epoch_data=ed, orders=orders,
-                build_kwargs=kw, transform=transform, u_map=m.u_best)
+                build_kwargs=kw, transform=transform, u_map=m.u)
 
 
 def probe(fixture, **over):

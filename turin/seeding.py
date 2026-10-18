@@ -1,11 +1,10 @@
-"""Initialization: per-epoch timing seeds and a batched MAP optimizer.
+"""Initialization: per-epoch timing seeds and the MAP chains start from.
 
-anvil supplies no optimizer and no mode finder, and its guidance is explicit
-that chains must start in a tight ball (~1e-3 in unconstrained units) around
-a preliminary fit: a wide start on a likelihood with flat plateaus -- a
-proposed transit that misses the data entirely -- strands chains at zero
-gradient and collapses the shared step size for everyone. So turin brings its
-own initialization, and this module is it.
+anvil's guidance is explicit that chains must start in a tight ball (~1e-3
+in unconstrained units) around a preliminary fit: a wide start on a
+likelihood with flat plateaus -- a proposed transit that misses the data
+entirely -- strands chains at zero gradient and collapses the shared step
+size for everyone. This module finds that fit.
 
 Two pieces:
 
@@ -21,15 +20,16 @@ Two pieces:
     rival gap so the caller can warn about shape-sensitive seeds.
 
 :func:`find_map`
-    A batched multi-start gradient ascent on the log-density itself, run on
-    the GPU across all starts at once, since "many chains" is exactly the
-    shape this hardware likes. Its spread across starts doubles as an early
-    multimodality warning.
+    The fit's best point, by ``anvil.optimize`` (anvil >= 0.9): many starts
+    at once, L-BFGS then damped Newton, with the Laplace covariance that
+    :meth:`anvil.OptimizeResult.laplace_starts` spreads curved posteriors'
+    chains over. turin keeps only the choices: which density, and the
+    start-up for oblate fits (:func:`floor_oblateness`, :func:`chain_starts`).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import dataclasses
 
 import mlx.core as mx
 import numpy as np
@@ -173,52 +173,46 @@ def _supersample(exposure_time, num_resample):
     return supersample_offsets(exposure_time, num_resample)
 
 
-@dataclass
-class MapResult:
-    """Outcome of the multi-start MAP search, in unconstrained space."""
-
-    u_best: np.ndarray        # (dim,) the best start's final position
-    log_prob_best: float
-    u_all: np.ndarray         # (n_starts, dim) every start's final position
-    log_prob_all: np.ndarray  # (n_starts,)
-    n_iter: int
-    #: spread of the top decile's log-density; large means the starts did not
-    #: agree, i.e. the posterior probably has more than one basin
-    top_spread: float
-
-    @property
-    def multimodal_warning(self) -> bool:
-        return self.top_spread > 10.0
-
-    def ball(self, n_chains, spread=1e-3, seed=0):
-        """An initialization ball around the MAP, anvil's recommended start."""
-        rng = np.random.default_rng(seed)
-        u = (self.u_best[None, :]
-             + spread * rng.standard_normal((n_chains, self.u_best.size)))
-        return mx.array(u.astype(np.float32))
+#: Largest batch ``anvil.optimize`` sends the target in one call. Its Newton
+#: step evaluates ``2 dim`` gradient rows per start, so its natural batch is
+#: far larger than any turin sends while sampling; this keeps a collapsed
+#: hybrid4 target (~3 MB per row) to the memory of a 512-chain evaluation.
+MAX_ROWS = 512
 
 
-#: MAP iterations for an oblate fit (round fits keep ``find_map``'s 400, so
-#: their starts stay bitwise). The (fc, fs) valley is long and curved: on
-#: the 30 ppm injection of ``tests/test_oblate.py`` with hybrid4 on the
-#: curvature basis (0.1.67), 400 iterations stopped 6,400 nats below the
-#: truth (collapsed; 1,970 sampled) in the wrong basin (f ~ 0.15-0.5), and
-#: the chains were still climbing at the draw cap. 1,500 stops 78-152 short
-#: (collapsed, two seeds; 5-7 sampled), which warmup absorbs; 28 s against
-#: 7 s at 128 starts. A smaller step (0.01) or a step decayed to 1e-4 was
-#: worse at either length; from the truth, Adam stays within 6 nats of it.
-N_ITER_OBLATE = 1500
-#: MAP starts for an oblate fit, and the polishing stage after it: 128
-#: starts at 0.05 unconstrained sd around the best, the same iterations.
-#: On SquishierPlanet's PHOENIX truth (K dwarf, f = 0.1, theta = 30 deg,
-#: b = 0.7; 3 transits, 10 ppm-equivalent), four seeds, gap below the
-#: truth's log-density, collapsed: 128 starts -1.0e1 to -1.6e3 (two of four
-#: in a wrong basin); 512 starts -1 to -12; 128 + polish -1 to -14; 512 +
-#: polish chosen. Sampled mode, where the polish matters most: 512 starts
-#: ended 484-496, + polish 531-535 (4 seeds within 4 nats). Starts spread
-#: uniformly over the (fc, fs) disc did worse (-2 to -139).
-N_STARTS_OBLATE = 512
-POLISH_STARTS, POLISH_SCALE = 128, 0.05
+def find_map(target, u_starts, *, seed=0, max_rows=MAX_ROWS):
+    """The fit's best point from ``u_starts`` ((n, dim), unconstrained), by
+    ``anvil.optimize``; returns its ``OptimizeResult``.
+
+    ``objective="density"``: the sampler's own log-density in u, Jacobian
+    included -- the point the chains are started around, which the Jacobian
+    keeps off the box edges where ChEES can freeze a chain. turin's priors
+    (b-k, TTV, oblateness, rho*) sit in its ``model_log_prob``, not on the
+    ParamSpecs, so anvil's ``"mle"`` and ``"map"`` would both include them.
+    """
+    import anvil
+
+    return anvil.optimize(target, np.asarray(u_starts, dtype=np.float64),
+                          objective="density", seed=seed, max_rows=max_rows)
+
+
+def top_spread(res):
+    """Spread of the top decile of the starts' final values, in log-units.
+    Large means the best starts ended in different basins: an early
+    multimodality warning. anvil's ``optima`` is not used for this: it calls
+    starts 0.05 apart in u distinct, so a wide posterior's one optimum shows
+    up as several (KOI-518.02 LinEph: 7 within 0.007 nats, along beta and q
+    whose sd in u is 0.8-1.2)."""
+    v = np.sort(res.values[np.isfinite(res.values)])
+    if not v.size:
+        return float("inf")
+    top = v[-max(1, v.size // 10):]
+    return float(top.max() - top.min())
+
+
+#: ``top_spread`` above which the log warns of more than one basin.
+TOP_SPREAD_WARN = 10.0
+
 
 #: Smallest flattening the chains of an oblate fit are centred on. elome's
 #: float32 kernel takes the spherical forms below f = 1e-5, where d/df = 0,
@@ -244,133 +238,33 @@ def floor_oblateness(u, transform, layout, f_floor=F_FLOOR):
     return np.array(transform.from_model_np(v), dtype=np.float64)
 
 
-def laplace_starts(target, u_map, n_chains, *, seed=0, scale=0.5,
-                   sigma_cap=0.5, pull_nats=25.0, rounds=12):
-    """Chain starts spread over the Laplace approximation at ``u_map``.
+def chain_starts(res, n_chains, *, seed=0, sigma_cap=0.5):
+    """Starts for an oblate fit: ``res.laplace_starts`` (SquishierPlanet's
+    ChEES froze every chain started in a small ball around an oblate MAP).
 
-    SquishierPlanet's ChEES froze every chain started in a small ball around
-    an oblate MAP; this follows its ``elome_run.laplace_start``. The Hessian
-    of the float32 log-density is central-differenced from batched gradients
-    (one call of ``2 dim`` rows), twice: along the axes, then along the first
-    pass's eigenvectors at 0.3 sigma. Starts are ``u_map + scale * N(0,
-    H^-1)``, each sigma capped at ``sigma_cap`` unconstrained units (a flat
-    or wrong-signed direction would otherwise fling chains to the box
-    edges), and any start more than ``pull_nats`` below the MAP is pulled
-    halfway back, up to ``rounds`` times.
-
-    Returns ``(u0 (n_chains, dim) float32 mx.array, info dict)``.
+    anvil gives no covariance unless the Hessian is negative definite, and a
+    round planet's is not: its optimum sits at f ~ 0, where elome's float32
+    d/df is 0 (f < 1e-5) and f = fc^2 + fs^2 is stationary. turin's recipe
+    (SquishierPlanet's ``laplace_start``) floors the curvature instead, so
+    such a direction is treated as flat and capped at ``sigma_cap``; that
+    floor is applied here before anvil draws. A 1e-3 ball is the fallback
+    when the Hessian is not finite. Returns ``(u0, n_flat)``, ``n_flat``
+    the directions floored, or None for the ball.
     """
-    u_map = np.asarray(u_map, dtype=np.float64)
-    dim = u_map.size
-    grad = mx.grad(lambda u: mx.sum(target.log_prob(u)))
-
-    def hessian(basis, steps):
-        rows = np.concatenate([u_map + steps[:, None] * basis.T,
-                               u_map - steps[:, None] * basis.T])
-        g = np.array(grad(mx.array(rows, dtype=mx.float32)), dtype=np.float64)
-        dg = (g[:dim] - g[dim:]) / (2.0 * steps[:, None])    # rows: d g / d b_j
-        Hb = dg @ basis                                       # basis-coords
-        Hb = 0.5 * (Hb + Hb.T)
-        return basis @ Hb @ basis.T
-
-    eye = np.eye(dim)
-    H = hessian(eye, np.full(dim, 1e-3))
-    ok = np.all(np.isfinite(H))
-    if ok:
-        lam, P = np.linalg.eigh(-H)
-        sig = 1.0 / np.sqrt(np.maximum(lam, 1.0 / sigma_cap**2))
-        H2 = hessian(P, 0.3 * sig)
-        ok = np.all(np.isfinite(H2))
-        if ok:
-            H = H2
-    info = {"fallback": not ok}
-    if not ok:
-        u0 = u_map[None, :] + 1e-3 * np.random.default_rng(seed).standard_normal(
-            (n_chains, dim))
-        return mx.array(u0.astype(np.float32)), info
-    lam, P = np.linalg.eigh(-H)
-    info["n_flat"] = int(np.sum(lam <= 1.0 / sigma_cap**2))
-    sig = 1.0 / np.sqrt(np.maximum(lam, 1.0 / sigma_cap**2))
-    rng = np.random.default_rng(seed)
-    u = u_map + scale * (rng.standard_normal((n_chains, dim)) * sig) @ P.T
-    lp_map = float(np.array(target.log_prob(
-        mx.array(u_map[None, :], dtype=mx.float32)))[0])
-    pulled = 0
-    for _ in range(rounds):
-        lp = np.array(target.log_prob(mx.array(u, dtype=mx.float32)),
-                      dtype=np.float64)
-        bad = ~(lp > lp_map - pull_nats)
-        if not bad.any():
-            break
-        pulled += int(bad.sum())
-        u[bad] = u_map + 0.5 * (u[bad] - u_map)
-    info.update(pulled=pulled, sigma=sig)
-    return mx.array(u.astype(np.float32)), info
-
-
-def find_map(target, u_starts, *, n_iter=400, lr=0.05, clip=10.0):
-    """Batched gradient ascent on ``target.log_prob``, all starts at once.
-
-    Plain Adam in unconstrained space. The starts are the batch dimension, so
-    this costs about as much as ``n_iter`` sampler iterations no matter how
-    many starts there are -- which is why using a few hundred is free and
-    worth it as a multimodality probe.
-
-    ``clip`` bounds the per-component step in unconstrained units, which keeps
-    a start that lands on a plateau (or on anvil's saturating bounded-parameter
-    edge) from being flung somewhere unrecoverable.
-    """
-    u = mx.array(u_starts, dtype=mx.float32)
-    m = mx.zeros_like(u)
-    v = mx.zeros_like(u)
-    b1, b2, eps = 0.9, 0.999, 1e-8
-
-    def neg(uu):
-        return -mx.sum(target.log_prob(uu))
-
-    grad_fn = mx.compile(mx.grad(neg))
-    for t in range(1, n_iter + 1):
-        g = grad_fn(u)
-        g = mx.where(mx.isfinite(g), g, mx.zeros_like(g))
-        m = b1 * m + (1 - b1) * g
-        v = b2 * v + (1 - b2) * g * g
-        mhat = m / (1 - b1**t)
-        vhat = v / (1 - b2**t)
-        step = lr * mhat / (mx.sqrt(vhat) + eps)
-        u = u - mx.clip(step, -clip, clip)
-        mx.eval(u, m, v)
-
-    lp = np.array(target.log_prob(u), dtype=np.float64)
-    lp = np.where(np.isfinite(lp), lp, -np.inf)
-    u_np = np.array(u, dtype=np.float64)
-    best = int(np.argmax(lp))
-
-    finite = lp[np.isfinite(lp)]
-    if finite.size:
-        top = np.sort(finite)[-max(1, finite.size // 10):]
-        spread = float(top.max() - top.min())
-    else:
-        spread = float("inf")
-
-    return MapResult(u_best=u_np[best], log_prob_best=float(lp[best]),
-                     u_all=u_np, log_prob_all=lp, n_iter=n_iter,
-                     top_spread=spread)
-
-
-def polish_map(target, map_res, *, n_starts=POLISH_STARTS,
-               scale=POLISH_SCALE, n_iter=N_ITER_OBLATE, seed=0):
-    """A second ``find_map`` from ``n_starts`` points ``scale`` (unconstrained
-    sd) around ``map_res.u_best``; keeps the better optimum. The first
-    stage's spread (``top_spread``, the multimodality warning) is kept.
-    Returns ``(map_res, gain)``, gain in log-density units (>= 0)."""
-    rng = np.random.default_rng(seed)
-    u = map_res.u_best[None, :] + scale * rng.standard_normal(
-        (n_starts, map_res.u_best.size))
-    r = find_map(target, u.astype(np.float32), n_iter=n_iter)
-    gain = r.log_prob_best - map_res.log_prob_best
-    if gain > 0:
-        map_res.u_best, map_res.log_prob_best = r.u_best, r.log_prob_best
-    return map_res, max(gain, 0.0)
+    n_flat = 0
+    if res.cov_u is None and res.hessian_u is not None:
+        free = ~res.at_bound
+        A = -res.hessian_u[np.ix_(free, free)]
+        if np.all(np.isfinite(A)):
+            lam, P = np.linalg.eigh(0.5 * (A + A.T))
+            n_flat = int(np.sum(lam < 1.0 / sigma_cap**2))
+            lam = np.maximum(lam, 1.0 / sigma_cap**2)
+            cov = np.full_like(res.hessian_u, np.nan)
+            cov[np.ix_(free, free)] = (P / lam) @ P.T
+            res = dataclasses.replace(res, cov_u=cov)
+    if res.cov_u is None:
+        return res.ball(n_chains, seed=seed), None
+    return res.laplace_starts(n_chains, sigma_cap=sigma_cap, seed=seed), n_flat
 
 
 def default_shape_start(eph, layout):

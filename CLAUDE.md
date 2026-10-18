@@ -118,8 +118,9 @@ log-probabilities. Earlier floors: 0.3.0 for `diagnose`'s rank-corruption
 fix; 0.4.0's fix for a target mutated between `run` calls never applied
 (turin's target is static -- grid-Gibbs moves positions); any turin change
 that does mutate the target between segments relies on it and is covered
-by 0.7.1 already. **turin must always run against the packages as
-currently published on GitHub.** When turin starts relying on a new
+by 0.7.1 already. **`MIN_ANVIL` is 0.9.0 since turin 0.1.71**, for
+`anvil.optimize` (see "The MAP search" below). **turin must always run
+against the packages as currently published on GitHub.** When turin starts relying on a new
 upstream feature, raise `MIN_ANVIL` in the same change; do not add
 detection plus a fallback.
 
@@ -146,7 +147,7 @@ turin/
   profile.py      batched per-epoch Legendre profile solve (exact | ratio)
   likelihood.py   epoch-block-chunked Gaussian logL, priors, anvil Transform/target
   params.py       LinEph/TTV parameter specs, b-k prior modes, derived quantities
-  seeding.py      template-sweep tau seeds, batched multi-start MAP
+  seeding.py      template-sweep tau seeds; MAP and chain starts via anvil.optimize
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
@@ -399,32 +400,19 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   Memory: no change (collapsed peak is the GHK workspace, 1.54 vs 1.56 GB
   round vs oblate); cost 224 ms collapsed vs 164 ms sampled oblate vs 81 ms
   collapsed round (512 chains, 860 points, value+grad).
-- **Start.** The MAP's 128 starts already spread `(fc, fs)` by ~±0.1 (the
-  brief's three-way nudge needs no code). `seeding.floor_oblateness` moves
-  the chains' centre to `f >= 1e-4` (elome's fp32 d/df is 0 below 1e-5, and
-  f = fc² + fs² is stationary at the origin), and `seeding.laplace_starts`
-  spreads chains over a finite-difference Laplace approximation (sigmas
-  capped at 0.5 unconstrained units, far starts pulled back). Oblate only,
-  so round starts stay bitwise. Known weakness, measured: on a very sharp
-  posterior (30 ppm, 1-min cadence) `find_map` stops ~130 log-units short of
-  the peak, and at 10 ppm ~9,000, where warmup was then spent descending.
-  On the curvature basis (0.1.67) the same 30 ppm injection's 400-iteration
-  search stopped **6,400** short in the wrong basin (f ~ 0.15-0.5), and the
-  injection test failed unconverged (R-hat 7.5; 0.1.66 on elome 0.17.1 too,
-  R-hat 31; it passes on elome 0.16.4, so the law's new truth made the
-  valley harder, not a model fault). Oblate fits now take
-  `seeding.N_ITER_OBLATE` = 1,500 iterations: 78-152 short collapsed, 5-7
-  sampled. A smaller or decayed Adam step was worse; from the truth, Adam
-  holds it to 6 nats. Real targets at that SNR may still need more.
-  **Starts and a polish (0.1.68).** Even at 1,500 iterations, 128 starts
-  left 2 of 4 seeds in a wrong basin (10 to 1,650 nats below the truth) on
-  SquishierPlanet's PHOENIX K-dwarf truth (f = 0.1, theta = 30 deg,
-  b = 0.7; 3 transits, 10 ppm-equivalent, collapsed). Oblate fits now take
-  `seeding.N_STARTS_OBLATE` = 512 starts, then `polish_map`: 128 starts at
-  0.05 unconstrained sd around the best, keeping the better. Four seeds:
-  1-14 nats below the truth collapsed; sampled 531-535 against 484-496
-  without the polish. 70-80 s more search. Starts spread over the (fc, fs)
-  disc were worse.
+- **Start.** The MAP's 128 starts spread `(fc, fs)` by ~±0.1 (the brief's
+  three-way nudge needs no code). `seeding.floor_oblateness` moves the
+  chains' centre to `f >= 1e-4` (elome's fp32 d/df is 0 below 1e-5, and
+  f = fc² + fs² is stationary at the origin), and `seeding.chain_starts`
+  spreads chains over anvil's Laplace approximation (sigmas capped at 0.5
+  unconstrained units, far starts pulled back). Oblate only, so round
+  starts are a 1e-3 ball. Since 0.1.71 the MAP is `anvil.optimize` (see
+  "The MAP search"); 0.1.65-0.1.70's Adam needed 1,500 iterations
+  (`N_ITER_OBLATE`), 512 starts (`N_STARTS_OBLATE`) and a polishing stage
+  (`polish_map`) and still ended 1-14 nats below the PHOENIX truth
+  (collapsed; sampled 531-535), all three removed. anvil from 128 starts
+  reaches the truth's value on all four seeds (collapsed, 36 s; sampled
+  540.0 every seed, 7 s).
 - **`--PL=auto`** resolves to exact without probing under `--oblate`.
 - **Products.** `fc, fs` sampled (R-hat, ESS); `f`, `theta` (degrees),
   semi-axes `A, B` derived, after `w1..w4` and before `loglike`; a log line
@@ -665,6 +653,16 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
+**Checked against elome 0.18.2** (`c5db3eb`), turin 0.1.71. 0.18.0 added
+ringed planets (`flux_dev_ring`, loaded lazily; turin does not use them);
+0.18.1 and 0.18.2 skip zero-weight quadrature nodes in the oblate and
+spherical contact-rule kernels (~3x faster, stated bitwise). Measured: the
+16 spherical quantities on KOI-518.02 (quadratic LinEph sampled, collapsed
+and TTV with per-epoch terms; hybrid4 sampled and collapsed; value,
+gradient, float64) are **bitwise** turin 0.1.67 on elome 0.17.1. Oblate was
+not dumped; its references in `tests/test_oblate.py` pass. Full suite: 408
+passed (0.1.71).
+
 **Checked against elome 0.17.1** (`59fff57`), turin 0.1.67. 0.16.3 seeds the
 oblate kernels' quartics by Ferrari's closed form (oblate float32 1.2-1.6x
 faster, not bitwise; spherical and float64 bitwise); 0.16.4 fixes NaN
@@ -893,6 +891,50 @@ with synthetic cap-sized draws (16,400 x 512 chains) and time
 `assess` + `_export_all` + `certify` in a subprocess, reading peak RSS and
 `mx.get_peak_memory()`. On KOI-5616.01's layout that measured peak RSS
 8.76 -> 2.84 GB, MLX 10.5 -> 1.3 GB, and 306 -> 41 s per round.
+
+### The MAP search (`seeding.find_map`, anvil.optimize, 0.1.71)
+
+Every fresh fit starts its chains from `anvil.optimize` on 128 starts (a
+0.25 sd ball in u around the input ephemeris, the template-sweep times for
+TTV): L-BFGS then damped Newton (`method="mixed"`), batches capped at
+`seeding.MAX_ROWS` = 512 rows (its Newton step sends `2 dim` gradient rows
+per start; a collapsed hybrid4 row is ~3 MB). It replaced turin's own
+fixed-step Adam (400 iterations; 1,500 and 512 starts plus a polish for
+oblate), which anvil's own benchmark shows ending every start short.
+
+- **`objective="density"`**: the sampler's log-density in u, Jacobian
+  included, as Adam maximised. The Jacobian keeps the point off the box
+  edges where ChEES can freeze a chain. turin's priors (b-k, TTV, oblate,
+  rho*) live inside `model_log_prob`, not on ParamSpecs, so anvil's `"mle"`
+  and `"map"` would both include them; a true maximum-likelihood fit needs
+  them separated first.
+- Measured against Adam on the user's suite plus KOI-518.02 (128 starts,
+  pipeline starts, gap in fp64 log-density to the best of the three
+  methods): **LinEph, mixed matches Adam on all six (0.000) in 0.3-0.8 s
+  against 0.8-1.3 s**; L-BFGS alone 0.000-0.08 short. **TTV: mixed lands
+  0.35-3.2 nats below Adam on three of six** (KOI-518.02 dim 36, 0.40;
+  1430.03 dim 22, 0.35; 2650.01 dim 47, 3.15, where L-BFGS found the best
+  and Adam was 0.94 below): a different local timing optimum, not a
+  gradient fault (fp32 and fp64 agree at both points to 5e-4; on 1430.03
+  epoch 4's time differs by 0.7 in u, and Adam's point is not even
+  stationary, |g| 0.21). Harmless for starting chains -- the typical set
+  lies ~dim/2 nats below the peak, and grid-Gibbs resamples each epoch's
+  time -- but it means a user-facing ML fit of TTV would need more than
+  this. Cost 0.9-3.3 s per TTV search.
+- **anvil's `laplace_starts` refuses a Hessian that is not negative
+  definite**, and an oblate fit of a round planet always has one (its
+  optimum sits in the f ~ 0 dead zone). turin's recipe, which anvil's
+  ported, floored such directions at the 0.5 cap instead;
+  `seeding.chain_starts` applies that floor to anvil's `hessian_u` before
+  anvil draws. A test pins it (`test_chain_starts_are_spread_and_finite`).
+- **anvil's `optima` is not a multimodality signal here**: it calls starts
+  0.05 apart in u distinct, so one optimum on a wide posterior is listed
+  several times (KOI-518.02 LinEph: 7 "optima" within 0.007 nats, spread
+  along beta, q1, q2, whose sd in u is 0.8-1.2). The log's warning keeps
+  turin's rule, the top decile of the starts' values disagreeing by more
+  than 10 (`seeding.top_spread`).
+- Both anvil points above are findings, not briefs; whether either goes
+  upstream is the user's call.
 
 ### Known upstream hazards
 

@@ -421,12 +421,10 @@ repeated:
 `--rhostar` works for any fit, oblate or not, and a lineage keeps whatever
 prior it started with.
 
-**How the fit is started.** Oblate posteriors are narrow and can have
-several basins, and a plain multi-start search found the wrong one on 2 of
-4 seeds. The MAP search uses 512 starts, then a second search from 128
-points around the best, about a minute more than a round fit. Chains start
-spread over a Laplace approximation at the MAP, never exactly at f = 0,
-where `f` has no gradient.
+**How the fit is started.** As for every fit, the best point comes from
+anvil's optimiser (`anvil.optimize`) on 128 starts. Chains start spread over
+a Laplace approximation at that point, never exactly at f = 0, where `f`
+has no gradient.
 
 **Limits:**
 

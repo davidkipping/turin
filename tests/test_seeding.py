@@ -222,18 +222,38 @@ def test_find_map_recovers_injected_parameters():
     rng = np.random.default_rng(1)
     u0 = (transform.from_model_np(v0)[None, :]
           + 0.3 * rng.standard_normal((128, layout.dim)))
-    res = seeding.find_map(target, u0.astype(np.float32), n_iter=300)
+    res = seeding.find_map(target, u0)
 
-    assert np.isfinite(res.log_prob_best)
-    v = transform.model_np(res.u_best[None, :])[0]
+    assert np.isfinite(res.value)
+    v = transform.model_np(res.u[None, :])[0]
     truth = dict(k=K_T, beta=B_T / (1 + K_T), T14=T14_T)
     for name, want in truth.items():
         got = v[layout.index(name)]
         assert abs(got - want) < 0.25 * abs(want) + 0.02, (
             f"{name}: MAP {got} vs truth {want}")
-    # the MAP must beat every start it came from
-    assert res.log_prob_best >= np.max(res.log_prob_all) - 1e-6
+    # the best start is the one reported, and the target's own density there
+    assert res.value >= np.max(res.values[np.isfinite(res.values)]) - 1e-3
+    lp_best = float(np.array(target.log_prob(
+        mx.array(res.u[None, :], dtype=mx.float32)))[0])
+    assert lp_best == pytest.approx(res.value, abs=0.05)
     assert res.ball(16).shape == (16, layout.dim)
+
+
+def test_top_spread_reads_the_best_decile_of_the_starts():
+    """The multimodality warning: the best tenth of the starts' final values
+    disagree. Starts that failed (non-finite) are ignored, and starts spread
+    along one flat optimum (anvil's ``optima`` would list them apart) do not
+    trigger it."""
+    from types import SimpleNamespace
+
+    one = SimpleNamespace(values=np.r_[np.full(30, -5.0) + 1e-3 * np.arange(30),
+                                       np.full(70, -900.0), np.nan, -np.inf])
+    assert seeding.top_spread(one) < 0.1 < seeding.TOP_SPREAD_WARN
+    # 20 starts, so the top decile is the best two, in different basins
+    two = SimpleNamespace(values=np.r_[-5.0, -40.0, np.full(18, -41.0)])
+    assert seeding.top_spread(two) == pytest.approx(35.0)
+    assert seeding.top_spread(SimpleNamespace(values=np.array([np.nan]))) \
+        == float("inf")
 
 
 def test_default_shape_start_avoids_the_grazing_boundary():

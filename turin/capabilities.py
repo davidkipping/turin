@@ -27,9 +27,10 @@ from dataclasses import dataclass
 
 #: The oldest anvil turin runs against.
 #:
-#: 0.7.1, because turin reads ``results.extras["lost_chains"]`` -- anvil's
-#: end-of-run judgement of chains that are lost rather than exploring, made
-#: on an eager re-evaluation of the target as well as the kernel's record
+#: 0.7.1 from turin 0.1.60, because turin reads
+#: ``results.extras["lost_chains"]`` -- anvil's end-of-run judgement of
+#: chains that are lost rather than exploring, made on an eager
+#: re-evaluation of the target as well as the kernel's record
 #: (0.6.0-0.6.1), which can disagree at a float32 feasibility edge -- and
 #: folds it into its own trapped-chain report (``sampling.chain_health``).
 #: Two further fixes come with it: since 0.7.0 a chain at a non-finite or
@@ -40,7 +41,9 @@ from dataclasses import dataclass
 #: and 2^21 rows; 0.4.0 fixed a silent bug for a target mutated between
 #: ``run`` calls, which turin's static target never hit (grid-Gibbs moves
 #: *positions* through ``ResumeState.with_positions``).
-MIN_ANVIL = (0, 7, 1)
+#: 0.9.0 since turin 0.1.71: ``anvil.optimize`` finds the fit's best point
+#: and the Laplace starts (``seeding.find_map``), replacing turin's own Adam.
+MIN_ANVIL = (0, 9, 0)
 
 UPGRADE_HINT = ('pip install -U "anvil-mcmc @ '
                 'git+https://github.com/davidkipping/anvil.git"')

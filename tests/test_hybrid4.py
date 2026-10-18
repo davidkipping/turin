@@ -402,7 +402,7 @@ def test_lineph_injection_recovery_with_hybrid4():
     rng = np.random.default_rng(0)
     u_starts = (transform.from_model_np(v0)[None, :]
                 + 0.25 * rng.standard_normal((128, layout.dim)))
-    map_res = seeding.find_map(target, u_starts.astype(np.float32), n_iter=400)
+    map_res = seeding.find_map(target, u_starts)
     cfg = sampling.SamplerConfig(n_chains=256, n_warmup=400, n_samples=300,
                                  max_samples=1200, seed=3).for_mode(layout.dim)
     u0 = map_res.ball(cfg.n_chains, seed=1)

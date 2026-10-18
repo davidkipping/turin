@@ -9,6 +9,7 @@ hurin's behaviour, and the reason its resume state exists.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import time
@@ -592,32 +593,23 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         log(f"  restarting from the previous {u0.shape[0]} final positions")
     else:
         rng = np.random.default_rng(args.seed)
-        n_starts = _seeding.N_STARTS_OBLATE if layout.oblate else 128
-        log(f"  finding the MAP from {n_starts} starts...")
+        log("  finding the MAP from 128 starts (anvil.optimize)...")
         u_starts = (transform.from_model_np(v0)[None, :]
-                    + 0.25 * rng.standard_normal((n_starts, layout.dim)))
-        t0 = time.perf_counter()
-        map_res = _seeding.find_map(
-            target_obj, u_starts.astype(np.float32),
-            **({"n_iter": _seeding.N_ITER_OBLATE} if layout.oblate else {}))
-        log(f"    MAP log-density {map_res.log_prob_best:.3f} "
-            f"in {time.perf_counter() - t0:.1f}s")
-        if layout.oblate:
-            t0 = time.perf_counter()
-            map_res, gain = _seeding.polish_map(target_obj, map_res,
-                                                seed=args.seed + 2)
-            log(f"    polished from {_seeding.POLISH_STARTS} starts around "
-                f"it: {map_res.log_prob_best:.3f} (+{gain:.3f}) in "
-                f"{time.perf_counter() - t0:.1f}s")
-        if map_res.multimodal_warning:
-            log(f"    WARNING: the best starts disagree by "
-                f"{map_res.top_spread:.1f} log-units — the posterior probably "
-                "has more than one basin")
+                    + 0.25 * rng.standard_normal((128, layout.dim)))
+        map_res = _seeding.find_map(target_obj, u_starts, seed=args.seed)
+        n_conv = int(np.sum(map_res.status == "converged"))
+        log(f"    MAP log-density {map_res.value:.3f} in "
+            f"{map_res.wall_time:.1f}s ({n_conv}/{map_res.n_starts} starts "
+            "converged)")
+        spread = _seeding.top_spread(map_res)
+        if spread > _seeding.TOP_SPREAD_WARN:
+            log(f"    WARNING: the best starts disagree by {spread:.1f} "
+                "log-units — the posterior probably has more than one basin")
         if pl_choice is None:
             # Probe at the MAP: the ball is scaled to the posterior's own
             # width, so the modes are compared where sampling happens.
             pl_choice = _plselect.select_pl_mode(
-                layout, centering, epoch_data, orders, map_res.u_best,
+                layout, centering, epoch_data, orders, map_res.u,
                 transform, build_kwargs=build_kw, n_chains=cfg.n_chains,
                 seed=args.seed, log=log)
         u0 = map_res.ball(cfg.n_chains, seed=args.seed + 1)
@@ -625,19 +617,19 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             # chains centred off f = 0 (elome's fp32 d/df is 0 below 1e-5)
             # and spread over the Laplace approximation once the final
             # target exists, below
-            u_center = _seeding.floor_oblateness(map_res.u_best, transform,
+            u_center = _seeding.floor_oblateness(map_res.u, transform,
                                                  layout)
-            if not np.array_equal(u_center, map_res.u_best):
+            if not np.array_equal(u_center, map_res.u):
                 log(f"    MAP at f < {_seeding.F_FLOOR:g}: chains centred at "
                     f"f = {_seeding.F_FLOOR:g} instead")
-            map_res.u_best = u_center
+            map_res = dataclasses.replace(map_res, u=u_center)
             u0 = None
         if layout.ld == "collapsed" and layout.law == "hybrid4":
             # GHK's layout is frozen once per fit, at the MAP, and rebuilt
             # into the target; the init ball carries over (same parameters)
             from . import ldhybrid as _ldh
 
-            v_map = transform.model_np(np.asarray(map_res.u_best)[None, :])[0]
+            v_map = transform.model_np(np.asarray(map_res.u)[None, :])[0]
             frozen = _ldh.freeze_layout(hi if hi is not None else lp, v_map)
             build_kw.update(ghk_layout=frozen, ghk_points=lp.ghk_points)
             target_obj, transform, lp, hi = _likelihood.build_target(
@@ -658,13 +650,11 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             profile_mode=pl_choice.mode, ld_mode=layout.ld, **build_kw)
 
     if layout.oblate and u0 is None and resume_for_anvil is None:
-        u0, info = _seeding.laplace_starts(target_obj, map_res.u_best,
-                                           cfg.n_chains, seed=args.seed + 1)
+        u0, n_flat = _seeding.chain_starts(map_res, cfg.n_chains,
+                                           seed=args.seed + 1)
         log("    chains spread over the Laplace approximation at the MAP"
-            + (" (Hessian not usable: a 1e-3 ball instead)"
-               if info["fallback"] else
-               f" ({info['n_flat']} flat direction(s) capped; "
-               f"{info['pulled']} start(s) pulled back)"))
+            + (" (Hessian not usable: a 1e-3 ball instead)" if n_flat is None
+               else f" ({n_flat} flat direction(s) capped)"))
     if u0 is not None:
         _sampling.check_precision(target_obj, u0, log=log,
                                   strict=not args.no_strict_precision)

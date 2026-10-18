@@ -131,14 +131,13 @@ def test_round_loop_moves_chains_through_with_positions():
                                  max_samples=300, seed=3).for_mode(layout.dim)
     v0 = np.concatenate([shape, np.zeros(n_ep)])
     u_map = transform.from_model_np(v0[None, :])[0]
-    res = seeding.MapResult(u_best=u_map, log_prob_best=0.0,
-                            u_all=u_map[None, :], log_prob_all=np.zeros(1),
-                            n_iter=0, top_spread=0.0)
+    u_ball = mx.array((u_map + 1e-3 * np.random.default_rng(4).standard_normal(
+        (cfg.n_chains, u_map.size))).astype(np.float32))
     move = gibbs.GridGibbs(lp, transform, layout, T14=T14_T, n_grid=128,
                            segment=50, batch=4096, seed=5)
     lines = []
     results, verdict, total = sampling.run_rounds(
-        target, list(layout.names), res.ball(cfg.n_chains, seed=4), cfg,
+        target, list(layout.names), u_ball, cfg,
         log=lines.append, move=move)
     assert any("grid-Gibbs:" in l for l in lines)
     assert any("every 50" in l for l in lines)
