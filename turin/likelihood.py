@@ -118,7 +118,7 @@ class ProfiledTransitLogProb:
                  geometry="circular", noise=None,
                  n_chains_hint=512, dtype=mx.float32,
                  budget_bytes=DEFAULT_BLOCK_BUDGET_BYTES,
-                 bytes_per_point=BYTES_PER_POINT):
+                 bytes_per_point=BYTES_PER_POINT, prior=True):
         if profile_mode not in _profile.PROFILE_MODES:
             raise ValueError(f"unknown profile mode {profile_mode!r}")
         self.layout = layout
@@ -130,6 +130,8 @@ class ProfiledTransitLogProb:
         self.dim = layout.dim
         self.ld = layout.ld
         self.law = layout.law
+        #: False for the likelihood alone (``--mle``): see :meth:`log_prior`
+        self.prior = prior
 
         sub_offsets = _prep_offsets(exposure_time, num_resample)
         full_grid = _model.build_grid(centering, sub_offsets, dtype=dtype,
@@ -205,7 +207,16 @@ class ProfiledTransitLogProb:
     # -- the log-density --------------------------------------------------
 
     def log_prior(self, p):
-        """Prior terms beyond the bounding box, shape ``(n_chains,)``."""
+        """Prior terms beyond the bounding box, shape ``(n_chains,)``.
+
+        With ``prior=False`` (the likelihood alone, for ``--mle``) only the
+        domain masks remain: the oblate domain's -inf, which must stay
+        because :func:`oblate_fields` hands the kernel a stand-in point
+        outside it, where the likelihood is finite but meaningless."""
+        if not self.prior:
+            if self.layout.oblate:
+                return oblate_log_prior(p)
+            return mx.zeros(p["k"].shape[:1], dtype=p["k"].dtype)
         term = _params.bk_log_prior(p["beta"], p["k"], self.layout.b_prior)
         if self.mode == "ttv":
             term = term + _params.ttv_log_prior(p["dtau"], self.layout.P_ref)
@@ -323,7 +334,7 @@ def _prep_offsets(exposure_time, num_resample):
 
 
 def build_target(layout, centering, epoch_data, orders, *, fp64=True,
-                 ld_mode=None, **kw):
+                 ld_mode=None, likelihood_only=False, **kw):
     """Assemble the anvil target for one fit.
 
     Returns ``(target, transform, log_prob, log_prob_hi)``, where ``target``
@@ -342,6 +353,14 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
     float64 collapsed density.
     ``ld_mode``, if given, must agree with the layout -- it is a check, not a
     switch, because the two modes have different dimensions.
+
+    ``likelihood_only=True`` builds the likelihood alone, for ``--mle``:
+    priors off (``prior=False``; the oblate domain mask stays), the
+    absolute normalisation passed to anvil as ``model_log_norm`` (so
+    ``OptimizeResult.log_value`` is ln L), and a ``"collapsed"`` layout's
+    limb darkening **profiled** -- maximised at each theta,
+    :class:`turin.ldmarg.ProfileLDLogProb` /
+    :class:`turin.ldhybrid.ProfileHybridLogProb` -- instead of integrated.
     """
     import anvil
 
@@ -350,12 +369,21 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
         raise ValueError(f"ld_mode={ld_mode!r} but the layout was built with "
                          f"ld={layout.ld!r}")
     if ld == "collapsed" and layout.law == "hybrid4":
-        from .ldhybrid import MarginalHybridLogProb as cls
+        if likelihood_only:
+            from .ldhybrid import ProfileHybridLogProb as cls
+        else:
+            from .ldhybrid import MarginalHybridLogProb as cls
     elif ld == "collapsed":
-        from .ldmarg import MarginalLDLogProb as cls
+        if likelihood_only:
+            from .ldmarg import ProfileLDLogProb as cls
+        else:
+            from .ldmarg import MarginalLDLogProb as cls
     else:
         cls = ProfiledTransitLogProb
-    if cls is not _ghk_class() and ("ghk_layout" in kw or "ghk_points" in kw):
+    if likelihood_only:
+        kw["prior"] = False
+    if not issubclass(cls, _ghk_class()) and ("ghk_layout" in kw
+                                              or "ghk_points" in kw):
         kw = {k: v for k, v in kw.items()
               if k not in ("ghk_layout", "ghk_points")}
 
@@ -369,7 +397,8 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
     transform = layout.transform()
     target = anvil.TransformedLogDensity(
         lo, transform,
-        model_log_prob_hi=(_Fp64Wrapper(hi) if hi is not None else None))
+        model_log_prob_hi=(_Fp64Wrapper(hi) if hi is not None else None),
+        **({"model_log_norm": lo.log_const} if likelihood_only else {}))
     return target, transform, lo, hi
 
 

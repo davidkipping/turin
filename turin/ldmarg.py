@@ -67,6 +67,13 @@ COLLAPSED_BYTES_PER_POINT = int(2.5 * BYTES_PER_POINT)
 #: in log-density over 2,000 posterior draws in float64; zero passes reached
 #: 5e-4, at the float32 floor, so it is not offered.
 N_NEWTON = 1
+#: Newton+projection passes for the **profiled** limb darkening of
+#: ``--mle`` (:class:`ProfileLDLogProb`), where ``x*`` must be the maximiser
+#: itself, not an expansion point: the value is ``L(x*)`` and its gradient
+#: the envelope theorem's. Against 30 passes (float64, 32 thetas around
+#: the optimum of KOI-518.02, 1361.01 and 2650.01): 1 pass errs by <= 6e-10
+#: nats, 2 by 1e-13, 4 to rounding, x* to 1e-15.
+N_PROFILE = 4
 #: Gauss-Legendre nodes, outer (per piece) and inner (per node), for the
 #: triangle integral. 12 x 12 reached 0.02 in the tails, 8 x 8 reached 0.25.
 N_GL_OUTER = 20
@@ -239,7 +246,7 @@ def _project_triangle(xh1, xh2, H):
     return mx.where(inside, xh1, best_x1), mx.where(inside, xh2, best_x2)
 
 
-def constrained_optimum(blocks, n_chains, dtype):
+def constrained_optimum(blocks, n_chains, dtype, n_newton=N_NEWTON):
     """The expansion point ``x*`` and the quadratic model there.
 
     Start at the centroid, take :data:`N_NEWTON` Newton steps each projected
@@ -254,15 +261,22 @@ def constrained_optimum(blocks, n_chains, dtype):
     within 4.6e-6 of max|grad| against float64 including edge-active ``x*``,
     per-evaluation MLX peak 0.489 -> 0.390 GB, about 11% faster.
     """
+    x1, x2 = profile_ld(blocks, n_chains, dtype, n_newton)
+    L, g, H = _sum_terms(blocks, x1, x2)
+    return x1, x2, L, g, H
+
+
+def profile_ld(blocks, n_chains, dtype, n_newton):
+    """``n_newton`` passes from the centroid -- the quadratic model's exact
+    optimum over the triangle, in its own metric (a sequential QP) -- and
+    the result detached. Returns ``(x1, x2)``."""
     x1 = mx.full((n_chains,), 1.0 / 3.0, dtype=dtype)
     x2 = mx.full((n_chains,), 1.0 / 3.0, dtype=dtype)
-    for _ in range(N_NEWTON):
+    for _ in range(n_newton):
         L, g, H = _sum_terms(blocks, x1, x2)
         step = _solve2(H, g)
         x1, x2 = _project_triangle(x1 + step[:, 0], x2 + step[:, 1], H)
-    x1, x2 = mx.stop_gradient(x1), mx.stop_gradient(x2)
-    L, g, H = _sum_terms(blocks, x1, x2)
-    return x1, x2, L, g, H
+    return mx.stop_gradient(x1), mx.stop_gradient(x2)
 
 
 # ------------------------------------------- Gaussian mass in the triangle
@@ -447,6 +461,33 @@ class MarginalLDLogProb(ProfiledTransitLogProb):
             q1, q2 = self.conditional_mode_ld(v)
             ld = (float(q1[0]), float(q2[0]))
         return super().full_model(v, ld=ld)
+
+
+class ProfileLDLogProb(MarginalLDLogProb):
+    """The likelihood with the quadratic limb darkening **profiled**:
+    ``max_x L(theta, x)`` over the Kipping triangle, for ``--mle``.
+
+    Exact for a maximum-likelihood fit, ``max_{theta,x} L = max_theta max_x
+    L``. (Not for sampling: there profiling drops the LD volume, the bias
+    in this module's docstring.) ``x*`` comes from :data:`N_PROFILE`
+    sequential-QP passes and is detached; the triangle does not depend on
+    theta, so the gradient of ``L(theta, x*)`` at fixed ``x*`` is the
+    profile's (envelope theorem). Build it with ``build_target(...,
+    likelihood_only=True)``, which also turns the priors off.
+    """
+
+    def __call__(self, v):
+        p = self.unpack(v)
+        blocks = self._vertex_blocks(p)
+        x1, x2 = profile_ld(blocks, v.shape[0], v.dtype, N_PROFILE)
+        return _sum_loglik(blocks, x1, x2) + self.log_prior(p)
+
+    def ld_terms(self, v):
+        """``(x1, x2, L, g, H)`` at the profile's maximiser ``x*``."""
+        blocks = self._vertex_blocks(self.unpack(v))
+        x1, x2 = profile_ld(blocks, v.shape[0], v.dtype, N_PROFILE)
+        L, g, H = _sum_terms(blocks, x1, x2)
+        return x1, x2, L, g, H
 
 
 # ------------------------------------------------ conditional draws (Gibbs)

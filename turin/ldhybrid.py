@@ -60,6 +60,12 @@ COLLAPSED_HYBRID_BYTES_PER_POINT = int(4.0 * BYTES_PER_POINT)
 #: Newton+projection passes before the final evaluation. 1, 2 and 3 agreed
 #: to < 1e-4 nats at every posterior draw on KOI-518.02 and KOI-448.02.
 N_NEWTON = 1
+#: Passes for the **profiled** limb darkening of ``--mle``
+#: (:class:`ProfileHybridLogProb`), where ``x*`` must be the maximiser.
+#: Against 30 passes (float64, 32 thetas around the optimum of KOI-518.02,
+#: 1361.01 and 2650.01; x* on a face for 94-100% of them): 1 pass errs by
+#: up to 8e-7 nats and 4e-3 in x, 4 by 6e-14 and 5e-9.
+N_PROFILE = 4
 #: GHK rule size and its default seed. A fit stores the points themselves.
 N_GHK = 1024
 GHK_SEED = 2024
@@ -218,7 +224,7 @@ def _sum_loglik(blocks, x):
     return L
 
 
-def expansion_point(blocks, n_chains, dtype):
+def expansion_point(blocks, n_chains, dtype, n_newton=N_NEWTON):
     """``x*`` and the quadratic model there: ``(x, L, g, R)``.
 
     :data:`N_NEWTON` passes: the quadratic model at the current point (the
@@ -231,15 +237,22 @@ def expansion_point(blocks, n_chains, dtype):
     on a well-measured synthetic transit: errors of nats to thousands of
     nats). A non-finite model (a degenerate block) keeps the centroid.
     """
+    x = profile_ld(blocks, n_chains, dtype, n_newton)
+    L, g, R = _sum_terms(blocks, x)
+    return x, L, g, R
+
+
+def profile_ld(blocks, n_chains, dtype, n_newton):
+    """``n_newton`` passes from the centroid -- the quadratic model's exact
+    optimum over the simplex in its own metric (a sequential QP) -- and the
+    result detached, ``(C, D)``."""
     x = mx.full((n_chains, D), 1.0 / G, dtype=dtype)
-    for _ in range(N_NEWTON):
+    for _ in range(n_newton):
         L, g, R = _sum_terms(blocks, x)
         b = mx.einsum("cij,cj->ci", R, x) + _sm.solve_upper_t(R, g)
         xn = _sm.qp_simplex_r(R, b)
         x = mx.where(mx.all(mx.isfinite(xn), axis=-1, keepdims=True), xn, x)
-    x = mx.stop_gradient(x)
-    L, g, R = _sum_terms(blocks, x)
-    return x, L, g, R
+    return mx.stop_gradient(x)
 
 
 # -------------------------------------------------------------- log-density
@@ -397,6 +410,28 @@ class MarginalHybridLogProb(ProfiledTransitLogProb):
                 raise ValueError("full_model without ld= takes one row")
             ld = tuple(float(a[0]) for a in self.conditional_mode_ld(v))
         return super().full_model(v, ld=ld)
+
+
+class ProfileHybridLogProb(MarginalHybridLogProb):
+    """The likelihood with the hybrid4 weights **profiled**: ``max_x L(theta,
+    x)`` over the 4-simplex, for ``--mle`` (round or oblate). As
+    :class:`turin.ldmarg.ProfileLDLogProb`: exact for a maximum, ``x*``
+    from :data:`N_PROFILE` sequential-QP passes and detached, the gradient
+    the envelope theorem's. Build it with ``build_target(...,
+    likelihood_only=True)``. The GHK rule it inherits is unused."""
+
+    def __call__(self, v):
+        p = self.unpack(v)
+        blocks = self._gen_blocks(p)
+        x = profile_ld(blocks, v.shape[0], v.dtype, N_PROFILE)
+        return _sum_loglik(blocks, x) + self.log_prior(p)
+
+    def ld_terms(self, v):
+        """``(x*, L, g, R)`` at the profile's maximiser."""
+        blocks = self._gen_blocks(self.unpack(v))
+        x = profile_ld(blocks, v.shape[0], self.dtype, N_PROFILE)
+        L, g, R = _sum_terms(blocks, x)
+        return x, L, g, R
 
 
 def freeze_layout(lp, v_row):
