@@ -675,6 +675,16 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
+**Checked against elome 0.18.5** (`9a93899`), turin 0.1.77. 0.18.3-0.18.5
+touch only ringed planets (`rings.py`, `rings_tau.py`: float64 speed and
+memory bounds) and a comment in `api.py`; turin does not use rings.
+Measured as an A/B on identical vectors, elome 0.18.2 (`git archive
+c5db3eb`, on `PYTHONPATH`) against 0.18.5, KOI-518.02, 64 vectors: **26
+quantities bitwise identical** and finite -- the 16 below plus oblate
+hybrid4 sampled and collapsed (float32 value and gradient, float64 value)
+and the `--mle` profiled targets, quadratic and hybrid4 (float32 and
+float64 value). The 0.1.76 acceptance ran on 0.18.4. Full suite: 438 passed.
+
 **Checked against elome 0.18.2** (`c5db3eb`), turin 0.1.71. 0.18.0 added
 ringed planets (`flux_dev_ring`, loaded lazily; turin does not use them);
 0.18.1 and 0.18.2 skip zero-weight quadrature nodes in the oblate and
