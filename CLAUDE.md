@@ -328,9 +328,9 @@ generators `{1, 1 - S_j}` (`ld_basis` columns) and `F*` come from elome
 (`hybrid_norms`), so collapsed hybrid4's value is **bitwise** what 0.1.66
 gave on elome 0.17.1, and sampled hybrid4's equals 0.1.66's at the
 re-expressed `q` to 8.5e-14 (KOI-518.02, fp64). Quadratic stays bitwise.
-Everything measured on hybrid4 before 0.1.67 -- KOI-448.02's grazing split
-below, the five-target collapsed acceptance -- was on the old simplex and
-has not been re-measured. Note that 0.1.61-0.1.66 run on elome >= 0.17
+The two hybrid4 measurements made before 0.1.67 on the old simplex --
+KOI-448.02's grazing split below and the five-target collapsed acceptance
+-- were re-measured on the curvature basis in 0.1.76. Note that 0.1.61-0.1.66 run on elome >= 0.17
 fitted the new simplex (stick-broken `q`, curvature-basis `w`); on elome
 < 0.17, the old one. The law lives on the layout (`ParamLayout.law`,
 `.ld_names`, `.n_shape` = 3 + number of LD coordinates), and everything
@@ -361,10 +361,18 @@ and chain columns, placed before `loglike`. Refused, CLI and pipeline:
 collapsed form below are **Steps 1 and 2 of SquishierPlanet's
 `docs/upstream/turin_oblate_prompt.md`**, for hybrid4 only, built on the
 user's request; Step 3 (oblate planets) is not done, and hybrid2/5 are not
-exposed. Low-SNR grazing caveat, measured on KOI-448.02: four free weights
-can fake a V shape, so sampled hybrid4 split between the quadratic law's
-grazing solution (k 0.16) and a small central planet with extreme limb
-darkening (k 0.027, q1 on its wall), unconverged at R-hat 1.26; on
+exposed. Low-SNR grazing, KOI-448.02 (default prior, `--PL=exact`): on the
+**old** simplex four free weights faked a V shape, and sampled hybrid4
+split between the quadratic law's grazing solution (k 0.16) and a small
+central planet with extreme limb darkening (k 0.027, b 0.27, q1 on its wall
+for 68% of draws), unconverged at R-hat 1.26 after three rounds. **On the
+curvature basis that second solution is gone** (0.1.76, one seed, elome
+0.18.5): converged in two rounds (R-hat 1.0055 on k, 687 s), no draw with
+k < 0.04 at b < 0.6 (min k 0.039), 99.8% grazing, k's 95% range
+0.055-0.88, q1 within 0.01 of a wall for 2% of draws. The curvature simplex
+admits only profiles that are monotonic and concave in mu^2, which is what
+excluded the V-faking ones. The MAP search still logs a top-decile spread of
+12.2 (a rival basin in the density), which the chains did not keep. On
 KOI-518.02 the laws cost the same. That target is atypical (the user's
 point): do not generalise from it.
 
@@ -556,9 +564,22 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   visit (0-2 chains). The collapsed density there matches the true marginal
   (+/-0.05 nats at 30 tail thetas), so the likely reading is that sampled
   mode under-explores it; this is not proven.
-  **Cost: 3.7-8.7x the wall time (median 4.4x), 0.23-0.53x the ESS/s**,
-  worst on small datasets (a fixed per-chain GHK cost, plus ~200 s of
-  post-hoc draws per export). It stays opt-in.
+  **Re-measured on the curvature basis (0.1.76; turin 0.1.74, elome
+  0.18.4): passes the same way.** Within 0.015 sd (median 0.004); two
+  shifts beyond 3 MCSE (KOI-4016.01 q4 4.1, KOI-4087.01 q1 3.1), both gone
+  at seed 1 (0.001, 0.006 sd), and 4016.01's collapsed q4 moved the same
+  0.011 sd between its own seeds; widths 0.992-1.015; KS 68/70 against the
+  chain-split null, cross-mode no larger than same-mode across seeds on
+  4016.01 and 4087.01 (on 2650.01 0.0069 vs 0.0056 at the max, on k, which
+  carries the tail; medians equal); 0 wall atoms. KOI-2650.01's tail is
+  reproduced (collapsed 0.17-0.44% of draws at k > 0.06, max k 0.86-0.996;
+  sampled 0-0.10%, max 0.043-0.128).
+  **Cost: 5.7-8.2x the wall time (median 6.7x), 0.09-0.27x the ESS/s
+  (median 0.17x)**; on the old basis 3.7-8.7x (median 4.4x) and 0.23-0.53x.
+  Collapsed mode did not slow down (8-27% faster); sampled mode got 1.1-2.1x
+  faster (elome 0.18.2's contact rule, the anvil MAP search) while the
+  per-chain GHK cost, plus ~200 s of post-hoc draws per export, stayed. It
+  stays opt-in.
 - How the accuracy was mis-measured once, recorded so it is not repeated:
   uniform-simplex QMC is not a reference for a peaked integrand (it was off
   by up to thousands of nats at high SNR and was misread as a bug in x*);

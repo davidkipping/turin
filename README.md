@@ -197,15 +197,16 @@ R-hat and ESS) and the physical weights `w1..w4` (derived, like `b`).
   different set of profiles (it included some convex in μ², and missed some
   concave ones), so a posterior that sat against its edges can move. turin
   refuses to resume a hybrid4 run from before 0.1.67, and needs Elómë >= 0.17.
-- **A caution for weak grazing transits.** Four free weights can make a
-  transit V-shaped, so on a low-SNR grazing system hybrid4 can admit a
-  second explanation the quadratic law does not: a small planet on a central
-  chord with extreme limb darkening. On KOI-448.02 (default prior) the
-  quadratic fit is 99.7% grazing at `k = 0.16`; sampled hybrid4 split its
-  chains between that and `k = 0.027, b = 0.27`, with `q1` against its wall,
-  and had not converged after three rounds (R-hat 1.26). On a typical
-  target (KOI-518.02) the two laws cost the same and both converged in one
-  round. (Measured with turin < 0.1.67's hybrid4 simplex.)
+- **Weak grazing transits.** Before 0.1.67, four free weights could make a
+  transit V-shaped: on KOI-448.02 (default prior), whose quadratic fit is
+  99.7% grazing at `k = 0.16`, sampled hybrid4 split its chains between
+  that and a small planet on a central chord with extreme limb darkening
+  (`k = 0.027, b = 0.27`, `q1` against its wall) and had not converged
+  after three rounds (R-hat 1.26). The curvature basis admits only profiles
+  that are monotonic and concave in mu^2, and that second solution is gone:
+  the same fit now converges in two rounds (R-hat 1.006), 99.8% grazing,
+  with no small-planet draws (one seed, 0.1.76). On a typical target
+  (KOI-518.02) the two laws cost the same and both converge in one round.
 
 ### Collapsed limb darkening (`--ld=collapsed`)
 
@@ -316,12 +317,15 @@ second seed of both modes on three targets
 (`docs/bench/collapsed_hybrid_acceptance.md`):
 
 - every parameter, `q1..q4` and `w1..w4` included, within 0.016 sd, with no
-  shift beyond 3 Monte Carlo standard errors;
-- 16-84% widths within 1.4%;
+  shift beyond 3 Monte Carlo standard errors that a second seed did not
+  remove;
+- 16-84% widths within 1.5%;
 - the two modes differ no more than two seeds of one mode do;
 - no `q` draw on the box edge.
 
-That took a second pass. The first found three defects, all now fixed:
+That was first shown on hybrid4's pre-0.1.67 basis and re-measured on the
+curvature basis in 0.1.76, with the same result. It took a second pass. The
+first found three defects, all now fixed:
 
 - the conditional draws were biased by up to 0.41 sd where the limb
   darkening is weakly constrained;
@@ -332,14 +336,15 @@ The collapsed value matches the true marginal to about 0.01 nats near
 these posteriors (sd over posterior draws 0.005-0.06, the 1,024-point GHK
 rule's own error).
 
-On KOI-2650.01, collapsed mode reproducibly carries 0.3% of its draws in a
-far grazing tail (k > 0.06) that sampled mode's chains essentially never
-visit. Collapsed mode's density there matches the true marginal, so the
+On KOI-2650.01, collapsed mode reproducibly carries 0.2-0.4% of its draws
+in a far grazing tail (k > 0.06) that sampled mode's chains barely visit. Collapsed mode's density there matches the true marginal, so the
 likely reading is that sampled mode under-explores it.
 
-**It is slower: 3.7-8.7x the wall time of sampled hybrid4 (median 4.4x),
-0.23-0.53x the effective samples per second.** The GHK integral is a fixed
-per-chain cost, so the gap is widest on small datasets. Sampled hybrid4
+**It is slower: 5.7-8.2x the wall time of sampled hybrid4 (median 6.7x),
+0.09-0.27x the effective samples per second (median 0.17x).** The GHK
+integral is a fixed per-chain cost, so the gap is widest on small datasets.
+It has widened since 0.1.64 (median 4.4x) because sampled mode got about
+twice as fast, not because collapsed mode slowed. Sampled hybrid4
 stays the default. Collapsed mode is for taking the limb darkening out of
 the sampled vector, or for a target whose sampled fit mixes poorly in `k`.
 Products, restrictions and the resume guard are as for the quadratic law,

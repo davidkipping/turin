@@ -3,8 +3,10 @@
 > **Measured on hybrid4's old basis** (turin 0.1.62-0.1.64, elome 0.16.2):
 > weights on `1 - mu^4`, `(1 - mu^2)^2` and the two poles, stick-broken from
 > `q`. Since turin 0.1.67 (elome >= 0.17) the weights are on LDhybrid's
-> curvature basis, a different simplex of profiles; nothing here has been
-> re-measured on it.
+> curvature basis, a different simplex of profiles. Only the KOI-448.02
+> sampled-hybrid4 row below was re-measured on it (0.1.76): the small-planet
+> solution no longer appears, and the fit converges in two rounds (R-hat
+> 1.0055). See CLAUDE.md, "The limb-darkening law".
 
 Before `turin/ldhybrid.py` was written, an independent NumPy float64 probe
 (the generator curves from elome's `ld_basis` through turin's grid, all else
