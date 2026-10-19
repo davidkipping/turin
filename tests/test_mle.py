@@ -236,3 +236,25 @@ def test_profiled_mle_is_the_joint_mle(law):
     sd = rp.sd if rp.sd is not None else np.full(5, np.inf)
     np.testing.assert_array_less(np.abs(rp.model - polish.model[:5]),
                                  0.05 * sd + 1e-9)
+
+
+@pytest.mark.parametrize("b_prior", ["transiting", "nongrazing"])
+def test_round_starts_cover_the_impact_parameter(b_prior):
+    """Low SNR lets b trade off against the limb darkening, so the round
+    search must start across b: KOI-4016.01 and KOI-1430.03 have their best
+    fit at b ~ 0.85-0.9, which a ball around the input ephemeris missed
+    (0.1.75). Every stratum of beta holds a start; the rest stay a ball."""
+    from turin import mle
+
+    lay = params.lineph_layout(LM.EPH, b_prior=b_prior, ld="collapsed")
+    T = lay.transform()
+    U = mle.round_starts(lay, T, LM.EPH, np.random.default_rng(0))
+    assert U.shape == (mle.N_STARTS, lay.dim) and np.all(np.isfinite(U))
+    beta = T.model_np(U)[:, lay.index("beta")]
+    n = mle.N_SPREAD_BETA
+    assert n >= mle.N_STARTS // 4
+    assert np.array_equal(np.floor(beta[:n] * n), np.arange(n))
+    ball = T.model_np(U[n:])
+    v0 = seeding.initial_model_vector(lay, LM.EPH)
+    assert np.ptp(ball[:, lay.index("beta")]) < 0.6
+    assert np.allclose(np.median(ball, axis=0), v0, atol=0.1)

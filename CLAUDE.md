@@ -148,7 +148,7 @@ turin/
   likelihood.py   epoch-block-chunked Gaussian logL, priors, anvil Transform/target
   params.py       LinEph/TTV parameter specs, b-k prior modes, derived quantities
   seeding.py      template-sweep tau seeds; MAP and chain starts via anvil.optimize
-  mle.py          --mle: maximum likelihood (LinEph, round or oblate), LD profiled, Laplace sds
+  mle.py          --mle: maximum likelihood (LinEph, round or oblate), LD profiled, best fit only
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
@@ -984,11 +984,30 @@ touched (pinned by a test).
   *below* the round fit there), level on 4087.01 and 1361.01, 0.04-0.27
   short of the ball's best seed on 2650.01 and 4016.01, whose optima lie
   on a flat ridge at the F_MAX edge (no scheme was consistent there).
-- The user's suite, `--mle --law=hybrid4 --oblate` (Kepler long cadence):
-  dlnL 0.001-1.40 and dBIC +11.6 to +16.0 (round preferred) on all five;
-  f's optimum drifts to the F_MAX edge (0.56-0.599), where the likelihood is
-  nearly flat in f, and the fit notes it. The comparison, not f's value, is
-  the result. Wall time: 5-6 s round (quadratic), 20-60 s oblate (both
+- **The round search spreads its starts over b** (0.1.75,
+  `mle.round_starts`): of 128 starts, `N_SPREAD_BETA` = 64 have beta
+  stratified over (0, 1), the rest the 0.25 ball around the input
+  ephemeris. 0.1.73-0.1.74's ball alone missed the best fit on two of the
+  suite's five targets: found by evaluating the exact float64 likelihood
+  alone at **every draw** of a LinEph MCMC run (153,600 per target; screened
+  in float32 on the GPU, the top 5,000 in float64; scratchpad
+  `mle_vs_mcmc2.py`). KOI-4016.01 and KOI-1430.03 hold a second peak at
+  b ~ 0.85-0.91 with weak limb darkening, 0.33 and 0.10 nats above the
+  central chord with limb darkening on a corner (q1 = 1, q2 = 0 on 4016.01)
+  where every start landed; the top-spread warning cannot see it, since all
+  starts agreed. With the spread the MLE beats every draw on all five
+  (+0.02 to +0.13), at seeds 0-3 on both targets. **Sampling is not
+  affected**: the posterior in b there is broad and nearly flat over
+  0-0.9 (two bumps on a ridge, not separated modes), and chains from the
+  single MAP-centred ball cross it (KOI-4016.01: R-hat 1.007, bulk ESS
+  56,000 on beta in one round), so `seeding.find_map` keeps its ball.
+- The user's suite, `--mle --law=hybrid4 --oblate` (Kepler long cadence,
+  0.1.75): dlnL 0.001-1.42 and dBIC +10.5 to +16.1 (round preferred) on all
+  five; f's optimum drifts to the F_MAX edge (0.596-0.600) on four, where
+  the likelihood is nearly flat in f, and the fit notes it. The comparison,
+  not f's value, is the result. The spread raised two round hybrid4 fits
+  (KOI-4016.01 2374.632 -> 2374.924, which took its oblate fit to 2375.545,
+  dlnL 0.621). Wall time: ~5 s round (quadratic), 20-60 s oblate (both
   fits), data loading included.
 
 ### Known upstream hazards

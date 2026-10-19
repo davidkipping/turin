@@ -14,7 +14,8 @@ limb darkening on the simplex's faces directly, which the joint search in
 ``q`` approaches only as ``u`` runs off to infinity.
 
 1. ``anvil.optimize`` (``objective="mle"``) over theta from
-   :data:`N_STARTS` starts around the input ephemeris.
+   :data:`N_STARTS` starts around the input ephemeris, half of them with b
+   spread over its whole range (:func:`round_starts`).
 2. The limb darkening at the optimum, ``q`` from the profile's ``x*``.
 3. Under ``--oblate``, the round model is fitted first, the oblate search
    starts from its optimum at f ~ 0, and the two are compared.
@@ -36,9 +37,17 @@ from . import outputs as _outputs
 from . import params as _params
 from . import seeding as _seeding
 
-#: Starts for the search (a 0.25 sd ball in u around the input ephemeris,
-#: as the sampler's MAP search).
+#: Starts for the round search: a 0.25 sd ball in u around the input
+#: ephemeris, as the sampler's MAP search, with :data:`N_SPREAD_BETA` of
+#: them moved to beta spread evenly over (0, 1).
 N_STARTS = 128
+#: The ball alone missed the best fit on two of the user's five targets
+#: (0.1.74, against every draw of a LinEph MCMC run, on the exact likelihood
+#: alone): KOI-4016.01 and KOI-1430.03 hold a second peak at b ~ 0.85-0.88
+#: with weak limb darkening, above the central chord with limb darkening on
+#: a corner where all 128 starts landed, by 0.33 and 0.10 nats. Low SNR lets
+#: b and the limb darkening trade off, so the starts must cover b.
+N_SPREAD_BETA = 64
 #: Product mode stem: ``{target}_lineph_mle_{name}.{ext}``, apart from any
 #: MCMC lineage's ``{target}_lineph_*``.
 MODE = "lineph_mle"
@@ -116,9 +125,7 @@ def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
         starts = T.from_model_np(V)
         starts[:, :5] += ROUND_SEED_SD * rng.standard_normal((N_STARTS, 5))
     else:
-        v0 = _seeding.initial_model_vector(lay, eph)
-        starts = (T.from_model_np(v0)[None, :]
-                  + 0.25 * rng.standard_normal((N_STARTS, lay.dim)))
+        starts = round_starts(lay, T, eph, rng)
     res = anvil.optimize(tr, starts, objective="mle", seed=seed,
                          max_rows=_seeding.MAX_ROWS)
     n_conv = int(np.sum(res.status == "converged"))
@@ -151,6 +158,21 @@ def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
         n_params=int(jlay.dim + np.sum(np.asarray(orders) + 1)),
         n_starts_converged=n_conv, n_starts=len(starts),
         top_spread=_seeding.top_spread(res), notes=notes)
+
+
+def round_starts(layout, transform, eph, rng):
+    """The round search's starts, in u: :data:`N_STARTS` in a 0.25 sd ball
+    around the input ephemeris, the first :data:`N_SPREAD_BETA` with beta
+    stratified over (0, 1) (one uniform draw per stratum, kept 0.005 off the
+    box ends, where u is infinite)."""
+    v0 = _seeding.initial_model_vector(layout, eph)
+    u = (transform.from_model_np(v0)[None, :]
+         + 0.25 * rng.standard_normal((N_STARTS, layout.dim)))
+    V = transform.model_np(u)
+    n = N_SPREAD_BETA
+    V[:n, layout.index("beta")] = np.clip(
+        (np.arange(n) + rng.uniform(size=n)) / n, 0.005, 0.995)
+    return transform.from_model_np(V)
 
 
 def _derived(layout, best_phys, names):

@@ -477,11 +477,21 @@ directly, which is common: hybrid4's best weights sat on a face for 94-100%
 of the geometries tested. (Profiling would be biased for *sampling*, which
 is why `--ld=collapsed` integrates instead.)
 
+**Where the search starts.** 128 starts, half in a small spread around the
+catalogue ephemeris and half with the impact parameter spread evenly over
+its whole range. At low SNR b trades off against the limb darkening along
+a long, nearly flat ridge that can hold more than one peak. On KOI-4016.01
+and KOI-1430.03 the best fit is at b ~ 0.88-0.91 with weak limb darkening;
+the ephemeris spread alone found only a central chord with limb darkening
+on a corner, 0.33 and 0.10 below it in ln L (0.1.74). Checked by evaluating
+the likelihood at every draw of a LinEph MCMC run on each of the five
+suite targets: the MLE is above all of them.
+
 **The best fit, nothing else.** There are no error bars: for those,
 sample. Where the likelihood is flat the best-fit value of that parameter
 is arbitrary. That is common for b near 0, a poorly measured limb
 darkening, and f at Kepler long cadence. KOI-1361.01's oblate fit put f at
-0.599, the edge of its range, for 0.07 in ln L, and the log and products
+0.600, the edge of its range, for 0.06 in ln L, and the log and products
 note an f at its edge.
 
 **Oblate planets: the comparison is the result.** `--mle --oblate` first
@@ -505,9 +515,10 @@ never end below the round fit, which the ephemeris start once did.
 
 On the five Kepler long-cadence targets of turin's test suite, every
 oblate fit gained 0.001-1.4 in ln L for its two extra parameters, BIC
-preferred round by 12-16, and f's best value drifted to the edge of its
-range. At that cadence the likelihood barely tells f apart. A fit takes
-5-6 s round and 20-60 s with `--oblate` (both fits), data loading included.
+preferred round by 10.5-16, and f's best value drifted to the edge of its
+range on four. At that cadence the likelihood barely tells f apart. A fit
+takes about 5 s round and 20-60 s with `--oblate` (both fits), data loading
+included.
 
 **Not offered for TTV fits.** On 3 of 6 targets tested, the optimiser
 settled in a local optimum of the transit times 0.35-3.2 log-likelihood
