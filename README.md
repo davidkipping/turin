@@ -446,7 +446,7 @@ has no gradient.
   are slightly off. This is deliberate: oblate fits use the same prior as
   spherical ones, so the two stay directly comparable. It matters only when
   the data put `b` at the grazing edge. turin's oblate light-curve tests
-  cover non-grazing geometries (b = 0.3, 0.7) only.
+  cover grazing geometries (b = 0.95, 1.0, 1.05) as well as b = 0.3 and 0.7.
 - turin's oblate code has been checked against Elómë's own frontend (to
   1e-13) and SquishierPlanet's independent light curves (to 1e-12). It
   has been tested on synthetic transits, not yet on real targets.

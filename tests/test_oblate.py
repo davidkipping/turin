@@ -109,8 +109,15 @@ def _a_rs(b):
                                                 b)])[0, 0])
 
 
+#: grazing: k = 0.095 and f = 0.1 put the ellipse's half-width across the
+#: chord between B = 0.090 and A = 0.100, so b = 0.95 has no second and third
+#: contacts, b = 1 is centred on the limb, and b = 1.05 is a sliver (b stays
+#: below 1 + k, where turin's circle relation for a/R* ends)
+GRAZING = [(0.95, 30.0), (1.0, 90.0), (1.05, 0.0)]
+
+
 @pytest.mark.parametrize("b, th", [(0.7, 30.0), (0.7, -60.0), (0.3, 30.0),
-                                   (0.3, 0.0)])
+                                   (0.3, 0.0), *GRAZING])
 def test_oblate_light_curve_matches_elomes_frontend(b, th):
     aRs = _a_rs(b)
     pars = TransitParams()
@@ -125,7 +132,7 @@ def test_oblate_light_curve_matches_elomes_frontend(b, th):
     with mx.stream(mx.cpu):
         got64 = _turin_flux(mx.float64, th=th, b=b)
     got32 = _turin_flux(mx.float32, th=th, b=b)
-    assert 1 - ref.min() > 1e-3, "sanity: a visible transit"
+    assert 1 - ref.min() > (1e-4 if b > 0.9 else 1e-3), "sanity: a transit"
     assert np.abs(got64 - ref).max() < 1e-13
     assert np.abs(got32 - ref).max() < 2e-6
 
@@ -145,7 +152,7 @@ def _squishierplanet():
         sys.path.remove(sp_dir)
 
 
-@pytest.mark.parametrize("b, th", [(0.7, 30.0), (0.3, -60.0)])
+@pytest.mark.parametrize("b, th", [(0.7, 30.0), (0.3, -60.0), (1.0, 30.0)])
 def test_oblate_light_curve_matches_squishierplanet(b, th):
     """SquishierPlanet's float64 oblate light curve (no exposure
     integration), which elome itself was validated against to 6e-16. A sign
@@ -162,7 +169,7 @@ def test_oblate_light_curve_matches_squishierplanet(b, th):
                             t0=0.0)
     with mx.stream(mx.cpu):
         got = _turin_flux(mx.float64, th=th, b=b, exp=False)
-    assert 1 - ref.min() > 1e-3
+    assert 1 - ref.min() > (1e-4 if b > 0.9 else 1e-3)
     assert np.abs(got - ref).max() < 1e-12
 
 

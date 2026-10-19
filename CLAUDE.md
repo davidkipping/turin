@@ -432,7 +432,12 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   odds are slightly off. The light curve is exact. The user decided
   (2026-10-16) not to fix it: oblate fits keep the spherical prior so the two
   stay homogeneous. Documented in the README's oblate limits (0.1.70). The
-  oblate light-curve tests cover b = 0.3, 0.7 only, none grazing.
+  oblate light-curve tests include grazing geometries since 0.1.78
+  (`test_oblate.GRAZING`: b = 0.95 without second and third contacts, 1.0
+  centred on the limb, 1.05 a sliver, at k 0.095, f 0.1), against elome's
+  frontend at the usual 1e-13 / 2e-6 and SquishierPlanet (b = 1.0) at 1e-12.
+  The `1 + k < b < 1 + h` sliver itself is untestable through turin's
+  parametrisation: the circle relation for a/R* ends at `b = 1 + k`.
 - References in `tests/test_oblate.py`: elome's `TransitModel` (fp64 1e-13,
   fp32 2e-6) and SquishierPlanet's float64 `model.light_curve` (1e-12).
   Injection (f = 0.1, θ = 30°, b = 0.7, 30 ppm, 1-min cadence, collapsed):
