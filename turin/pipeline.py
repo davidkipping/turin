@@ -690,7 +690,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
                 seed=args.seed, log=log)
         u0 = map_res.ball(cfg.n_chains, seed=args.seed + 1)
         if layout.oblate:
-            # chains centred off f = 0 (elome's fp32 d/df is 0 below 1e-5)
+            # chains centred off f = 0 (f = fc^2 + fs^2 is stationary there)
             # and spread over the Laplace approximation once the final
             # target exists, below
             u_center = _seeding.floor_oblateness(map_res.u, transform,

@@ -214,12 +214,13 @@ def top_spread(res):
 TOP_SPREAD_WARN = 10.0
 
 
-#: Smallest flattening the chains of an oblate fit are centred on. elome's
-#: float32 kernel takes the spherical forms below f = 1e-5, where d/df = 0,
-#: and f = fc^2 + fs^2 has a stationary point at the origin anyway: a centre
-#: at f ~ 0 would start every chain where (fc, fs) feel no gradient.
-#: f = 1e-4 (fc = 0.01) is 10x clear of that band and far inside any
-#: posterior width in f (SquishierPlanet: sd(f) ~ 0.05 at 10 ppm).
+#: Smallest flattening the chains of an oblate fit are centred on.
+#: f = fc^2 + fs^2 has a stationary point at the origin, so a centre at
+#: f ~ 0 would start every chain where (fc, fs) feel almost no gradient,
+#: and at exactly 0 theta's atan2 gives a NaN one. (Before elome 0.18.6 its
+#: float32 kernel also gave d/df = 0 below f = 1e-5; it now takes d/df from
+#: the ellipse there.) f = 1e-4 (fc = 0.01) is far inside any posterior
+#: width in f (SquishierPlanet: sd(f) ~ 0.05 at 10 ppm).
 F_FLOOR = 1e-4
 
 
@@ -243,8 +244,8 @@ def chain_starts(res, n_chains, *, seed=0, sigma_cap=0.5):
     ChEES froze every chain started in a small ball around an oblate MAP).
 
     anvil gives no covariance unless the Hessian is negative definite, and a
-    round planet's is not: its optimum sits at f ~ 0, where elome's float32
-    d/df is 0 (f < 1e-5) and f = fc^2 + fs^2 is stationary. turin's recipe
+    round planet's is not: its optimum sits at f ~ 0, where f = fc^2 + fs^2
+    is stationary. turin's recipe
     (SquishierPlanet's ``laplace_start``) floors the curvature instead, so
     such a direction is treated as flat and capped at ``sigma_cap``; that
     floor is applied here before anvil draws. A 1e-3 ball is the fallback

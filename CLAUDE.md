@@ -411,8 +411,10 @@ CLI and pipeline); `oblate` is a resume guard (old states read round).
   collapsed round (512 chains, 860 points, value+grad).
 - **Start.** The MAP's 128 starts spread `(fc, fs)` by ~±0.1 (the brief's
   three-way nudge needs no code). `seeding.floor_oblateness` moves the
-  chains' centre to `f >= 1e-4` (elome's fp32 d/df is 0 below 1e-5, and
-  f = fc² + fs² is stationary at the origin), and `seeding.chain_starts`
+  chains' centre to `f >= 1e-4` (f = fc² + fs² is stationary at the
+  origin, and turin's `atan2` for theta has a NaN gradient at exactly
+  fc = fs = 0; before elome 0.18.6 its fp32 d/df was also 0 below 1e-5),
+  and `seeding.chain_starts`
   spreads chains over anvil's Laplace approximation (sigmas capped at 0.5
   unconstrained units, far starts pulled back). Oblate only, so round
   starts are a 1e-3 ball. Since 0.1.71 the MAP is `anvil.optimize` (see
@@ -679,6 +681,24 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 `u1`/`u2` became optional keywords in the same release but stayed
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
+
+**Checked against elome 0.18.7** (`962aedb`) **and anvil 0.10.1**
+(`f3f289f`), turin 0.1.79. elome 0.18.6 fixed oblate and ring gradients at
+f = 0 (d/df below the fp32 switch f = 1e-5 is now the ellipse's at the
+switch, not 0; values unchanged) and routes the fp64 graph's far roots
+through their partner inside the disc; 0.18.7 is documentation. Measured as
+the 0.18.5 A/B below (KOI-518.02, 64 vectors): **24 of 26 quantities
+bitwise**; oblate sampled and collapsed float64 values differ by 4e-16 and
+3e-15 relative (the far-root route). Below the switch turin's d/dfc is now
+non-zero, proportional to fc (-1.40e-4 at f = 1e-6, sampled); at f = 1e-4,
+turin's `F_FLOOR`, it is unchanged, so no turin behaviour moves. anvil
+0.10.0 added `anvil.evidence` (unused) and 0.10.1 keeps dead chains out of
+ChEES's mass-matrix moments and trajectory-length gradient (a protection
+turin gets for free; healthy runs stated bitwise), plus an `optimize`
+rescoring guard. Measured: ChEES on KOI-518.02 (64 chains, 100 warmup + 60
+draws, quadratic LinEph and collapsed hybrid4 oblate) gives **bitwise**
+draws and log-probabilities under anvil 0.9.1 and 0.10.1. `MIN_ANVIL` stays
+0.9.0.
 
 **Checked against elome 0.18.5** (`9a93899`), turin 0.1.77. 0.18.3-0.18.5
 touch only ringed planets (`rings.py`, `rings_tau.py`: float64 speed and
