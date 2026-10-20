@@ -364,6 +364,11 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
     """
     import anvil
 
+    if layout.mode == "ttv" and layout.oblate and not likelihood_only:
+        raise ValueError("an oblate TTV fit is --mle only: sampling would pay "
+                         "the oblate kernel (~40-85x) on every grid-Gibbs "
+                         "sweep, and oblateness is a shape property LinEph "
+                         "measures from every epoch together")
     ld = ld_mode or layout.ld
     if ld != layout.ld:
         raise ValueError(f"ld_mode={ld_mode!r} but the layout was built with "

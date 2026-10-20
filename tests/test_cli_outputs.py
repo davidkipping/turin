@@ -40,8 +40,8 @@ def test_defaults_match_the_documented_ones():
 
 
 def test_mle_runs_lineph_then_ttv():
-    """--mle keeps the default modes, LinEph then TTV (0.1.82), except under
-    --oblate (LinEph-only), and leaves --ld to the pipeline's default, which
+    """--mle keeps the default modes, LinEph then TTV (0.1.82; under
+    --oblate too since 0.1.84), and leaves --ld to the pipeline's default, which
     --mle ignores (its limb darkening is profiled). --SNRgate is its TTV
     gate: unset until given, and refused without --mle."""
     a = cli.parse_args(["--KOI-1.01", "--mle"])
@@ -49,7 +49,7 @@ def test_mle_runs_lineph_then_ttv():
     a = cli.parse_args(["--KOI-1.01", "--mle", "--modes=lineph"])
     assert a.modes == ("lineph",)
     a = cli.parse_args(["--KOI-1.01", "--mle", "--law=hybrid4", "--oblate"])
-    assert a.mle and a.oblate and a.modes == ("lineph",)
+    assert a.mle and a.oblate and a.modes == ("lineph", "ttv")
     assert not cli.parse_args(["--KOI-1.01"]).mle
     assert cli.parse_args(["--KOI-1.01", "--mle",
                            "--SNRgate=7.5"]).snr_gate == 7.5

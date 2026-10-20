@@ -62,8 +62,13 @@ def test_layouts_and_refusals():
     with pytest.raises(ValueError, match="hybrid4"):
         params.lineph_layout(H4.EPH, oblate=True)
     ed, cen, _, _, _ = H4.make_dataset()
-    with pytest.raises(ValueError, match="LinEph-only"):
-        params.ttv_layout(H4.EPH, cen, 0.03, law="hybrid4", oblate=True)
+    # a TTV layout takes it (for --mle; build_target refuses to sample it)
+    tl = params.ttv_layout(H4.EPH, cen, 0.03, law="hybrid4", oblate=True)
+    assert tl.names[:9] == ("k", "beta", "T14", "fc", "fs",
+                            "q1", "q2", "q3", "q4")
+    assert tl.n_shape == 9 and tl.oblate
+    with pytest.raises(ValueError, match="hybrid4"):
+        params.ttv_layout(H4.EPH, cen, 0.03, oblate=True)
 
 
 def test_fcfs_map_and_its_uniform_prior():

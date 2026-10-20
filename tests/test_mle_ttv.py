@@ -65,8 +65,8 @@ def test_timing_step_puts_every_epoch_at_its_best_time(decoy):
     assert np.all(got >= start - 1e-9)
     np.testing.assert_array_less(best - 1e-4, got)
     assert np.all(step.gain >= 0) and not step.flat.any()
-    np.testing.assert_allclose(step.gain, np.where(step.moved, got - start, 0),
-                               atol=1e-8)
+    np.testing.assert_allclose(step.gain, got - start, atol=1e-8)
+    np.testing.assert_array_equal(step.moved, step.gain > mle.MOVE_NATS)
     # nothing left to gain: a second step is the certificate
     again = mle.timing_step(lo, hi, lay, step.v)
     assert not again.moved.any()

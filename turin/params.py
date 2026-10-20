@@ -22,7 +22,8 @@ Under ``--law=hybrid4`` the limb darkening is ``q1 .. q4`` instead of
 ``7 + one per epoch``; :attr:`ParamLayout.n_shape` is where the epoch times
 start.
 
-Under ``--oblate`` (hybrid4, LinEph only) two columns follow ``T14``:
+Under ``--oblate`` (hybrid4; sampled LinEph only, TTV for ``--mle``) two
+columns follow ``T14``:
 ``fc, fs = sqrt(f) (cos 2theta, sin 2theta)``, the projected flattening and
 long-axis sky angle of an oblate planet (:func:`oblate_from_fcfs`).
 
@@ -104,7 +105,8 @@ class ParamLayout:
     #: limb-darkening law (:data:`turin.model.LAWS`); it sets which
     #: coordinates the layout carries (:func:`turin.model.ld_names`)
     law: str = "quadratic"
-    #: an oblate planet: ``fc, fs`` follow ``T14`` (hybrid4, LinEph only)
+    #: an oblate planet: ``fc, fs`` follow ``T14`` (hybrid4; a TTV layout
+    #: only for ``--mle``, :func:`turin.likelihood.build_target`)
     oblate: bool = False
     #: Gaussian prior on log10(rho*/kg m^-3) as ``(mean, sigma)``; ``()``
     #: for none (:func:`rhostar_log_prior`)
@@ -219,6 +221,9 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
     :class:`turin.ldhybrid.ProfileHybridLogProb`). Sampling refuses it: an
     integrated-out limb darkening couples every epoch, which breaks the
     per-epoch factorisation grid-Gibbs relies on.
+
+    ``oblate=True`` (hybrid4) is for ``--mle`` too: ``build_target`` refuses
+    to sample it (see there).
     """
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
@@ -228,12 +233,9 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         raise ValueError(f"unknown ld mode {ld!r}; expected {LD_MODES}")
     if ld == "collapsed" and law not in ("quadratic", "hybrid4"):
         raise ValueError(f"--ld=collapsed is not implemented for {law}")
-    if oblate:
-        raise ValueError("an oblate planet is LinEph-only: a TTV fit would pay "
-                         "the oblate kernel (~40-85x) on every grid-Gibbs "
-                         "sweep, and oblateness is a shape property LinEph "
-                         "measures from every epoch together")
-    rows = list(_shape_bounds(eph, T14_max=T14_max, law=law))
+    if oblate and law != "hybrid4":
+        raise ValueError(f"an oblate planet takes --law=hybrid4, not {law}")
+    rows = list(_shape_bounds(eph, T14_max=T14_max, law=law, oblate=oblate))
     if ld == "collapsed":
         rows = [r for r in rows if r[0] not in ld_names(law)]
     n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
@@ -260,7 +262,7 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         report_offset=np.array(off), b_prior=b_prior,
         P_ref=float(eph["period"]), tau0_ref=float(eph["epoch"]),
         n_arr=n_arr, centers_abs=centers, ld=ld, law=law,
-        rhostar=_rhostar(rhostar))
+        oblate=bool(oblate), rhostar=_rhostar(rhostar))
 
 
 def _rhostar(prior):

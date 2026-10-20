@@ -101,9 +101,8 @@ def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
     from .cli import (collapsed_ld_problem, law_problem, mle_problem,
-                      oblate_problem, resolve_ld, resolve_mle)
+                      oblate_problem, resolve_ld)
 
-    resolve_mle(args)
     resolve_ld(args)
     _caps.require_elome_for_law(args.law)
     problem = (mle_problem(args) or oblate_problem(args) or law_problem(args)
@@ -487,9 +486,10 @@ def _run_mle(args, prepared, cv, outdir, *, log):
                 "the family that mimics a round planet at larger b; "
                 "compare a --rhostar posterior before reading f as a "
                 "detection")
-    if "ttv" in args.modes and not args.oblate:
+    if "ttv" in args.modes:
         _run_mle_ttv(args, prepared, centering, orders, outdir, main,
-                     build_kw, log=log)
+                     build_kw, log=log,
+                     round_lineph=fits[1] if args.oblate else None)
     return 0
 
 
@@ -501,19 +501,25 @@ MLE_SNR_GATE = 5.0
 
 
 def _run_mle_ttv(args, prepared, centering, orders, outdir, lineph_fit,
-                 build_kw, *, log):
+                 build_kw, *, log, round_lineph=None):
     """``--mle``'s TTV fit, from the LinEph one (:func:`turin.mle.fit_ttv`),
     behind its own gate: the median expected single-transit SNR at the
     LinEph best fit (:func:`transit_snrs`) against ``--SNRgate``. Never
     reads the MCMC lineage's resume state and never writes or removes its
-    ``ttv_skipped`` note. Products are ``{target}_ttv_mle_*``."""
+    ``ttv_skipped`` note. Products are ``{target}_ttv_mle_*``.
+
+    Under ``--oblate`` (``round_lineph`` the round LinEph fit, ``lineph_fit``
+    the oblate one) the gate is read at the round fit, the round TTV fit is
+    made first and the oblate one from it, the products are the oblate
+    fit's plus ``round.csv``, and ``compare.csv`` adds oblate vs round."""
     from . import mle as _mle
 
     target = prepared.target
     epoch_data = prepared.epoch_data
     gate = getattr(args, "snr_gate", None)
     gate = MLE_SNR_GATE if gate is None else float(gate)
-    snr = transit_snrs(prepared, centering, dict(lineph_fit.rows),
+    snr = transit_snrs(prepared, centering,
+                       dict((round_lineph or lineph_fit).rows),
                        b_prior=args.b_prior, law=args.law)
     covered = snr[snr > _SNR_COVERED]
     typical = float(np.median(covered)) if covered.size else 0.0
@@ -526,11 +532,20 @@ def _run_mle_ttv(args, prepared, centering, orders, outdir, lineph_fit,
             f"result; --SNRgate=0 fits anyway")
         return None
     _, tau_half = _mode_layout("ttv", args, prepared, centering, epoch_data)
-    fit = _mle.fit_ttv(prepared, centering, epoch_data, orders, law=args.law,
-                       b_prior=args.b_prior, build_kw=build_kw,
-                       lineph_fit=lineph_fit, tau_half=tau_half,
-                       seed=args.seed, log=log)
-    _log_mle(fit, log)
+    ttv_kw = dict(law=args.law, b_prior=args.b_prior, build_kw=build_kw,
+                  tau_half=tau_half, seed=args.seed, log=log)
+    rnd = None
+    if round_lineph is not None:
+        rnd = _mle.fit_ttv(prepared, centering, epoch_data, orders,
+                           lineph_fit=round_lineph, **ttv_kw)
+        fit = _mle.fit_ttv(prepared, centering, epoch_data, orders,
+                           lineph_fit=lineph_fit, oblate=True, round_fit=rnd,
+                           **ttv_kw)
+    else:
+        fit = _mle.fit_ttv(prepared, centering, epoch_data, orders,
+                           lineph_fit=lineph_fit, **ttv_kw)
+    for f in (fit, rnd) if rnd is not None else (fit,):
+        _log_mle(f, log)
     mode = _mle.MODE_TTV
     _outputs.export_mle(outdir, target, "fit", fit, mode=mode, log=log)
 
@@ -555,11 +570,26 @@ def _run_mle_ttv(args, prepared, centering, orders, outdir, lineph_fit,
         log(f"    O-C plot skipped: {exc}")
 
     cmp = _mle.compare_ttv(fit, lineph_fit)
+    if rnd is not None:
+        _outputs.export_mle(outdir, target, "round", rnd, mode=mode, log=log)
+        ob = _mle.compare(fit, rnd)
+        cmp.update({f"{k}_oblate" if k in ("dlnL", "dBIC", "dAIC") else k: v
+                    for k, v in ob.items() if k != "n_points"})
     _outputs.export_mle_compare(outdir, target, cmp, mode=mode, log=log)
     log(f"  ttv vs lineph: dlnL = {cmp['dlnL']:.3f} for {cmp['n_extra']} "
         f"more parameters, dBIC = {cmp['dBIC']:.2f}, dAIC = "
         f"{cmp['dAIC']:.2f} (negative favours TTV; no p-value: timing "
         f"likelihoods are multimodal)")
+    if rnd is not None:
+        log(f"  ttv: oblate vs round: dlnL = {cmp['dlnL_oblate']:.3f}, "
+            f"dBIC = {cmp['dBIC_oblate']:.2f}, dAIC = "
+            f"{cmp['dAIC_oblate']:.2f} (negative favours oblate; no p-value: "
+            f"at f = 0 theta is undefined and f is on its boundary)")
+        if cmp["aligned_central"]:
+            log("  WARNING: the oblate TTV optimum is an aligned oblate "
+                "planet on a central chord (b < 0.1, |theta| < 15 deg, "
+                "f > 0.05), the family that mimics a round planet at larger "
+                "b")
     return fit
 
 

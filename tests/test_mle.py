@@ -266,8 +266,9 @@ TAU_HALF = 0.03
 
 
 def _ttv_targets(ed, cen, orders, eph, *, law="quadratic", ld="collapsed",
-                 exposure_time=LM.EXP, **kw):
-    lay = params.ttv_layout(eph, cen, TAU_HALF, law=law, ld=ld)
+                 exposure_time=LM.EXP, oblate=False, **kw):
+    lay = params.ttv_layout(eph, cen, TAU_HALF, law=law, ld=ld,
+                            oblate=oblate)
     kw.setdefault("n_chains_hint", 16)
     tr, T, lo, hi = likelihood.build_target(
         lay, cen, ed, orders, num_resample=1, exposure_time=exposure_time,
@@ -442,3 +443,69 @@ def test_ttv_profile_refusals():
         lo.epoch_log_lik(mx.zeros((1, col.dim), dtype=mx.float32))
     with pytest.raises(ValueError, match="ld mode"):
         params.ttv_layout(LM.EPH, cen, TAU_HALF, ld="nope")
+    # an oblate TTV layout: --mle only, hybrid4 only
+    with pytest.raises(ValueError, match="hybrid4"):
+        params.ttv_layout(LM.EPH, cen, TAU_HALF, oblate=True)
+    for ld in ("sampled", "collapsed"):
+        ob = params.ttv_layout(H4.EPH, cen, TAU_HALF, law="hybrid4",
+                               oblate=True, ld=ld)
+        with pytest.raises(ValueError, match="--mle only"):
+            likelihood.build_target(ob, cen, ed, orders, **kw)
+
+
+# -- TTV, oblate (0.1.84) -------------------------------------------------------
+
+def _oblate_ttv_case():
+    """hybrid4 data, the oblate LinEph theta (dP = 0) and its TTV vector."""
+    ed, cen, _, _, orders = H4.make_dataset()
+    th = OB._vec()[:7] * np.r_[0, 1, 1, 1, 1, 1, 1] + np.r_[0, -6e-4, 0, 0,
+                                                           0, 0, 0]
+    return ed, cen, orders, th
+
+
+def test_oblate_ttv_profile_nests_lineph_and_is_the_simplex_maximum():
+    """The oblate TTV profile: LinEph's at a linear ephemeris (dP = 0),
+    value and shape gradient; off it, the brute-force maximum over the
+    hybrid4 simplex."""
+    ed, cen, orders, th = _oblate_ttv_case()
+    _, _, _, _, lhi = _profile_targets(ed, cen, orders, H4.EPH,
+                                       law="hybrid4", oblate=True,
+                                       exposure_time=H4.EXP)
+    tlay, _, _, _, thi = _ttv_targets(ed, cen, orders, H4.EPH, law="hybrid4",
+                                      oblate=True, exposure_time=H4.EXP)
+    assert tlay.names[:5] == ("k", "beta", "T14", "fc", "fs")
+    assert tlay.n_shape == 5 and tlay.dim == 5 + tlay.n_epochs
+    tth = np.r_[th[2:7], th[1] + tlay.n_arr * th[0]]
+    assert float(_hi(thi, tth)[0]) == pytest.approx(float(_hi(lhi, th)[0]),
+                                                    abs=1e-9)
+    with mx.stream(mx.cpu):
+        gl = np.array(mx.grad(lambda v: mx.sum(lhi(v)))(
+            mx.array(th[None], dtype=mx.float64)))[0]
+        gt = np.array(mx.grad(lambda v: mx.sum(thi(v)))(
+            mx.array(tth[None], dtype=mx.float64)))[0]
+    np.testing.assert_allclose(gt[:5], gl[2:7], rtol=1e-8, atol=1e-8)
+    rng = np.random.default_rng(6)
+    off = tth.copy()
+    off[5:] += 2e-3 * rng.standard_normal(tlay.n_epochs)
+    prof = float(_hi(thi, off)[0])
+    assert abs(prof - _brute_max(thi, off, 4, rng)) < 1e-6
+
+
+def test_oblate_ttv_epoch_terms_sum_to_the_likelihood():
+    """The timing step's premise on an oblate layout: the sampled-LD
+    likelihood-only target's per-epoch terms sum to its value (float64),
+    and each epoch's term moves with its own time only."""
+    ed, cen, orders, th = _oblate_ttv_case()
+    lay, _, _, _, hi = _ttv_targets(ed, cen, orders, H4.EPH, law="hybrid4",
+                                    oblate=True, ld="sampled",
+                                    exposure_time=H4.EXP, fp64=True)
+    v = np.r_[th[2:7], H4.Q_T, np.full(lay.n_epochs, th[1])]
+    w = v.copy()
+    w[lay.n_shape + 2] += 0.004              # move epoch 2 alone
+    with mx.stream(mx.cpu):
+        V = mx.array(np.vstack([v, w]), dtype=mx.float64)
+        terms = np.array(hi.epoch_log_lik(V), dtype=np.float64)
+        total = np.array(hi(V), dtype=np.float64)
+    np.testing.assert_allclose(terms.sum(axis=1), total, rtol=0, atol=1e-8)
+    moved = np.abs(terms[1] - terms[0]) > 0
+    assert moved[2] and moved.sum() == 1

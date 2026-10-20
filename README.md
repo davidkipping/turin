@@ -381,7 +381,8 @@ turin --KOI-1.01 --law=hybrid4 --oblate --modes=lineph
   made a round planet at b = 0.3 look oblate (f = 0.082 +/- 0.016) and
   moved a true `theta` of 30 degrees to 63, while hybrid4 stayed within 0.8
   sigma. That is SquishierPlanet's measurement, not one turin repeats.
-- LinEph only (`--modes=lineph`), circular geometry.
+- LinEph only (`--modes=lineph`) when sampling, circular geometry.
+  `--mle` also fits TTV for an oblate planet (below).
 - `--ld=collapsed` is the default under `--oblate`; `--ld=sampled` is still
   available. On a synthetic oblate planet, collapsed converged in one round
   (517 s), while sampled mode had one of 512 chains stuck in the
@@ -458,8 +459,8 @@ has no gradient.
 ### Maximum likelihood (`--mle`)
 
 `--mle` replaces sampling with a maximum-likelihood fit: the LinEph model,
-round or `--oblate`, and then (not under `--oblate`) the TTV model, when
-the transits are strong enough to time. It takes seconds rather than
+round or `--oblate`, and then the TTV model (round or oblate), when the
+transits are strong enough to time. It takes seconds rather than
 minutes:
 
 ```bash
@@ -512,6 +513,17 @@ sits on its boundary, so the usual chi-squared calibration does not apply.
 For the evidence, calibrate ΔlnL with injections, or sample. If the oblate
 optimum is an aligned planet on a central chord, the family that mimics a
 round planet at larger b, the log warns.
+
+With TTV, `--mle --oblate` does the same again: the round TTV fit from the
+round LinEph one, then the oblate TTV fit from the better of two starts it
+nests -- the oblate LinEph fit at its linear-ephemeris times, and the round
+TTV fit at f ~ 0 -- with more round-fit starts at random angles. The SNR
+gate is read at the round LinEph fit. `ttv_mle_compare.csv` then reports
+both TTV vs LinEph (oblate) and oblate vs round (TTV). On KOI-315.01 the
+whole run (four fits) takes under three minutes, and the oblate TTV fit
+gains 0.35 in ln L over the round one (ΔBIC +15: round preferred). A
+sampled oblate TTV fit stays refused: each grid-Gibbs sweep would pay the
+oblate kernel.
 
 Starting from the round fit was measured against starting around the
 catalogue ephemeris. On six synthetic oblate and round planets (PHOENIX
@@ -580,7 +592,11 @@ lineage's files; `--fresh --mle` clears only these, and a sampled run's
 <T>_ttv_mle_lcdata.csv       time, flux, flux_err, model_flux
 <T>_ttv_mle_fold.pdf         folded on the fitted times
 <T>_ttv_mle_oc.pdf           O-C against the LinEph best fit, no error bars
-<T>_ttv_mle_compare.csv      lnL of each, dlnL, n_extra, dBIC, dAIC
+<T>_ttv_mle_compare.csv      lnL of each, dlnL, n_extra, dBIC, dAIC; under
+                             --oblate also lnL_oblate, lnL_round,
+                             dlnL_oblate, dBIC_oblate, dAIC_oblate,
+                             aligned_central (oblate vs round, TTV)
+<T>_ttv_mle_round.csv        --oblate: the round TTV fit, as fit.csv
 ```
 
 ### Weak transits and grid-Gibbs

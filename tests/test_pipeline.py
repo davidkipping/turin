@@ -899,6 +899,47 @@ def test_mle_fits_ttv_from_lineph_and_recovers_the_times(tmp_path,
     assert len(calls) >= 2 and not any(calls), calls
 
 
+def test_mle_oblate_fits_ttv_round_and_oblate(tmp_path, fake_ttv_target):
+    """--mle --oblate with TTV (0.1.84): the round TTV fit, then the oblate
+    one from it; the oblate fit's products plus round.csv; compare.csv
+    holds TTV vs LinEph and oblate vs round; the oblate fit nests both
+    (never below either); the injected times recovered."""
+    out = str(tmp_path)
+    logs = []
+    assert pipeline.run(_args(tmp_path, mle=True, law="hybrid4", oblate=True,
+                              modes=("lineph", "ttv")),
+                        log=logs.append) == 0
+    names = sorted(os.listdir(out))
+    for suffix in ("fit.csv", "round.csv", "times.csv", "lcdata.csv",
+                   "fold.pdf", "oc.pdf", "compare.csv"):
+        assert f"KOI-1.01_ttv_mle_{suffix}" in names, (suffix, names)
+    text = "\n".join(logs)
+    assert "[oblate ttv hybrid4] certified" in text
+    assert "ttv: oblate vs round: dlnL" in text
+
+    _, fit = _mle_rows(os.path.join(out, "KOI-1.01_ttv_mle_fit.csv"))
+    _, rnd = _mle_rows(os.path.join(out, "KOI-1.01_ttv_mle_round.csv"))
+    _, lin = _mle_rows(os.path.join(out, "KOI-1.01_lineph_mle_fit.csv"))
+    assert {"fc", "fs", "f", "theta", "w1"} <= set(fit) and "fc" not in rnd
+    _, cmp = _mle_rows(os.path.join(out, "KOI-1.01_ttv_mle_compare.csv"))
+    lnl = float(fit["lnL"][0])
+    assert float(cmp["dlnL"][0]) == pytest.approx(lnl - float(lin["lnL"][0]))
+    assert float(cmp["dlnL_oblate"][0]) == pytest.approx(
+        lnl - float(rnd["lnL"][0]))
+    assert float(cmp["dlnL"][0]) > 50                # the injected TTV
+    assert -1e-3 < float(cmp["dlnL_oblate"][0]) < 5.0  # a round truth
+    times = np.genfromtxt(os.path.join(out, "KOI-1.01_ttv_mle_times.csv"),
+                          delimiter=",", names=True, comments="#")
+    pr = prep.prepare_data("KOI-1.01", log=lambda *a: None)
+    cen = prep.centering_constants(pr.epoch_data, pr.eph)
+    truth = (np.asarray(cen["centers_abs"]) + np.asarray(cen["d_arr"])
+             + _ttv_truth(pr.epoch_data["n_epochs"]))
+    has = times["snr"] > 5
+    assert has.sum() >= 8
+    np.testing.assert_array_less(np.abs(times["tmid"] - truth)[has] * 1440,
+                                 2.0)
+
+
 def test_mle_ttv_gate_refuses_weak_transits(tmp_path, fake_target):
     """--SNRgate: below it the run stops after LinEph, with the LinEph
     products and no TTV ones."""

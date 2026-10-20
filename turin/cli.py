@@ -148,8 +148,9 @@ usage: turin --KOI-448.02 [options]
                           in f on [0, 0.6] and in theta; f, theta (degrees)
                           and the semi-axes A, B are reported, k is the
                           area-equivalent radius and T14 that circle's
-                          duration. Needs --law=hybrid4, --modes=lineph and
-                          circular geometry; implies --ld=collapsed unless
+                          duration. Needs --law=hybrid4, --modes=lineph
+                          (TTV too under --mle) and circular geometry;
+                          implies --ld=collapsed unless
                           --ld=sampled is given. The oblate kernel costs
                           ~40-85x a round one
   --rhostar=MEAN,SIGMA    Gaussian prior on log10(rho*/kg m^-3), the unit
@@ -164,9 +165,9 @@ usage: turin --KOI-448.02 [options]
                           profiled over its simplex; the best fit only, no
                           error bars. LinEph first; then, if the transits
                           pass --SNRgate, TTV from the LinEph best fit, with
-                          the two compared (dlnL, dBIC). With --oblate
-                          (LinEph only) the round model is fitted too and
-                          compared. Not with --rhostar, --ld, --extend*,
+                          the two compared (dlnL, dBIC). With --oblate the
+                          round model is fitted too and compared, in LinEph
+                          and in TTV. Not with --rhostar, --ld, --extend*,
                           --replot, --PL=ratio or hybrid, or
                           --geometry=chord
   --SNRgate=X             --mle only: fit TTVs only when the median expected
@@ -289,7 +290,6 @@ def parse_args(argv=None):
               f"--ld={args.ld} does not apply to it")
     if args.snr_gate is not None and not args.mle:
         _fail("--SNRgate is the --mle TTV gate; a sampled fit's is --TTVsnr")
-    resolve_mle(args)
     _choice("bprior", args.b_prior, B_PRIORS)
     _choice("sampler", args.sampler, SAMPLERS)
     _choice("PL", args.profile_mode, PL_CHOICES)
@@ -318,16 +318,6 @@ def resolve_ld(args):
     if getattr(args, "ld", None) is None:
         args.ld = "collapsed" if getattr(args, "oblate", False) else "sampled"
     return args.ld
-
-
-def resolve_mle(args):
-    """Under ``--mle --oblate`` the run is LinEph only: a requested TTV fit
-    is dropped here (an oblate fit is LinEph-only; ``--modes=ttv`` alone is
-    refused by :func:`mle_problem`). Idempotent; the pipeline calls it
-    too."""
-    if (getattr(args, "mle", False) and getattr(args, "oblate", False)
-            and "lineph" in args.modes):
-        args.modes = ("lineph",)
 
 
 def mle_problem(args):
@@ -368,11 +358,12 @@ def oblate_problem(args):
                 "quadratic law has no elementary light curve for an ellipse "
                 "(its linear term needs elliptic integrals), and elome's "
                 "oblate kernel takes the hybrid laws only")
-    if "ttv" in args.modes:
-        return ("--oblate is LinEph-only: pass --modes=lineph. A TTV fit "
-                "would pay the oblate kernel (~40-85x) on every grid-Gibbs "
-                "sweep, and oblateness is a shape property that LinEph "
-                "measures from every epoch together")
+    if "ttv" in args.modes and not getattr(args, "mle", False):
+        return ("--oblate is LinEph-only when sampling: pass --modes=lineph "
+                "(--mle also fits TTV). A sampled TTV fit would pay the "
+                "oblate kernel (~40-85x) on every grid-Gibbs sweep, and "
+                "oblateness is a shape property that LinEph measures from "
+                "every epoch together")
     if args.geometry != "circular":
         return ("--oblate needs --geometry=circular: elome's oblate kernel "
                 "is on its tau route")
@@ -400,6 +391,10 @@ def collapsed_ld_problem(args):
     builds ``Args`` directly, never passes through :func:`parse_args`).
     """
     if getattr(args, "ld", "sampled") != "collapsed":
+        return None
+    if getattr(args, "mle", False):
+        # --mle profiles the limb darkening whatever args.ld says (--oblate
+        # set it to collapsed); its own refusals are mle_problem's
         return None
     if args.profile_mode in ("ratio", "hybrid"):
         return (f"--ld=collapsed needs --PL=exact (or auto), not "

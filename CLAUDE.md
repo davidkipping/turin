@@ -383,8 +383,10 @@ the user's request with two decisions taken with them: a ρ⋆ prior and a
 degeneracy warning instead of the brief's ridge sampler (deferred until
 Kepler injections show the false mode matters), and `--ld=collapsed` as the
 `--oblate` default (`cli.resolve_ld`; `Args.ld` is `None` until resolved).
-hybrid4, LinEph and circular geometry only (`cli.oblate_problem`, refused in
-CLI and pipeline); `oblate` is a resume guard (old states read round).
+hybrid4, LinEph and circular geometry only when sampling
+(`cli.oblate_problem`, refused in CLI and pipeline; an oblate TTV layout
+exists for `--mle` since 0.1.84 and `build_target` refuses to sample it);
+`oblate` is a resume guard (old states read round).
 
 - **Model.** elome's `flux_dev_from_tau(..., f=, theta=)` (radians), `k` the
   area-equivalent radius √(AB), `a_over_rstar` keeps the circle relation, so
@@ -1006,7 +1008,8 @@ oblate), which anvil's own benchmark shows ending every start short.
 A fit without sampling, built on the user's request with these decisions
 taken with them: **the best fit only**, no uncertainties (0.1.74); the
 **likelihood alone** (priors off, `--rhostar` refused), LinEph first
-and **TTV from it since 0.1.82** (below; refused under `--oblate`), and
+and **TTV from it since 0.1.82** (below; under `--oblate` too since
+0.1.84), and
 **`--oblate` also fits the round model** and reports
 ΔlnL/ΔBIC/ΔAIC (no p-value: at f = 0 theta is undefined and f is on its
 boundary, so Wilks does not apply). Products are `{T}_lineph_mle_*`
@@ -1094,8 +1097,37 @@ prefix, and until then `--fresh --mle` deleted the MCMC lineage and an MCMC
     6.71 expected for the best of that many draws from a 43-dimensional
     Gaussian peak (median draw 21.2 below, theory 21.17), and its times
     sit within 0.80 posterior sd of the medians. Passes 3-5 there moved
-    epochs for +0.001 nats or less: "moved" is any float64 rise, so the
-    certificate can take extra passes; harmless, not tuned.
+    epochs for +0.001 nats or less; on the oblate fit (below) such moves
+    kept the certificate from ever firing, so since 0.1.84 an epoch counts
+    as moved only above `mle.MOVE_NATS` = 1e-3 (a smaller rise is still
+    taken).
+  - **Oblate** (0.1.84, the user's request). `--mle --oblate` with TTV:
+    round LinEph, oblate LinEph (as before), the gate at the round LinEph
+    fit, the round TTV fit from it, then the oblate TTV fit
+    (`fit_ttv(oblate=True, round_fit=)`) from the better of the two
+    starts it nests -- the oblate LinEph fit at `dtau_i = dtau0 + n_i dP`,
+    and the round TTV fit at f = `F_FLOOR` -- with the other and
+    `N_TTV_ANGLES` = 8 round-fit copies at random angles (0.02 sd in u,
+    the `ROUND_SEED_SD` scheme) among the first polish's starts. Products
+    are the oblate fit's plus `ttv_mle_round.csv`; `compare.csv` keeps
+    its TTV-vs-LinEph rows and adds `*_oblate` oblate-vs-round rows.
+    `collapsed_ld_problem` stands aside under `--mle` (`--oblate` sets
+    `ld` to collapsed, but `--mle` profiles whatever it says), and
+    `cli.resolve_mle` is gone. Tests: the oblate TTV profile nests LinEph's
+    at dP = 0 (value, shape gradient) and is the simplex maximum; the
+    oblate sampled-LD terms sum to the likelihood and move one epoch at a
+    time; sampling refused; pipeline end to end on the injected TTV
+    (round and oblate fits, the nesting, times within 2 min).
+    KOI-315.01: round TTV 21349.973 (certified, one pass, 25 s); oblate
+    TTV 21350.327 (one pass, 60 s polish, 2.6 s timing step), dlnL 0.35
+    over round, dBIC +15.1; f = 0.600 at the F_MAX edge (the ridge, as
+    for LinEph). 163 s of compute for all four fits (the run took 697 s
+    because the Exoplanet Archive returned 526 errors for 530 s; the
+    first run, 817 s, had five uncertified passes and probably the same
+    outage). The oblate LinEph fit there is a poor grazing one (k 0.16,
+    b 1.06, 1 of 128 starts converged): a linear ephemeris smears a
+    transit with 4-hour TTVs, and the TTV fit does not depend on it,
+    since the round TTV start won.
   - **No Laplace step** (`mle.HESSIAN = False`, 0.1.83): `--mle` reports
     the best fit only, and anvil's step can raise. A flat epoch's Hessian
     row is exactly zero; rounding gave `eigh` +1.8e-12, so anvil's
