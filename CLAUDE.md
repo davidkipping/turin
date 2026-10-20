@@ -1003,7 +1003,10 @@ search"), and **`--oblate` also fits the round model** and reports
 boundary, so Wilks does not apply). Products are `{T}_lineph_mle_*`
 (`fit`, `lcdata`, `fold`, and `round`/`compare` under `--oblate`); no
 resume state, no lineage, so an MCMC lineage of the same target is never
-touched (pinned by a test).
+touched (pinned by a test). `--fresh` clears one family only
+(`outputs.clear_products(mle=)`, 0.1.80): both share the `{T}_{mode}_`
+prefix, and until then `--fresh --mle` deleted the MCMC lineage and an MCMC
+`--fresh` the MLE products.
 
 - **`build_target(likelihood_only=True)`**: `prior=False` on the
   likelihood classes keeps only `oblate_log_prior` (a 0/-inf domain mask

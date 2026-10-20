@@ -332,6 +332,27 @@ def test_clear_products_respects_the_tag(tmp_path):
                                        "KOI-1.01_lineph_summary.r2.csv"))
 
 
+def test_clear_products_keeps_mcmc_and_mle_apart(tmp_path):
+    """--fresh clears one family: an MCMC --fresh leaves the --mle fit, and
+    --fresh --mle leaves the MCMC lineage (both share the mode prefix)."""
+    mcmc = ["KOI-1.01_lineph_summary.csv", "KOI-1.01_lineph_resume.pkl",
+            "KOI-1.01_ttv_times.csv"]
+    mle = ["KOI-1.01_lineph_mle_fit.csv", "KOI-1.01_lineph_mle_fold.pdf",
+           "KOI-1.01_ttv_mle_fit.csv"]
+    for name in mcmc + mle + ["KOI-1.01_lineph_mle_fit.r2.csv"]:
+        open(os.path.join(tmp_path, name), "w").close()
+    assert sorted(outputs.clear_products(str(tmp_path), "KOI-1.01",
+                                         mle=True)) == sorted(mle)
+    assert sorted(os.listdir(tmp_path)) == sorted(
+        mcmc + ["KOI-1.01_lineph_mle_fit.r2.csv"])
+    for name in mle:
+        open(os.path.join(tmp_path, name), "w").close()
+    assert sorted(outputs.clear_products(str(tmp_path), "KOI-1.01")) \
+        == sorted(mcmc)
+    assert sorted(os.listdir(tmp_path)) == sorted(
+        mle + ["KOI-1.01_lineph_mle_fit.r2.csv"])
+
+
 def test_fit_linear_ephemeris_weights_by_timing_error():
     """A time from a chain stuck in the wrong mode carries a large error and
     so barely moves the line; a well-measured TTV is not discarded but

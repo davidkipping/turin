@@ -530,7 +530,8 @@ settled in a local optimum of the transit times 0.35-3.2 log-likelihood
 units below the best.
 
 **Products** (`<T>_lineph_mle_*`, so they never mix with a sampled
-lineage's files):
+lineage's files; `--fresh --mle` clears only these, and a sampled run's
+`--fresh` leaves them):
 
 ```
 <T>_lineph_mle_fit.csv       Parameter, MLE; then b, log10_rho

@@ -484,10 +484,14 @@ def _product_stem(filename, prefix):
     return None
 
 
-def clear_products(outdir, target, mode=None):
+def clear_products(outdir, target, mode=None, *, mle=False):
     """Remove this lineage's products, for --fresh.
 
-    A differently tagged run is an independent lineage and is left alone.
+    A differently tagged run is an independent lineage and is left alone,
+    and so is the other family: ``--mle`` products (``{target}_{mode}_mle_*``)
+    are cleared only with ``mle=True``, and then nothing else is. Both share
+    the ``{target}_{mode}_`` prefix, which until 0.1.80 let ``--fresh
+    --mle`` delete an MCMC lineage and an MCMC ``--fresh`` the MLE fit.
     """
     removed = []
     if not os.path.isdir(outdir):
@@ -496,7 +500,7 @@ def clear_products(outdir, target, mode=None):
         prefix = f"{target}_{m}_"
         for fn in sorted(os.listdir(outdir)):
             stem = _product_stem(fn, prefix)
-            if stem is None:
+            if stem is None or stem.startswith("mle_") != mle:
                 continue
             if _RUN_TAG:
                 if not stem.endswith(f".{_RUN_TAG}"):

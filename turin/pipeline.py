@@ -120,7 +120,8 @@ def run(args, log=print):
     log(_caps.detect().summary())
 
     if args.fresh:
-        removed = _outputs.clear_products(outdir, target)
+        removed = _outputs.clear_products(outdir, target,
+                                          mle=bool(getattr(args, "mle", False)))
         if removed:
             log(f"  --fresh: removed {len(removed)} existing product(s)")
 

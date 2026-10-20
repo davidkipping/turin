@@ -817,6 +817,18 @@ def test_mle_fits_without_sampling_and_leaves_a_lineage_alone(tmp_path,
     assert float(rows["BIC"][0]) == pytest.approx(
         n_par * np.log(n_pts) - 2 * lnL, rel=1e-9)
 
+    # --fresh --mle clears the MLE fit only, never the lineage (0.1.80) ...
+    logs = []
+    assert pipeline.run(_args(tmp_path, mle=True, fresh=True),
+                        log=logs.append) == 0
+    assert "removed 3 existing" in "\n".join(logs)
+    with open(lineage, "rb") as fh:
+        assert fh.read() == b"not a real state"
+    # ... and an MCMC --fresh clears the lineage, never the MLE fit
+    removed = outputs.clear_products(out, "KOI-1.01")
+    assert removed == ["KOI-1.01_lineph_resume.pkl"]
+    assert os.path.exists(os.path.join(out, "KOI-1.01_lineph_mle_fit.csv"))
+
 
 def test_mle_oblate_fits_the_round_model_too(tmp_path, fake_target):
     """--mle --oblate (hybrid4): the oblate fit, the round fit and their
