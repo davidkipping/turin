@@ -457,11 +457,14 @@ has no gradient.
 
 ### Maximum likelihood (`--mle`)
 
-`--mle` replaces sampling with a maximum-likelihood fit of the LinEph
-model, round or `--oblate`. It takes seconds rather than minutes:
+`--mle` replaces sampling with a maximum-likelihood fit: the LinEph model,
+round or `--oblate`, and then (not under `--oblate`) the TTV model, when
+the transits are strong enough to time. It takes seconds rather than
+minutes:
 
 ```bash
-turin --KOI-518.02 --mle
+turin --KOI-518.02 --mle                 # LinEph, then TTV
+turin --KOI-518.02 --mle --modes=lineph  # LinEph only
 turin --KOI-1361.01 --mle --law=hybrid4 --oblate
 ```
 
@@ -525,11 +528,34 @@ range on four. At that cadence the likelihood barely tells f apart. A fit
 takes about 5 s round and 20-60 s with `--oblate` (both fits), data loading
 included.
 
-**Not offered for TTV fits.** On 3 of 6 targets tested, the optimiser
-settled in a local optimum of the transit times 0.35-3.2 log-likelihood
-units below the best.
+**TTV.** After LinEph, the expected SNR of each single transit is
+computed at the LinEph best fit. If the median, over epochs with data in
+transit, is below `--SNRgate` (default 5) the run stops there: a weak
+transit's best time is little more than noise, and it has no error bar to
+say so. (`--SNRgate` is stricter than sampling's `--TTVsnr`, 3, for that
+reason; 0 always fits.)
 
-**Products** (`<T>_lineph_mle_*`, so they never mix with a sampled
+Otherwise the TTV fit starts from the LinEph best fit, with each epoch at
+its linear-ephemeris time, and alternates two steps:
+
+- **A timing step.** Given the shape and limb darkening, each epoch's
+  likelihood depends on its own time alone, so every epoch's time is put at
+  its best over its whole timing range on a grid, refined, and kept only if
+  it improves. This crosses between separated timing peaks, which a local
+  optimiser cannot: started inside one peak, it stays there.
+- **A joint polish** of everything, the limb darkening profiled.
+
+It stops when a timing step moves no epoch, which certifies that no
+transit time could improve on its own. TTV mode holds the period at the
+catalogue value (as hurin and the sampler do), so it nests LinEph up to the
+period's tiny effect on the transit shape. The log and products compare
+the two fits: ΔlnL, ΔBIC and ΔAIC for the extra epoch times (no p-value:
+timing likelihoods have several peaks). An epoch with no data in transit is
+noted: its time is arbitrary. Tested so far on synthetic data, where it
+recovers injected TTVs; the check against TTV posteriors of real targets is
+pending.
+
+**Products** (`<T>_lineph_mle_*` and `<T>_ttv_mle_*`, so they never mix with a sampled
 lineage's files; `--fresh --mle` clears only these, and a sampled run's
 `--fresh` leaves them):
 
@@ -542,6 +568,14 @@ lineage's files; `--fresh --mle` clears only these, and a sampled run's
 <T>_lineph_mle_fold.pdf      phase-folded transit at the best fit
 <T>_lineph_mle_round.csv     --oblate: the round fit, same columns
 <T>_lineph_mle_compare.csv   --oblate: lnL of each, dlnL, dBIC, dAIC
+<T>_ttv_mle_fit.csv          as lineph_mle_fit, the times as dtau_<n>
+                             (absolute mid-transit times)
+<T>_ttv_mle_times.csv        hurin's times columns; the errors NaN, the O-C
+                             against the LinEph best fit
+<T>_ttv_mle_lcdata.csv       time, flux, flux_err, model_flux
+<T>_ttv_mle_fold.pdf         folded on the fitted times
+<T>_ttv_mle_oc.pdf           O-C against the LinEph best fit, no error bars
+<T>_ttv_mle_compare.csv      lnL of each, dlnL, n_extra, dBIC, dAIC
 ```
 
 ### Weak transits and grid-Gibbs
@@ -612,7 +646,9 @@ cannot pool chains drawn both ways.
                              and --modes=lineph; implies --ld=collapsed
 --rhostar=MEAN,SIGMA         Gaussian prior on log10(rho*/kg m^-3), any fit
 --mle                        maximum likelihood instead of sampling (LinEph,
-                             round or --oblate), see above
+                             round or --oblate, then TTV), see above
+--SNRgate=X                  --mle: fit TTVs only above this median
+                             single-transit SNR (default 5)
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache

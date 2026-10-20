@@ -213,27 +213,34 @@ def fold_plot(path, *, epoch_data, mid_times, baseline, model_grid_t,
     return _save(fig, path, title or "fold", log)
 
 
-def oc_plot(path, epochs, tmid, tmid_err, *, title="", log=None):
+def oc_plot(path, epochs, tmid, tmid_err, *, title="", log=None,
+            reference=None):
     """Observed-minus-calculated diagram against a refitted linear ephemeris.
 
     The reference is an error-weighted fit to the measured times, not the
     archive ephemeris (against which the diagram shows the archive's
     error); its chi-squared is shown as a measure of how non-linear the
-    timings are.
+    timings are. ``tmid_err=None`` (a ``--mle`` fit) draws no error bars and
+    no chi-squared; ``reference=(P, tau0)`` replaces the refitted ephemeris
+    (``--mle``: the LinEph best fit's).
     """
     import matplotlib.pyplot as plt
 
     epochs = np.asarray(epochs, dtype=np.float64)
     tmid = np.asarray(tmid, dtype=np.float64)
-    err = np.asarray(tmid_err, dtype=np.float64)
-    P, tau0, chi2 = _outputs.fit_linear_ephemeris(epochs, tmid, err)
+    err = (None if tmid_err is None
+           else np.asarray(tmid_err, dtype=np.float64))
+    if reference is not None:
+        (P, tau0), chi2 = reference, np.nan
+    else:
+        P, tau0, chi2 = _outputs.fit_linear_ephemeris(epochs, tmid, err)
     oc_min = (tmid - (tau0 + P * epochs)) * 24.0 * 60.0
 
     fig, ax = plt.subplots(figsize=(7.0, 4.0))
     ax.axhline(0.0, color="0.6", lw=0.8, zorder=1)
-    ax.errorbar(epochs, oc_min, yerr=err * 1440.0, fmt="o", ms=6,
-                mfc="0.6", mec="k", mew=1.0, ecolor="k", elinewidth=1.0,
-                capsize=0, zorder=3)
+    ax.errorbar(epochs, oc_min, yerr=None if err is None else err * 1440.0,
+                fmt="o", ms=6, mfc="0.6", mec="k", mew=1.0, ecolor="k",
+                elinewidth=1.0, capsize=0, zorder=3)
     dof = epochs.size - 2
     if dof > 0 and np.isfinite(chi2):
         ax.text(0.02, 0.96, f"linear ephemeris: chi2 = {chi2:.1f} "

@@ -56,6 +56,7 @@ _VALUE_FLAGS = {
     "--bprior": "b_prior",
     "--TTVmax": "ttv_max_min",
     "--TTVsnr": "ttv_snr_min",
+    "--SNRgate": "snr_gate",
     "--tag": "tag",
     "--sampler": "sampler",
     "--PL": "profile_mode",
@@ -157,15 +158,22 @@ usage: turin --KOI-448.02 [options]
                           Any fit mode and law. Under --oblate it suppresses
                           the aligned-oblate-on-a-central-chord mode that
                           mimics a round planet at larger b
-  --mle                   maximum likelihood instead of sampling, LinEph
-                          only: the likelihood alone (no priors; the
-                          parameter boxes and the oblate domain stay), the
-                          limb darkening profiled over its simplex; the best
-                          fit only, no error bars. With --oblate the round
-                          model is fitted too and compared (dlnL, dBIC).
-                          Takes seconds. Not with
-                          --rhostar, --ld, --extend*, --replot, --PL=ratio
-                          or hybrid, or --geometry=chord
+  --mle                   maximum likelihood instead of sampling: the
+                          likelihood alone (no priors; the parameter boxes
+                          and the oblate domain stay), the limb darkening
+                          profiled over its simplex; the best fit only, no
+                          error bars. LinEph first; then, if the transits
+                          pass --SNRgate, TTV from the LinEph best fit, with
+                          the two compared (dlnL, dBIC). With --oblate
+                          (LinEph only) the round model is fitted too and
+                          compared. Not with --rhostar, --ld, --extend*,
+                          --replot, --PL=ratio or hybrid, or
+                          --geometry=chord
+  --SNRgate=X             --mle only: fit TTVs only when the median expected
+                          SNR of a single transit, at the LinEph best fit,
+                          is at least X (default 5; stricter than --TTVsnr,
+                          since a weak epoch's best time means little);
+                          below it the run stops after LinEph. 0 always fits
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
   --sc                    prefer short cadence
@@ -201,6 +209,9 @@ class Args:
     b_prior: str = "transiting"
     ttv_max_min: float | None = None
     ttv_snr_min: float = 3.0
+    #: --SNRgate: the --mle TTV gate; None until given (5 under --mle,
+    #: refused without it)
+    snr_gate: float | None = None
     tag: str | None = None
     sampler: str = "chees"
     profile_mode: str = "auto"
@@ -276,6 +287,8 @@ def parse_args(argv=None):
     if args.mle and args.ld is not None:
         _fail(f"--mle profiles the limb darkening over its simplex; "
               f"--ld={args.ld} does not apply to it")
+    if args.snr_gate is not None and not args.mle:
+        _fail("--SNRgate is the --mle TTV gate; a sampled fit's is --TTVsnr")
     resolve_mle(args)
     _choice("bprior", args.b_prior, B_PRIORS)
     _choice("sampler", args.sampler, SAMPLERS)
@@ -308,10 +321,12 @@ def resolve_ld(args):
 
 
 def resolve_mle(args):
-    """Under ``--mle`` the run is LinEph only: a requested TTV fit is dropped
-    here (``--modes=ttv`` alone is refused by :func:`mle_problem`).
-    Idempotent; the pipeline calls it too."""
-    if getattr(args, "mle", False) and "lineph" in args.modes:
+    """Under ``--mle --oblate`` the run is LinEph only: a requested TTV fit
+    is dropped here (an oblate fit is LinEph-only; ``--modes=ttv`` alone is
+    refused by :func:`mle_problem`). Idempotent; the pipeline calls it
+    too."""
+    if (getattr(args, "mle", False) and getattr(args, "oblate", False)
+            and "lineph" in args.modes):
         args.modes = ("lineph",)
 
 
@@ -320,9 +335,9 @@ def mle_problem(args):
     if not getattr(args, "mle", False):
         return None
     if "lineph" not in args.modes:
-        return ("--mle is LinEph-only: a TTV maximum likelihood lands in "
-                "local timing optima (0.35-3.2 nats below the best on 3 of "
-                "6 targets measured), so it is not offered")
+        return ("--mle needs --modes to include lineph: the TTV fit starts "
+                "from the LinEph best fit, and its SNR gate is computed "
+                "there")
     if getattr(args, "rhostar", None):
         return ("--mle maximises the likelihood alone, and --rhostar is a "
                 "prior; drop one")
@@ -416,7 +431,7 @@ def _assign(args, field_name, flag, raw):
             value = float(raw)
             if value <= 0:
                 raise ValueError
-        elif field_name == "ttv_snr_min":
+        elif field_name in ("ttv_snr_min", "snr_gate"):
             value = float(raw)
             if not value >= 0:
                 raise ValueError
@@ -441,7 +456,7 @@ def _assign(args, field_name, flag, raw):
         if field_name == "rhostar":
             _fail(f"{flag} needs MEAN,SIGMA in log10(rho*/kg m^-3), sigma "
                   f"> 0 (the Sun is 3.149), got {raw!r}")
-        nonneg = least == 0 or field_name == "ttv_snr_min"
+        nonneg = least == 0 or field_name in ("ttv_snr_min", "snr_gate")
         _fail(f"{flag} needs a {'non-negative' if nonneg else 'positive'} "
               f"{'integer' if field_name in ints else 'value'}, got {raw!r}")
     setattr(args, field_name, value)

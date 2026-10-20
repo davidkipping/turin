@@ -199,28 +199,30 @@ def export_lcdata(outdir, target, mode, epoch_data, model, *, log=None):
                       "time,flux,flux_err,model_flux", rows, log)
 
 
-def export_mle(outdir, target, name, fit, *, log=None):
+def export_mle(outdir, target, name, fit, *, mode="lineph_mle", log=None):
     """A ``--mle`` fit (:class:`turin.mle.MleFit`): the best fit, one row per
-    parameter (physical units, as the summary's, limb darkening included),
-    then the derived rows, then the fit's ``lnL``, ``n_points``,
-    ``n_params`` (the baseline coefficients included), ``BIC`` and ``AIC``.
-    No uncertainties. Notes are ``#`` lines, which readers skip."""
+    parameter (physical units, as the summary's, limb darkening included;
+    a TTV fit's ``dtau_n`` as absolute times), then the derived rows, then
+    the fit's ``lnL``, ``n_points``, ``n_params`` (the baseline coefficients
+    included), ``BIC`` and ``AIC``. No uncertainties. Notes are ``#`` lines,
+    which readers skip. ``mode``: ``lineph_mle`` or ``ttv_mle``."""
     rows = [f"{n},{v:.10e}" for n, v in fit.rows]
     rows += [f"lnL,{fit.lnL:.10e}", f"n_points,{fit.n_points}",
              f"n_params,{fit.n_params}", f"BIC,{fit.bic:.10e}",
              f"AIC,{fit.aic:.10e}"]
     rows += [f"# {note}" for note in fit.notes]
-    return _write_csv(product_path(outdir, target, "lineph_mle", name, "csv"),
+    return _write_csv(product_path(outdir, target, mode, name, "csv"),
                       "Parameter,MLE", rows, log)
 
 
-def export_mle_compare(outdir, target, cmp, *, log=None):
-    """``--mle --oblate``: the round-vs-oblate comparison
-    (:func:`turin.mle.compare`), one ``quantity,value`` row each."""
+def export_mle_compare(outdir, target, cmp, *, mode="lineph_mle", log=None):
+    """A ``--mle`` comparison, one ``quantity,value`` row each: round vs
+    oblate (:func:`turin.mle.compare`, ``lineph_mle``) or LinEph vs TTV
+    (:func:`turin.mle.compare_ttv`, ``ttv_mle``)."""
     rows = [f"{k},{v:.10e}" if isinstance(v, float) else f"{k},{int(v)}"
             for k, v in cmp.items()]
-    return _write_csv(product_path(outdir, target, "lineph_mle", "compare",
-                                   "csv"), "quantity,value", rows, log)
+    return _write_csv(product_path(outdir, target, mode, "compare", "csv"),
+                      "quantity,value", rows, log)
 
 
 def export_ttv_skipped(outdir, target, reason, epochs, snrs, *, log=None):

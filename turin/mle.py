@@ -1,4 +1,4 @@
-"""Maximum-likelihood fits (``--mle``): LinEph, round or oblate.
+"""Maximum-likelihood fits (``--mle``): LinEph, round or oblate, and TTV.
 
 The **likelihood alone** is maximised: turin's priors (the b-k grazing
 taper, ``--rhostar``) are off, and only hard domains stay -- the parameter
@@ -19,6 +19,10 @@ limb darkening on the simplex's faces directly, which the joint search in
 2. The limb darkening at the optimum, ``q`` from the profile's ``x*``.
 3. Under ``--oblate``, the round model is fitted first, the oblate search
    starts from its optimum at f ~ 0, and the two are compared.
+4. TTV (:func:`fit_ttv`) starts from the LinEph fit and alternates an exact
+   per-epoch timing step (:func:`timing_step`: every epoch's whole box on a
+   grid, the limb darkening held) with a joint polish, until a timing step
+   moves no epoch.
 
 The result is the best fit and nothing else: no uncertainties (the user's
 decision -- an MLE is the best fit, error bars come from sampling).
@@ -51,6 +55,8 @@ N_SPREAD_BETA = 64
 #: Product mode stem: ``{target}_lineph_mle_{name}.{ext}``, apart from any
 #: MCMC lineage's ``{target}_lineph_*``.
 MODE = "lineph_mle"
+#: The TTV fit's stem: {target}_ttv_mle_{name}.{ext}.
+MODE_TTV = "ttv_mle"
 
 
 @dataclass
@@ -71,6 +77,9 @@ class MleFit:
     n_starts: int
     top_spread: float
     notes: list = field(default_factory=list)
+    #: TTV: the sampled-LD likelihood (float32), for per-epoch terms, which
+    #: the profiled one cannot give (a shared LD couples the epochs)
+    lp_joint: object = None
 
     @property
     def bic(self):
@@ -175,6 +184,201 @@ def round_starts(layout, transform, eph, rng):
     return transform.from_model_np(V)
 
 
+#: Grid cells per epoch for the TTV timing step: as grid-Gibbs, ~1/115 of
+#: the default box (+-4.45 T14), refined by :data:`N_ZOOM` points over
+#: +-1.5 cells around the best one.
+N_TIMING_GRID = 512
+N_ZOOM = 64
+#: An epoch whose term moves less than this over its whole box has no
+#: transit data its time could explain: the time is arbitrary.
+FLAT_NATS = 0.01
+
+
+@dataclass
+class TimingStep:
+    """One exact timing step: ``v`` with every epoch time at its best."""
+
+    v: np.ndarray            # model-space vector after the step
+    moved: np.ndarray        # (E,) bool: the epoch's time changed
+    gain: np.ndarray         # (E,) float64 ln L gained per epoch (>= 0)
+    flat: np.ndarray         # (E,) bool: term flat over the box
+
+
+def timing_step(lp32, lp64, layout, v, *, n_grid=N_TIMING_GRID,
+                n_zoom=N_ZOOM):
+    """Put every epoch's time at its best given everything else.
+
+    ``lp32``, ``lp64``: the sampled-LD TTV likelihood
+    (:class:`turin.likelihood.ProfiledTransitLogProb`) in float32 and
+    float64; ``layout`` its layout; ``v`` ``(dim,)`` in model space, the
+    limb darkening held at its current value. Given shape and limb
+    darkening each epoch's term depends on its own time alone, so one
+    batched :meth:`epoch_log_lik` call scores every epoch's grid over its
+    whole box (as :class:`turin.gibbs.GridGibbs` does, no prior here). The
+    best cell is refined on a finer grid, and an epoch moves only where
+    float64 says its term rose, so the step never lowers ln L. Returns a
+    :class:`TimingStep`."""
+    s = layout.n_shape
+    lo, hi = layout.lo[s:], layout.hi[s:]
+    E = layout.n_epochs
+    width = (hi - lo) / n_grid
+    mids = lo[:, None] + width[:, None] * (np.arange(n_grid)[None, :] + 0.5)
+
+    def terms32(T):                          # T (G, E) -> (G, E)
+        V = np.repeat(np.asarray(v, dtype=np.float64)[None, :], T.shape[0], 0)
+        V[:, s:] = T
+        return np.array(lp32.epoch_log_lik(mx.array(V, dtype=mx.float32)),
+                        dtype=np.float64)
+
+    L = terms32(mids.T)                                        # (G, E)
+    flat = (L.max(axis=0) - L.min(axis=0)) < FLAT_NATS
+    best = mids[np.arange(E), np.argmax(L, axis=0)]
+    off = np.linspace(-1.5, 1.5, n_zoom)
+    Z = np.clip(best[None, :] + off[:, None] * width[None, :],
+                lo + 1e-9 * (hi - lo), hi - 1e-9 * (hi - lo))  # (n_zoom, E)
+    cand = Z[np.argmax(terms32(Z), axis=0), np.arange(E)]
+
+    v_new = np.array(v, dtype=np.float64)
+    v_new[s:] = cand
+    with mx.stream(mx.cpu):
+        t64 = np.array(lp64.epoch_log_lik(mx.array(
+            np.stack([np.asarray(v, dtype=np.float64), v_new]),
+            dtype=mx.float64)), dtype=np.float64)
+    moved = (t64[1] > t64[0]) & ~flat
+    out = np.array(v, dtype=np.float64)
+    out[s:] = np.where(moved, cand, out[s:])
+    return TimingStep(v=out, moved=moved,
+                      gain=np.where(moved, t64[1] - t64[0], 0.0), flat=flat)
+
+
+#: TTV search: starts per joint polish (fewer than LinEph's 128: each start's
+#: Newton step sends 2 x dim gradient rows, and dim grows with the epochs),
+#: half with beta spread over (0, 1) as :func:`round_starts`.
+N_TTV_STARTS = 32
+#: Spread of the polish's starts in u: the shape as the LinEph ball, the
+#: epoch times barely (a 0.25 ball in u moves each time by ~0.56 T14,
+#: out of the dip the timing step put it in).
+TTV_SHAPE_SD = 0.25
+TTV_TIME_SD = 0.002
+#: Timing step + polish passes before giving up on the certificate.
+MAX_TTV_PASSES = 5
+
+
+def lineph_to_ttv(layout, v_lineph):
+    """The TTV vector (shape, then times) of a LinEph one (``dP, dtau0`` then
+    the same shape): ``dtau_i = dtau0 + n_i dP`` (nested models)."""
+    v = np.asarray(v_lineph, dtype=np.float64)
+    return np.r_[v[2:2 + layout.n_shape], v[1] + layout.n_arr * v[0]]
+
+
+def fit_ttv(prepared, centering, epoch_data, orders, *, law, b_prior,
+            build_kw, lineph_fit, tau_half, seed=0, log=print):
+    """The TTV maximum-likelihood fit, by block coordinate ascent from the
+    LinEph one (``lineph_fit``, an :class:`MleFit`): an exact timing step
+    (:func:`timing_step`, limb darkening held at the profile's maximiser),
+    then a joint polish (``anvil.optimize`` on the profiled-LD target,
+    every parameter), until a timing step moves no epoch -- the certificate
+    that no epoch's time can gain alone. Starts nested (``dtau_i = dtau0 +
+    n_i dP``), so it cannot end below LinEph. Returns an :class:`MleFit`."""
+    import anvil
+
+    eph = prepared.eph
+    kw = dict(build_kw, profile_mode="exact", likelihood_only=True)
+    play = _params.ttv_layout(eph, centering, tau_half, b_prior=b_prior,
+                              law=law, ld="collapsed")
+    tr, T, lo, hi = _likelihood.build_target(play, centering, epoch_data,
+                                             orders, **kw)
+    slay = _params.ttv_layout(eph, centering, tau_half, b_prior=b_prior,
+                              law=law)
+    _, _, s_lo, s_hi = _likelihood.build_target(slay, centering, epoch_data,
+                                                orders, **kw)
+    s, n_ld, E = play.n_shape, len(slay.ld_names), play.n_epochs
+    rng = np.random.default_rng(seed)
+    notes = []
+
+    def value(theta):
+        with mx.stream(mx.cpu):
+            return float(np.array(hi(mx.array(theta[None], dtype=mx.float64)))
+                         [0]) + lo.log_const
+
+    def ld_at(theta):
+        with mx.stream(mx.cpu):
+            q = hi.conditional_mode_ld(mx.array(theta[None], dtype=mx.float64))
+        return np.array([float(np.asarray(c)[0]) for c in q])
+
+    theta = lineph_to_ttv(play, lineph_fit.v_model)
+    box = play.hi[s:] * (1 - 1e-6)
+    if np.any(np.abs(theta[s:]) > box):
+        notes.append(f"{int(np.sum(np.abs(theta[s:]) > box))} epoch(s)' "
+                     f"LinEph times lie outside their timing box; started "
+                     f"at its edge")
+        theta[s:] = np.clip(theta[s:], -box, box)
+    lnL = value(theta)
+    log(f"  [ttv {law}] start: the LinEph best fit, ln L {lnL:.3f} "
+        f"(LinEph {lineph_fit.lnL:.3f})")
+
+    certified, res = False, None
+    for npass in range(MAX_TTV_PASSES + 1):
+        q = ld_at(theta)
+        step = timing_step(s_lo, s_hi, slay,
+                           np.r_[theta[:s], q, theta[s:]])
+        if res is not None and not step.moved.any():
+            certified = True
+            log(f"  [ttv {law}] certified: a timing step at the polished fit "
+                f"moves no epoch")
+            break
+        theta = np.r_[step.v[:s], step.v[s + n_ld:]]    # never lowers ln L
+        if npass == MAX_TTV_PASSES:
+            break
+        log(f"  [ttv {law}] pass {npass + 1}: timing step moved "
+            f"{int(step.moved.sum())} of {E} epochs (+{step.gain.sum():.3f} "
+            f"in ln L)")
+        u0 = T.from_model_np(theta)
+        U = np.tile(u0, (N_TTV_STARTS, 1))
+        U[1:, :s] += TTV_SHAPE_SD * rng.standard_normal((N_TTV_STARTS - 1, s))
+        U[1:, s:] += TTV_TIME_SD * rng.standard_normal((N_TTV_STARTS - 1, E))
+        n = N_TTV_STARTS // 2
+        V = T.model_np(U)
+        V[1:n + 1, play.index("beta")] = np.clip(
+            (np.arange(n) + rng.uniform(size=n)) / n, 0.005, 0.995)
+        U = T.from_model_np(V)
+        res = anvil.optimize(tr, U, objective="mle", seed=seed,
+                             max_rows=_seeding.MAX_ROWS)
+        log(f"  [ttv {law}] pass {npass + 1}: polish ln L "
+            f"{res.log_value:.3f} in {res.wall_time:.1f}s")
+        theta = np.asarray(res.model, dtype=np.float64)
+    if not certified:
+        notes.append(f"the timing step still moved epochs after "
+                     f"{MAX_TTV_PASSES} passes: not certified that no "
+                     f"epoch's time can gain alone")
+    if step.flat.any():
+        notes.append(f"{int(step.flat.sum())} epoch(s) have no transit data "
+                     f"their time could explain (term flat over the box): "
+                     f"their times are arbitrary")
+    lnL = value(theta)
+    if lnL < lineph_fit.lnL - 1e-3:
+        notes.append(f"ln L {lnL:.3f} is below LinEph's {lineph_fit.lnL:.3f}"
+                     f": the search failed")
+    edge = np.abs(theta[s:]) > 0.99 * play.hi[s:]
+    if edge.any():
+        notes.append(f"{int(edge.sum())} epoch time(s) within 1% of the "
+                     f"timing box edge (no prior holds them)")
+
+    q = ld_at(theta)
+    v_best = np.r_[theta[:s], q, theta[s:]]
+    names = list(slay.names)
+    best_phys = slay.transform().to_physical(v_best[None, :])
+    rows = [(n, float(best_phys[0, i])) for i, n in enumerate(names)]
+    rows += [(n, val) for n, val in _derived(slay, best_phys, names)]
+    return MleFit(
+        label=f"ttv {law}", layout=play, joint_layout=slay, lp=lo,
+        v_model=v_best, rows=rows, lnL=lnL, n_points=int(lo.n_real),
+        n_params=int(slay.dim + np.sum(np.asarray(orders) + 1)),
+        n_starts_converged=int(np.sum(res.status == "converged")),
+        n_starts=N_TTV_STARTS, top_spread=_seeding.top_spread(res),
+        notes=notes, lp_joint=s_lo)
+
+
 def _derived(layout, best_phys, names):
     """(name, value) for the derived rows, at the best fit."""
     from .pipeline import _ld_weight_draws, _oblate_draws
@@ -182,11 +386,24 @@ def _derived(layout, best_phys, names):
     out = [("b", float(_outputs.derived_b(best_phys, names,
                                           layout.b_prior)[0])),
            ("log10_rho", float(_outputs.log10_rho_draws(
-               best_phys, names, layout.b_prior)[0]))]
+               best_phys, names, layout.b_prior, P_ref=layout.P_ref)[0]))]
     for fn in (_ld_weight_draws, _oblate_draws):
         n0, d0 = fn(layout, best_phys, names)
         out += [(n, float(d0[0, j])) for j, n in enumerate(n0)]
     return out
+
+
+def compare_ttv(ttv_fit, lineph_fit):
+    """LinEph vs TTV: a dict of the reported numbers. n_extra is the
+    TTV fit's extra parameters (the epoch times for LinEph's period and
+    epoch). No p-value: a timing likelihood with several peaks per epoch
+    is not the regular case Wilks' theorem needs."""
+    dlnL = ttv_fit.lnL - lineph_fit.lnL
+    n = ttv_fit.n_points
+    k = ttv_fit.n_params - lineph_fit.n_params
+    return dict(lnL_ttv=ttv_fit.lnL, lnL_lineph=lineph_fit.lnL, dlnL=dlnL,
+                n_extra=int(k), dBIC=k * math.log(n) - 2.0 * dlnL,
+                dAIC=2.0 * k - 2.0 * dlnL, n_points=n)
 
 
 def compare(oblate_fit, round_fit):

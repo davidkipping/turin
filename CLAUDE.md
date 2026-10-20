@@ -148,7 +148,7 @@ turin/
   likelihood.py   epoch-block-chunked Gaussian logL, priors, anvil Transform/target
   params.py       LinEph/TTV parameter specs, b-k prior modes, derived quantities
   seeding.py      template-sweep tau seeds; MAP and chain starts via anvil.optimize
-  mle.py          --mle: maximum likelihood (LinEph, round or oblate), LD profiled, best fit only
+  mle.py          --mle: maximum likelihood (LinEph round/oblate, then TTV), LD profiled, best fit only
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
   gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
@@ -993,12 +993,13 @@ oblate), which anvil's own benchmark shows ending every start short.
 - Both anvil points above are findings, not briefs; whether either goes
   upstream is the user's call.
 
-### Maximum likelihood (`--mle`, `mle.py`, 0.1.72-0.1.74)
+### Maximum likelihood (`--mle`, `mle.py`, 0.1.72-0.1.74; TTV 0.1.82)
 
 A fit without sampling, built on the user's request with these decisions
 taken with them: **the best fit only**, no uncertainties (0.1.74); the
-**likelihood alone** (priors off, `--rhostar` refused), **LinEph only** (TTV lands in local timing optima, see "The MAP
-search"), and **`--oblate` also fits the round model** and reports
+**likelihood alone** (priors off, `--rhostar` refused), LinEph first
+and **TTV from it since 0.1.82** (below; refused under `--oblate`), and
+**`--oblate` also fits the round model** and reports
 ΔlnL/ΔBIC/ΔAIC (no p-value: at f = 0 theta is undefined and f is on its
 boundary, so Wilks does not apply). Products are `{T}_lineph_mle_*`
 (`fit`, `lcdata`, `fold`, and `round`/`compare` under `--oblate`); no
@@ -1043,6 +1044,34 @@ prefix, and until then `--fresh --mle` deleted the MCMC lineage and an MCMC
   *below* the round fit there), level on 4087.01 and 1361.01, 0.04-0.27
   short of the ball's best seed on 2650.01 and 4016.01, whose optima lie
   on a flat ridge at the F_MAX edge (no scheme was consistent there).
+- **TTV** (0.1.82, `mle.fit_ttv`; plan and decisions taken with the user
+  2026-10-20). Three agents looked for why `anvil.optimize` missed TTV
+  optima (0.1.71: 0.35-3.2 nats short on 3 of 6). The template seeds were
+  not the cause; the MAP's 0.25 sd start ball is, since it moves every
+  epoch's time ~0.56 T14 in u-space, and the sweep's tie-break and prior
+  are a posterior's choices. The search:
+  - **Gate:** the median expected single-transit SNR at the LinEph best
+    fit (`transit_snrs`) against `--SNRgate` (default
+    `pipeline.MLE_SNR_GATE` = 5, the user's; refused without `--mle`);
+    below it the run stops after LinEph. It never touches the MCMC
+    lineage's resume state or `ttv_skipped` note.
+  - **Block coordinate ascent** from the LinEph fit's times
+    (`lineph_to_ttv`): `timing_step` puts every epoch at its float64-
+    checked best over its whole box (512-cell float32 grid from one
+    batched `epoch_log_lik` call on the sampled-LD likelihood with q at
+    the profile's maximiser, a 64-point zoom, moved only where its term
+    rose), then `anvil.optimize` polishes everything on the profiled-LD
+    target (32 starts: shape 0.25 sd in u, half spread over beta; times
+    0.002 sd). Until a timing step moves no epoch (the certificate; cap 5
+    passes). The LD is fitted: held only within the timing step.
+  - **Products** `{T}_ttv_mle_*`: fit, times (errors NaN, O-C against the
+    LinEph fit's P and tau0), lcdata, fold, oc (no error bars), compare
+    (dlnL, n_extra, dBIC, dAIC; no p-value).
+  - **Measured so far:** synthetic only. Decoy data (`test_mle_ttv.py`:
+    each epoch at least its dense float64 grid maximum; a local-only
+    mutation fails it) and an injected 12-minute TTV end to end (times
+    within 2 min, two passes, 2.4 s). The real-target benchmark (the
+    0.1.71 comparison) and the check against TTV MCMC draws are pending.
 - **Profiled LD on TTV layouts** (0.1.81, the base of a TTV `--mle`):
   `params.ttv_layout(..., ld="collapsed")` drops the LD coordinates;
   `ProfileLDLogProb` / `ProfileHybridLogProb` accept a TTV layout

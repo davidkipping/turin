@@ -30,6 +30,22 @@ EPH = {"period": P_TRUE, "epoch": EPOCH_TRUE, "duration": DUR_H,
 @pytest.fixture
 def fake_target(monkeypatch):
     """Patch data acquisition to serve a synthetic Kepler-like light curve."""
+    return _serve(monkeypatch)
+
+
+#: Injected TTVs of :func:`fake_ttv_target`, days per epoch: a 12-minute
+#: sinusoid, period 5 epochs.
+def _ttv_truth(n_epochs):
+    return 12.0 / 1440.0 * np.sin(2 * np.pi * np.arange(n_epochs) / 5.0)
+
+
+@pytest.fixture
+def fake_ttv_target(monkeypatch):
+    """As :func:`fake_target`, with transit-timing variations injected."""
+    return _serve(monkeypatch, ttv=True)
+
+
+def _serve(monkeypatch, ttv=False):
     rng = np.random.default_rng(99)
     t = np.arange(100.0, 100.0 + 12.0 * P_TRUE, 29.4 / 1440.0)
 
@@ -42,8 +58,10 @@ def fake_target(monkeypatch):
                         dtype=mx.float64, exp_time=29.4 / 1440)
     col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
     with mx.stream(mx.cpu):
+        mid = (_ttv_truth(ed["n_epochs"]) if ttv
+               else np.zeros(ed["n_epochs"]))
         f = np.array(M.transit_flux(
-            grid, mid=mx.zeros((1, ed["n_epochs"]), dtype=mx.float64),
+            grid, mid=mx.array(mid[None, :], dtype=mx.float64),
             k=col(K_TRUE), b=col(B_TRUE), T14=col(T14_TRUE), q1=col(Q1_TRUE),
             q2=col(Q2_TRUE), period=col(P_TRUE)), dtype=np.float64)[0]
 
@@ -828,6 +846,58 @@ def test_mle_fits_without_sampling_and_leaves_a_lineage_alone(tmp_path,
     removed = outputs.clear_products(out, "KOI-1.01")
     assert removed == ["KOI-1.01_lineph_resume.pkl"]
     assert os.path.exists(os.path.join(out, "KOI-1.01_lineph_mle_fit.csv"))
+
+
+def test_mle_fits_ttv_from_lineph_and_recovers_the_times(tmp_path,
+                                                         fake_ttv_target):
+    """--mle with TTV (0.1.82): LinEph first, then the TTV fit from it; the
+    ttv_mle products; the injected times recovered; TTV never below LinEph;
+    an MCMC TTV lineage and its skipped note untouched."""
+    out = str(tmp_path)
+    keep = {"KOI-1.01_ttv_resume.pkl": b"not a real state",
+            "KOI-1.01_ttv_skipped.csv": b"an old note"}
+    for name, body in keep.items():
+        with open(os.path.join(out, name), "wb") as fh:
+            fh.write(body)
+    logs = []
+    assert pipeline.run(_args(tmp_path, mle=True, modes=("lineph", "ttv")),
+                        log=logs.append) == 0
+    names = sorted(os.listdir(out))
+    for suffix in ("fit.csv", "times.csv", "lcdata.csv", "fold.pdf",
+                   "oc.pdf", "compare.csv"):
+        assert f"KOI-1.01_ttv_mle_{suffix}" in names, (suffix, names)
+    for name, body in keep.items():
+        with open(os.path.join(out, name), "rb") as fh:
+            assert fh.read() == body
+    text = "\n".join(logs)
+    assert "ttv maximum likelihood" in text and "ttv vs lineph" in text
+
+    _, rows = _mle_rows(os.path.join(out, "KOI-1.01_ttv_mle_compare.csv"))
+    assert float(rows["dlnL"][0]) > 50          # a 12-minute TTV, SNR ~ 100
+    times = np.genfromtxt(os.path.join(out, "KOI-1.01_ttv_mle_times.csv"),
+                          delimiter=",", names=True, comments="#")
+    pr = prep.prepare_data("KOI-1.01", log=lambda *a: None)
+    cen = prep.centering_constants(pr.epoch_data, pr.eph)
+    truth = (np.asarray(cen["centers_abs"]) + np.asarray(cen["d_arr"])
+             + _ttv_truth(pr.epoch_data["n_epochs"]))
+    has = times["snr"] > 5
+    assert has.sum() >= 8
+    np.testing.assert_array_less(np.abs(times["tmid"] - truth)[has] * 1440,
+                                 2.0)                        # minutes
+    assert np.all(np.isnan(times["tmid_err"]))
+
+
+def test_mle_ttv_gate_refuses_weak_transits(tmp_path, fake_target):
+    """--SNRgate: below it the run stops after LinEph, with the LinEph
+    products and no TTV ones."""
+    logs = []
+    assert pipeline.run(_args(tmp_path, mle=True, modes=("lineph", "ttv"),
+                              snr_gate=1e6), log=logs.append) == 0
+    names = os.listdir(str(tmp_path))
+    assert "KOI-1.01_lineph_mle_fit.csv" in names
+    assert not any("_ttv_" in n for n in names), names
+    assert any("TTV fit REFUSED" in l and "--SNRgate=1e+06" in l
+               for l in logs)
 
 
 def test_mle_oblate_fits_the_round_model_too(tmp_path, fake_target):

@@ -39,15 +39,21 @@ def test_defaults_match_the_documented_ones():
     assert a.ld == "sampled"
 
 
-def test_mle_runs_lineph_alone():
-    """--mle drops the TTV fit from the default modes (a TTV maximum
-    likelihood is not offered), and leaves --ld to the pipeline's default,
-    which --mle ignores (its limb darkening is profiled)."""
+def test_mle_runs_lineph_then_ttv():
+    """--mle keeps the default modes, LinEph then TTV (0.1.82), except under
+    --oblate (LinEph-only), and leaves --ld to the pipeline's default, which
+    --mle ignores (its limb darkening is profiled). --SNRgate is its TTV
+    gate: unset until given, and refused without --mle."""
     a = cli.parse_args(["--KOI-1.01", "--mle"])
-    assert a.mle and a.modes == ("lineph",)
+    assert a.mle and a.modes == ("lineph", "ttv") and a.snr_gate is None
+    a = cli.parse_args(["--KOI-1.01", "--mle", "--modes=lineph"])
+    assert a.modes == ("lineph",)
     a = cli.parse_args(["--KOI-1.01", "--mle", "--law=hybrid4", "--oblate"])
     assert a.mle and a.oblate and a.modes == ("lineph",)
     assert not cli.parse_args(["--KOI-1.01"]).mle
+    assert cli.parse_args(["--KOI-1.01", "--mle",
+                           "--SNRgate=7.5"]).snr_gate == 7.5
+    assert cli.parse_args(["--KOI-1.01", "--mle", "--SNRgate=0"]).snr_gate == 0
 
 
 def test_nongrazing_is_an_alias():
@@ -111,7 +117,9 @@ def test_modes_subset():
     (["--KOI-1.01", "--oblate", "--law=hybrid4", "--modes=lineph",
       "--geometry=chord"], "circular"),
     # maximum likelihood
-    (["--KOI-1.01", "--mle", "--modes=ttv"], "LinEph-only"),
+    (["--KOI-1.01", "--mle", "--modes=ttv"], "include lineph"),
+    (["--KOI-1.01", "--SNRgate=5"], "--TTVsnr"),
+    (["--KOI-1.01", "--mle", "--SNRgate=-1"], "non-negative"),
     (["--KOI-1.01", "--mle", "--rhostar=3.2,0.05"], "prior"),
     (["--KOI-1.01", "--mle", "--ld=sampled"], "profiles the limb"),
     (["--KOI-1.01", "--mle", "--geometry=chord"], "circular"),

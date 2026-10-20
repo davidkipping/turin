@@ -487,7 +487,103 @@ def _run_mle(args, prepared, cv, outdir, *, log):
                 "the family that mimics a round planet at larger b; "
                 "compare a --rhostar posterior before reading f as a "
                 "detection")
+    if "ttv" in args.modes and not args.oblate:
+        _run_mle_ttv(args, prepared, centering, orders, outdir, main,
+                     build_kw, log=log)
     return 0
+
+
+#: --SNRgate's default: the --mle TTV gate, stricter than --TTVsnr's 3. A
+#: maximum-likelihood time has no error bar to show that a weak transit's
+#: time is little more than noise, and low SNR is where an epoch's timing
+#: likelihood has several comparable peaks (the user's call, 2026-10-20).
+MLE_SNR_GATE = 5.0
+
+
+def _run_mle_ttv(args, prepared, centering, orders, outdir, lineph_fit,
+                 build_kw, *, log):
+    """``--mle``'s TTV fit, from the LinEph one (:func:`turin.mle.fit_ttv`),
+    behind its own gate: the median expected single-transit SNR at the
+    LinEph best fit (:func:`transit_snrs`) against ``--SNRgate``. Never
+    reads the MCMC lineage's resume state and never writes or removes its
+    ``ttv_skipped`` note. Products are ``{target}_ttv_mle_*``."""
+    from . import mle as _mle
+
+    target = prepared.target
+    epoch_data = prepared.epoch_data
+    gate = getattr(args, "snr_gate", None)
+    gate = MLE_SNR_GATE if gate is None else float(gate)
+    snr = transit_snrs(prepared, centering, dict(lineph_fit.rows),
+                       b_prior=args.b_prior, law=args.law)
+    covered = snr[snr > _SNR_COVERED]
+    typical = float(np.median(covered)) if covered.size else 0.0
+    log(f"[{target}] ttv maximum likelihood: median expected SNR of a single "
+        f"transit {typical:.2f} over {covered.size} of {snr.size} epochs "
+        f"with data in transit, at the LinEph best fit")
+    if typical < gate:
+        log(f"  TTV fit REFUSED: below --SNRgate={gate:g}; a weak transit's "
+            f"best time means little. The LinEph fit is this target's "
+            f"result; --SNRgate=0 fits anyway")
+        return None
+    _, tau_half = _mode_layout("ttv", args, prepared, centering, epoch_data)
+    fit = _mle.fit_ttv(prepared, centering, epoch_data, orders, law=args.law,
+                       b_prior=args.b_prior, build_kw=build_kw,
+                       lineph_fit=lineph_fit, tau_half=tau_half,
+                       seed=args.seed, log=log)
+    _log_mle(fit, log)
+    mode = _mle.MODE_TTV
+    _outputs.export_mle(outdir, target, "fit", fit, mode=mode, log=log)
+
+    play, jlay = fit.layout, fit.joint_layout
+    v_theta = np.r_[fit.v_model[:play.n_shape], fit.v_model[jlay.n_shape:]]
+    model, baseline, q_ml = _ml_model(fit.lp, v_theta, collapsed=True)
+    _outputs.export_lcdata(outdir, target, mode, epoch_data, model, log=log)
+    _fold_figure("ttv", target, outdir, fit.lp, v_theta, play, centering,
+                 epoch_data, baseline, log=log, ld=q_ml, stem=mode)
+
+    P_ref = (lineph_fit.value("dP"), lineph_fit.value("dtau0"))
+    rows = _ttv_mle_rows(fit, P_ref, centering, epoch_data, model)
+    _outputs.export_ttv_times(outdir, target, mode, rows, log=log)
+    try:
+        _plots.oc_plot(
+            _outputs.product_path(outdir, target, mode, "oc", "pdf"),
+            [r["epoch"] for r in rows], [r["tmid"] for r in rows], None,
+            reference=P_ref, log=log,
+            title=f"{target} transit timing (maximum likelihood, against "
+                  f"the LinEph best fit)")
+    except Exception as exc:
+        log(f"    O-C plot skipped: {exc}")
+
+    cmp = _mle.compare_ttv(fit, lineph_fit)
+    _outputs.export_mle_compare(outdir, target, cmp, mode=mode, log=log)
+    log(f"  ttv vs lineph: dlnL = {cmp['dlnL']:.3f} for {cmp['n_extra']} "
+        f"more parameters, dBIC = {cmp['dBIC']:.2f}, dAIC = "
+        f"{cmp['dAIC']:.2f} (negative favours TTV; no p-value: timing "
+        f"likelihoods are multimodal)")
+    return fit
+
+
+def _ttv_mle_rows(fit, reference, centering, epoch_data, model):
+    """``times.csv`` rows of a ``--mle`` TTV fit: hurin's columns, the
+    errors NaN (a best fit has none), O-C against ``reference`` = (P, tau0),
+    the LinEph best fit's ephemeris."""
+    P, tau0 = reference
+    n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
+    mask = np.asarray(epoch_data["mask"]) > 0
+    y = np.asarray(epoch_data["flux_padded"], dtype=np.float64)
+    e = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
+    m = np.asarray(model, dtype=np.float64)
+    snrs = _epoch_snr(fit.lp_joint, fit.joint_layout, fit.v_model)
+    rows = []
+    for i, n in enumerate(n_arr):
+        tmid = fit.value(f"dtau_{int(n)}")
+        sel = mask[i]
+        rows.append(dict(
+            epoch=int(n), tmid=tmid, tmid_err=np.nan,
+            ttv_min=(tmid - (tau0 + P * n)) * 1440.0, ttv_err_min=np.nan,
+            snr=float(snrs[i]), npts=int(sel.sum()),
+            chi2=float(np.sum(((y[i][sel] - m[i][sel]) / e[i][sel]) ** 2))))
+    return rows
 
 
 def _log_mle(fit, log):
