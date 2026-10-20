@@ -207,22 +207,35 @@ def lineph_layout(eph, b_prior="transiting", T14_max=None, ld="sampled",
 
 
 def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
-               law="quadratic", oblate=False, rhostar=()):
+               law="quadratic", oblate=False, rhostar=(), ld="sampled"):
     """Parameter layout for the per-epoch-timing fit.
 
     ``tau_half`` is the half-width of each epoch's timing prior, in days:
     either ``--TTVmax`` or the data-driven extent, one value per epoch.
+
+    ``ld="collapsed"`` drops the limb-darkening coordinates, as in
+    :func:`lineph_layout`, for the **profiled** likelihood of ``--mle``
+    only (:class:`turin.ldmarg.ProfileLDLogProb`,
+    :class:`turin.ldhybrid.ProfileHybridLogProb`). Sampling refuses it: an
+    integrated-out limb darkening couples every epoch, which breaks the
+    per-epoch factorisation grid-Gibbs relies on.
     """
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
     if law not in LAWS:
         raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
+    if ld not in LD_MODES:
+        raise ValueError(f"unknown ld mode {ld!r}; expected {LD_MODES}")
+    if ld == "collapsed" and law not in ("quadratic", "hybrid4"):
+        raise ValueError(f"--ld=collapsed is not implemented for {law}")
     if oblate:
         raise ValueError("an oblate planet is LinEph-only: a TTV fit would pay "
                          "the oblate kernel (~40-85x) on every grid-Gibbs "
                          "sweep, and oblateness is a shape property LinEph "
                          "measures from every epoch together")
     rows = list(_shape_bounds(eph, T14_max=T14_max, law=law))
+    if ld == "collapsed":
+        rows = [r for r in rows if r[0] not in ld_names(law)]
     n_arr = np.asarray(centering["n_arr"], dtype=np.float64)
     centers = np.asarray(centering["centers_abs"], dtype=np.float64)
     tau_half = np.broadcast_to(np.asarray(tau_half, dtype=np.float64),
@@ -246,7 +259,7 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         mode="ttv", names=names, lo=np.array(lo), hi=np.array(hi),
         report_offset=np.array(off), b_prior=b_prior,
         P_ref=float(eph["period"]), tau0_ref=float(eph["epoch"]),
-        n_arr=n_arr, centers_abs=centers, law=law,
+        n_arr=n_arr, centers_abs=centers, ld=ld, law=law,
         rhostar=_rhostar(rhostar))
 
 

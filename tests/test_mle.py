@@ -258,3 +258,187 @@ def test_round_starts_cover_the_impact_parameter(b_prior):
     v0 = seeding.initial_model_vector(lay, LM.EPH)
     assert np.ptp(ball[:, lay.index("beta")]) < 0.6
     assert np.allclose(np.median(ball, axis=0), v0, atol=0.1)
+
+
+# -- TTV: the profile over a TTV layout (0.1.81) -------------------------------
+
+TAU_HALF = 0.03
+
+
+def _ttv_targets(ed, cen, orders, eph, *, law="quadratic", ld="collapsed",
+                 exposure_time=LM.EXP, **kw):
+    lay = params.ttv_layout(eph, cen, TAU_HALF, law=law, ld=ld)
+    kw.setdefault("n_chains_hint", 16)
+    tr, T, lo, hi = likelihood.build_target(
+        lay, cen, ed, orders, num_resample=1, exposure_time=exposure_time,
+        likelihood_only=True, **kw)
+    return lay, tr, T, lo, hi
+
+
+def _law_case(law):
+    """(ed, cen, orders, eph, exposure, LinEph theta (dP, dtau0, k, beta,
+    T14) off the truth, the sampled-LD truth's q)."""
+    if law == "quadratic":
+        ed, cen, orders = LM._dataset()
+        return (ed, cen, orders, LM.EPH, LM.EXP,
+                LM.THETA + np.r_[2e-5, -6e-4, 0, 0, 0], np.r_[0.30, 0.225])
+    ed, cen, _, _, orders = H4.make_dataset()
+    return (ed, cen, orders, H4.EPH, H4.EXP,
+            H4.V_TRUE[:5] + np.r_[2e-5, -6e-4, 0, 0, 0], H4.V_TRUE[5:])
+
+
+def _ttv_theta(lay, lineph_theta):
+    """The TTV vector of a LinEph one: dtau_i = dtau0 + n_i dP."""
+    dP, dtau0 = lineph_theta[:2]
+    return np.r_[lineph_theta[2:5], dtau0 + lay.n_arr * dP]
+
+
+@pytest.mark.parametrize("law", ["quadratic", "hybrid4"])
+def test_ttv_profile_equals_the_lineph_profile_on_a_linear_ephemeris(law):
+    """Nested models: at dtau_i = dtau0 + n_i dP the TTV profile is the
+    LinEph profile, value and gradient, so a TTV fit started from the LinEph
+    optimum cannot end below it -- exactly at dP = 0. Otherwise only nearly:
+    TTV mode holds the period at the reference (as hurin), and the period
+    also sets the transit's shape through a/R* (measured: dP = 2e-5 d moves
+    ln L by 8e-9 and 2e-7 nats on these two cases)."""
+    ed, cen, orders, eph, exp, th, _ = _law_case(law)
+    th = th * np.r_[0, 1, 1, 1, 1]
+    _, _, _, _, lhi = _profile_targets(ed, cen, orders, eph, law=law,
+                                       exposure_time=exp)
+    tlay, _, _, _, thi = _ttv_targets(ed, cen, orders, eph, law=law,
+                                      exposure_time=exp)
+    assert type(thi).__name__ == ("ProfileLDLogProb" if law == "quadratic"
+                                  else "ProfileHybridLogProb")
+    assert tlay.n_shape == 3 and tlay.dim == 3 + tlay.n_epochs
+    tth = _ttv_theta(tlay, th)
+    assert float(_hi(thi, tth)[0]) == pytest.approx(float(_hi(lhi, th)[0]),
+                                                    abs=1e-9)
+    with mx.stream(mx.cpu):
+        gl = np.array(mx.grad(lambda v: mx.sum(lhi(v)))(
+            mx.array(th[None], dtype=mx.float64)))[0]
+        gt = np.array(mx.grad(lambda v: mx.sum(thi(v)))(
+            mx.array(tth[None], dtype=mx.float64)))[0]
+    np.testing.assert_allclose(gt[:3], gl[2:5], rtol=1e-8, atol=1e-8)
+    # the chain rule back to LinEph's dtau0 (dP also acts through the
+    # period's effect on the shape, which TTV mode does not have)
+    assert gt[3:].sum() == pytest.approx(gl[1], rel=1e-8, abs=1e-6)
+
+
+@pytest.mark.parametrize("law", ["quadratic", "hybrid4"])
+def test_ttv_profile_is_the_maximum_over_the_simplex(law):
+    """Off a linear ephemeris (every epoch shifted differently), the TTV
+    profile is the brute-force maximum over the limb-darkening simplex."""
+    ed, cen, orders, eph, exp, th, _ = _law_case(law)
+    tlay, _, _, _, thi = _ttv_targets(ed, cen, orders, eph, law=law,
+                                      exposure_time=exp)
+    rng = np.random.default_rng(5)
+    tth = _ttv_theta(tlay, th)
+    tth[3:] += 2e-3 * rng.standard_normal(tlay.n_epochs)
+    d = 2 if law == "quadratic" else 4
+    for v in (tth, tth * np.r_[1.02, 0.9, 1.01, np.ones(tlay.n_epochs)]):
+        prof = float(_hi(thi, v)[0])
+        brute = _brute_max(thi, v, d, rng)
+        assert abs(prof - brute) < (1e-7 if d == 2 else 1e-6), prof - brute
+
+
+def test_ttv_envelope_gradient_matches_finite_differences():
+    ed, cen, orders = LM._dataset(**LM.CASES["moderate"])
+    tlay, _, _, _, thi = _ttv_targets(ed, cen, orders, LM.EPH,
+                                      exposure_time=0.0)
+    th = _ttv_theta(tlay, LM.CASE_THETA["moderate"])
+    th[3:] += 1e-3 * np.random.default_rng(6).standard_normal(tlay.n_epochs)
+    with mx.stream(mx.cpu):
+        g = np.array(mx.grad(lambda v: mx.sum(thi(v)))(
+            mx.array(th[None], dtype=mx.float64)))[0]
+    cols = [0, 1, 2, 3, 3 + tlay.n_epochs // 2]
+    h = np.r_[1e-7, 1e-6, 1e-7, 1e-7, 1e-7]
+    eye = np.eye(th.size)
+    fd = np.array([(_hi(thi, th + h[j] * eye[i])[0]
+                    - _hi(thi, th - h[j] * eye[i])[0]) / (2 * h[j])
+                   for j, i in enumerate(cols)])
+    np.testing.assert_allclose(g[cols], fd, rtol=2e-5,
+                               atol=1e-3 * np.abs(fd).max())
+
+
+def test_ttv_likelihood_only_drops_the_timing_prior():
+    """The sampled-LD TTV likelihood is the sampling density minus the b-k
+    and TTV priors exactly."""
+    ed, cen, orders = LM._dataset()
+    kw = dict(num_resample=1, exposure_time=LM.EXP, n_chains_hint=8)
+    lay = params.ttv_layout(LM.EPH, cen, TAU_HALF)
+    _, _, post, _ = likelihood.build_target(lay, cen, ed, orders, **kw)
+    tr, _, lik, _ = likelihood.build_target(lay, cen, ed, orders,
+                                            likelihood_only=True, **kw)
+    rng = np.random.default_rng(7)
+    V = np.tile(np.r_[_ttv_theta(lay, LM.THETA)[:3], 0.30, 0.225,
+                      np.zeros(lay.n_epochs)], (4, 1))
+    V[:, 5:] = 0.02 * rng.uniform(-1, 1, (4, lay.n_epochs))  # into the ramp
+    v = mx.array(V, dtype=mx.float32)
+    p = post.unpack(v)
+    want = (np.array(post(v))
+            - np.array(params.bk_log_prior(p["beta"], p["k"], lay.b_prior))
+            - np.array(params.ttv_log_prior(p["dtau"], lay.P_ref)))
+    np.testing.assert_allclose(np.array(lik(v)), want, rtol=0, atol=2e-3)
+    assert tr.model_log_norm == lik.log_const != 0.0
+
+
+@pytest.mark.parametrize("law", ["quadratic", "hybrid4"])
+def test_ttv_profiled_mle_is_the_joint_mle(law):
+    """As the LinEph test: the joint (theta, q) TTV search from the same
+    starts cannot beat the profiled TTV maximum, and at the profile's
+    (theta, q) the joint likelihood has the profile's value."""
+    import anvil
+
+    ed, cen, orders, eph, exp, th, q_true = _law_case(law)
+    play, ptr, pT, _, phi = _ttv_targets(ed, cen, orders, eph, law=law,
+                                         exposure_time=exp, n_chains_hint=128)
+    jlay, jtr, jT, _, _ = _ttv_targets(ed, cen, orders, eph, law=law,
+                                       ld="sampled", exposure_time=exp,
+                                       n_chains_hint=128)
+    v0 = _ttv_theta(play, th)
+    rng = np.random.default_rng(8)
+
+    def starts(T, v, d):
+        U = T.from_model_np(v)[None] + 0.25 * rng.standard_normal((64, d))
+        U[:, 3:3 + play.n_epochs] = T.from_model_np(v)[3:3 + play.n_epochs]
+        return U
+
+    rp = anvil.optimize(ptr, starts(pT, v0, play.dim), objective="mle")
+    vj = np.r_[v0[:3], q_true, v0[3:]]
+    Uj = jT.from_model_np(vj)[None] + 0.25 * rng.standard_normal(
+        (64, jlay.dim))
+    times = slice(jlay.n_shape, None)
+    Uj[:, times] = jT.from_model_np(vj)[times]
+    rj = anvil.optimize(jtr, Uj, objective="mle")
+    assert rj.log_value <= rp.log_value + 2e-3
+
+    with mx.stream(mx.cpu):
+        q = phi.conditional_mode_ld(mx.array(rp.model[None], dtype=mx.float64))
+    q = np.clip(np.array([float(c[0]) for c in q]), 1e-7, 1 - 1e-7)
+    u_joint = jT.from_model_np(np.r_[rp.model[:3], q, rp.model[3:]])
+    with mx.stream(mx.cpu):
+        at = float(np.array(jtr.log_likelihood_hi(
+            mx.array(u_joint[None], dtype=mx.float64)))[0]) + jtr.model_log_norm
+    assert at == pytest.approx(rp.log_value, abs=1e-4)
+
+
+def test_ttv_profile_refusals():
+    """Sampling keeps refusing a collapsed TTV layout (grid-Gibbs needs the
+    per-epoch factorisation); the profile takes it but has no per-epoch
+    terms; ttv_layout checks its ld mode."""
+    ed, cen, orders = LM._dataset()
+    kw = dict(num_resample=1, exposure_time=LM.EXP, n_chains_hint=4)
+    col = params.ttv_layout(LM.EPH, cen, TAU_HALF, ld="collapsed")
+    with pytest.raises(ValueError, match="LinEph-only"):
+        likelihood.build_target(col, cen, ed, orders, **kw)
+    hcol = params.ttv_layout(H4.EPH, cen, TAU_HALF, law="hybrid4",
+                             ld="collapsed")
+    with pytest.raises(ValueError, match="LinEph-only"):
+        likelihood.build_target(hcol, cen, ed, orders, **kw)
+    _, _, lo, _ = likelihood.build_target(col, cen, ed, orders,
+                                          likelihood_only=True, **kw)
+    assert type(lo) is ldmarg.ProfileLDLogProb
+    with pytest.raises(NotImplementedError, match="factorisation"):
+        lo.epoch_log_lik(mx.zeros((1, col.dim), dtype=mx.float32))
+    with pytest.raises(ValueError, match="ld mode"):
+        params.ttv_layout(LM.EPH, cen, TAU_HALF, ld="nope")

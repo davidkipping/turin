@@ -1043,6 +1043,18 @@ prefix, and until then `--fresh --mle` deleted the MCMC lineage and an MCMC
   *below* the round fit there), level on 4087.01 and 1361.01, 0.04-0.27
   short of the ball's best seed on 2650.01 and 4016.01, whose optima lie
   on a flat ridge at the F_MAX edge (no scheme was consistent there).
+- **Profiled LD on TTV layouts** (0.1.81, the base of a TTV `--mle`):
+  `params.ttv_layout(..., ld="collapsed")` drops the LD coordinates;
+  `ProfileLDLogProb` / `ProfileHybridLogProb` accept a TTV layout
+  (`TTV_OK`), while the `Marginal*` sampling classes still refuse it and
+  `epoch_log_lik` stays refused (a shared LD couples the epochs). Both
+  classes now use the parent's by-name `unpack` (26 quantities bitwise).
+  **Nested only up to the period:** at `dtau_i = dtau0 + n_i dP` the TTV
+  profile equals LinEph's exactly when `dP = 0`; otherwise TTV mode holds
+  the period at the reference (as hurin), and the period also sets the
+  shape through a/R* (8e-9 and 2e-7 nats at dP = 2e-5 d on the test
+  cases). Tested as the LinEph profile: brute-force simplex maximum, FD
+  gradient, the joint (theta, q) MLE, the TTV prior off.
 - **The round search spreads its starts over b** (0.1.75,
   `mle.round_starts`): of 128 starts, `N_SPREAD_BETA` = 64 have beta
   stratified over (0, 1), the rest the 0.25 ball around the input

@@ -42,7 +42,6 @@ import math
 import mlx.core as mx
 import numpy as np
 
-from . import likelihood as _lik
 from . import model as _model
 from . import profile as _profile
 from . import simplexmass as _sm
@@ -266,10 +265,14 @@ class MarginalHybridLogProb(ProfiledTransitLogProb):
     stores both, so a resume or replot rebuilds the identical density.
     """
 
+    #: Whether a TTV layout is accepted: only by the profile (``--mle``),
+    #: which has no grid-Gibbs to break.
+    TTV_OK = False
+
     def __init__(self, layout, centering, epoch_data, orders, *,
                  profile_mode="exact", geometry="circular", ghk_layout=None,
                  ghk_points=None, **kw):
-        if layout.mode != "lineph":
+        if layout.mode != "lineph" and not self.TTV_OK:
             raise ValueError(
                 "collapsed limb darkening is LinEph-only: shared weights "
                 "couple every epoch, which breaks the per-epoch factorisation "
@@ -311,18 +314,6 @@ class MarginalHybridLogProb(ProfiledTransitLogProb):
         self._T = mx.array(T, dtype=self.dtype)
         self._t = mx.array(t, dtype=self.dtype)
         self._U = mx.array(pts, dtype=self.dtype)
-
-    def unpack(self, v):
-        lay = self.layout
-        col = lambda n: v[:, lay.index(n):lay.index(n) + 1]
-        dP, dtau0, k, beta, T14 = (col(n) for n in
-                                   ("dP", "dtau0", "k", "beta", "T14"))
-        b = _model.impact_parameter(beta, k, lay.b_prior)
-        p = dict(dP=dP, dtau0=dtau0, dtau=None, k=k, beta=beta, b=b,
-                 T14=T14, period=lay.P_ref + dP)
-        if lay.oblate:
-            p.update(_lik.oblate_fields(col("fc"), col("fs"), k))
-        return p
 
     def _gen_blocks(self, p):
         return [_GenBlock(blk.design, _model.generator_flux_devs(
@@ -418,7 +409,11 @@ class ProfileHybridLogProb(MarginalHybridLogProb):
     :class:`turin.ldmarg.ProfileLDLogProb`: exact for a maximum, ``x*``
     from :data:`N_PROFILE` sequential-QP passes and detached, the gradient
     the envelope theorem's. Build it with ``build_target(...,
-    likelihood_only=True)``. The GHK rule it inherits is unused."""
+    likelihood_only=True)``. The GHK rule it inherits is unused. Takes
+    LinEph and TTV layouts alike; :meth:`epoch_log_lik` stays refused (the
+    shared weights couple the epochs)."""
+
+    TTV_OK = True
 
     def __call__(self, v):
         p = self.unpack(v)

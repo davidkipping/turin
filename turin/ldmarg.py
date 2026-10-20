@@ -365,9 +365,13 @@ class MarginalLDLogProb(ProfiledTransitLogProb):
     blocks; overrides the per-evaluation arithmetic only.
     """
 
+    #: Whether a TTV layout is accepted: only by the profile (``--mle``),
+    #: which has no grid-Gibbs to break.
+    TTV_OK = False
+
     def __init__(self, layout, centering, epoch_data, orders, *,
                  profile_mode="exact", geometry="circular", **kw):
-        if layout.mode != "lineph":
+        if layout.mode != "lineph" and not self.TTV_OK:
             raise ValueError(
                 "collapsed limb darkening is LinEph-only: a shared omega "
                 "couples every epoch, which breaks the per-epoch "
@@ -391,13 +395,6 @@ class MarginalLDLogProb(ProfiledTransitLogProb):
         kw.setdefault("bytes_per_point", COLLAPSED_BYTES_PER_POINT)
         super().__init__(layout, centering, epoch_data, orders,
                          profile_mode=profile_mode, geometry=geometry, **kw)
-
-    def unpack(self, v):
-        col = lambda i: v[:, i:i + 1]
-        dP, dtau0, k, beta, T14 = (col(i) for i in range(5))
-        b = _model.impact_parameter(beta, k, self.layout.b_prior)
-        return dict(dP=dP, dtau0=dtau0, dtau=None, k=k, beta=beta, b=b,
-                    T14=T14, period=self.layout.P_ref + dP)
 
     def _vertex_blocks(self, p):
         return [_VertexBlock(blk.design, _model.vertex_flux_devs(
@@ -474,7 +471,13 @@ class ProfileLDLogProb(MarginalLDLogProb):
     theta, so the gradient of ``L(theta, x*)`` at fixed ``x*`` is the
     profile's (envelope theorem). Build it with ``build_target(...,
     likelihood_only=True)``, which also turns the priors off.
+
+    Takes LinEph and TTV layouts alike (``ttv_layout(..., ld="collapsed")``).
+    Its epochs are still coupled through the shared limb darkening, so
+    :meth:`epoch_log_lik` stays refused.
     """
+
+    TTV_OK = True
 
     def __call__(self, v):
         p = self.unpack(v)
