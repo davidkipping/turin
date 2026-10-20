@@ -849,10 +849,21 @@ def test_mle_fits_without_sampling_and_leaves_a_lineage_alone(tmp_path,
 
 
 def test_mle_fits_ttv_from_lineph_and_recovers_the_times(tmp_path,
-                                                         fake_ttv_target):
+                                                         fake_ttv_target,
+                                                         monkeypatch):
     """--mle with TTV (0.1.82): LinEph first, then the TTV fit from it; the
     ttv_mle products; the injected times recovered; TTV never below LinEph;
-    an MCMC TTV lineage and its skipped note untouched."""
+    an MCMC TTV lineage and its skipped note untouched. No anvil.optimize
+    call asks for the Laplace step (0.1.83): this target has an epoch in a
+    gap, whose zero Hessian row can make anvil's inverse raise."""
+    import anvil
+    real, calls = anvil.optimize, []
+
+    def recording(*a, **k):
+        calls.append(k.get("hessian", True))
+        return real(*a, **k)
+
+    monkeypatch.setattr(anvil, "optimize", recording)
     out = str(tmp_path)
     keep = {"KOI-1.01_ttv_resume.pkl": b"not a real state",
             "KOI-1.01_ttv_skipped.csv": b"an old note"}
@@ -885,6 +896,7 @@ def test_mle_fits_ttv_from_lineph_and_recovers_the_times(tmp_path,
     np.testing.assert_array_less(np.abs(times["tmid"] - truth)[has] * 1440,
                                  2.0)                        # minutes
     assert np.all(np.isnan(times["tmid_err"]))
+    assert len(calls) >= 2 and not any(calls), calls
 
 
 def test_mle_ttv_gate_refuses_weak_transits(tmp_path, fake_target):

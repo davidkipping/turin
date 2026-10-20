@@ -992,6 +992,14 @@ oblate), which anvil's own benchmark shows ending every start short.
   than 10 (`seeding.top_spread`).
 - Both anvil points above are findings, not briefs; whether either goes
   upstream is the user's call.
+- **The start ball stays** (measured 0.1.83, scratchpad `map_starts.py`, 4
+  seeds, default and LinEph-fitted sweep shape). Holding the timing columns
+  near the template seeds (0.02 sd in u, shape still 0.25) reached the best
+  on every KOI-518.02 seed where the ball fell 0.12-1.08 short, tied on
+  4016.01, 4087.01 and 1361.01, but fell 7.0 short on one KOI-1430.03 seed
+  and 5-8 short on 2650.01 (below `--TTVsnr` anyway); half held, half ball
+  dominated neither. Under a nat at the MAP does not matter for starting
+  chains, so no change.
 
 ### Maximum likelihood (`--mle`, `mle.py`, 0.1.72-0.1.74; TTV 0.1.82)
 
@@ -1067,11 +1075,35 @@ prefix, and until then `--fresh --mle` deleted the MCMC lineage and an MCMC
   - **Products** `{T}_ttv_mle_*`: fit, times (errors NaN, O-C against the
     LinEph fit's P and tau0), lcdata, fold, oc (no error bars), compare
     (dlnL, n_extra, dBIC, dAIC; no p-value).
-  - **Measured so far:** synthetic only. Decoy data (`test_mle_ttv.py`:
-    each epoch at least its dense float64 grid maximum; a local-only
-    mutation fails it) and an injected 12-minute TTV end to end (times
-    within 2 min, two passes, 2.4 s). The real-target benchmark (the
-    0.1.71 comparison) and the check against TTV MCMC draws are pending.
+  - **Measured.** Synthetic: decoy data (`test_mle_ttv.py`: each epoch at
+    least its dense float64 grid maximum; a local-only mutation fails it)
+    and an injected 12-minute TTV end to end (times within 2 min, two
+    passes, 2.4 s). Real (0.1.83, scratchpad `ttv_mle_bench.py`): against
+    0.1.71's Adam, mixed and L-BFGS from the old starts, float64 ln L on
+    the likelihood alone and LD-profiled at their points too, `fit_ttv`
+    matches or beats all three on all six -- KOI-518.02 +0.17 over the
+    best, 1430.03 +0.65, 1361.01 +0.017, 4016.01 and 4087.01 equal to
+    mixed -- in 0.7-6.2 s, certified every time. The gate at 5 refuses only
+    KOI-2650.01 (median SNR 2.26); run anyway, the search ends 50 nats above
+    the others there, which is noise being fitted -- the gate's reason.
+    KOI-315.01 (TTVs to 4 h from the catalogue ephemeris): SNR 20, dlnL
+    +3,579 for 36 times, certified, 40 s end to end. **Global check** there
+    (scratchpad `k315/mle_vs_mcmc_ttv.py`): a TTV MCMC (512 chains,
+    grid-Gibbs, converged in 26 min) scored draw by draw on the float64
+    likelihood alone; the MLE beats all 230,400 draws by 6.67 nats, against
+    6.71 expected for the best of that many draws from a 43-dimensional
+    Gaussian peak (median draw 21.2 below, theory 21.17), and its times
+    sit within 0.80 posterior sd of the medians. Passes 3-5 there moved
+    epochs for +0.001 nats or less: "moved" is any float64 rise, so the
+    certificate can take extra passes; harmless, not tuned.
+  - **No Laplace step** (`mle.HESSIAN = False`, 0.1.83): `--mle` reports
+    the best fit only, and anvil's step can raise. A flat epoch's Hessian
+    row is exactly zero; rounding gave `eigh` +1.8e-12, so anvil's
+    negative-definite check passed and its `inv` raised `LinAlgError`
+    (KOI-4087.01, anvil 0.10.1). An anvil finding, not a brief (the user's
+    call). `seeding.find_map` keeps the step (chain starts need it); its
+    density objective has the box Jacobian's curvature in every column, so
+    no row is exactly zero.
 - **Profiled LD on TTV layouts** (0.1.81, the base of a TTV `--mle`):
   `params.ttv_layout(..., ld="collapsed")` drops the LD coordinates;
   `ProfileLDLogProb` / `ProfileHybridLogProb` accept a TTV layout

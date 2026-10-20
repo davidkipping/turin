@@ -41,6 +41,13 @@ from . import outputs as _outputs
 from . import params as _params
 from . import seeding as _seeding
 
+#: anvil.optimize's Laplace step after the search. Off: --mle reports the
+#: best fit only, and the step can raise. A TTV epoch with no transit data
+#: has an exactly zero Hessian row; rounding gives eigh a smallest eigenvalue
+#: of +1.8e-12, so anvil's negative-definite check passes and its inverse
+#: raises LinAlgError (KOI-4087.01, anvil 0.10.1).
+HESSIAN = False
+
 #: Starts for the round search: a 0.25 sd ball in u around the input
 #: ephemeris, as the sampler's MAP search, with :data:`N_SPREAD_BETA` of
 #: them moved to beta spread evenly over (0, 1).
@@ -136,7 +143,7 @@ def fit(prepared, centering, epoch_data, orders, *, law, oblate, b_prior,
     else:
         starts = round_starts(lay, T, eph, rng)
     res = anvil.optimize(tr, starts, objective="mle", seed=seed,
-                         max_rows=_seeding.MAX_ROWS)
+                         max_rows=_seeding.MAX_ROWS, hessian=HESSIAN)
     n_conv = int(np.sum(res.status == "converged"))
     log(f"  [{label}] ln L {res.log_value:.3f} from {len(starts)} starts "
         f"({n_conv} converged) in {res.wall_time:.1f}s")
@@ -343,7 +350,7 @@ def fit_ttv(prepared, centering, epoch_data, orders, *, law, b_prior,
             (np.arange(n) + rng.uniform(size=n)) / n, 0.005, 0.995)
         U = T.from_model_np(V)
         res = anvil.optimize(tr, U, objective="mle", seed=seed,
-                             max_rows=_seeding.MAX_ROWS)
+                             max_rows=_seeding.MAX_ROWS, hessian=HESSIAN)
         log(f"  [ttv {law}] pass {npass + 1}: polish ln L "
             f"{res.log_value:.3f} in {res.wall_time:.1f}s")
         theta = np.asarray(res.model, dtype=np.float64)

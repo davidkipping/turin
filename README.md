@@ -551,9 +551,14 @@ catalogue value (as hurin and the sampler do), so it nests LinEph up to the
 period's tiny effect on the transit shape. The log and products compare
 the two fits: ΔlnL, ΔBIC and ΔAIC for the extra epoch times (no p-value:
 timing likelihoods have several peaks). An epoch with no data in transit is
-noted: its time is arbitrary. Tested so far on synthetic data, where it
-recovers injected TTVs; the check against TTV posteriors of real targets is
-pending.
+noted: its time is arbitrary. On synthetic data it recovers injected
+TTVs. On six Kepler targets it matched or beat every earlier optimiser
+(by up to 0.65 in ln L) in under 7 s; the gate refused one, KOI-2650.01
+(median SNR 2.3). On KOI-315.01, whose transits drift up to 4 hours from a
+linear ephemeris, it gains 3,579 in ln L over LinEph in 40 s end to end,
+and beats every one of 230,400 draws of a converged TTV MCMC run by the
+margin a 43-parameter peak should (6.7 in ln L), with every transit time
+within 0.8 posterior sd of the sampled median.
 
 **Products** (`<T>_lineph_mle_*` and `<T>_ttv_mle_*`, so they never mix with a sampled
 lineage's files; `--fresh --mle` clears only these, and a sampled run's
