@@ -106,7 +106,10 @@ usage: turin --KOI-448.02 [options]
                           a single transit is below X (default 3): its
                           times would be little more than their priors.
                           Computed from the LinEph best fit over epochs
-                          with data in transit; 0 always fits
+                          with data in transit; 0 skips this test only.
+                          A TTV fit also needs at least 3 epochs with data
+                          in transit (not an option): fewer, and it is
+                          skipped
   --PL=auto|exact|hybrid|ratio
                           how the profile likelihood solves for the baseline
                           coefficients. The default, auto, measures all three

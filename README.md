@@ -653,7 +653,11 @@ cannot pool chains drawn both ways.
 --TTVmax=MINUTES             declared TTV amplitude; sets the timing priors
 --TTVsnr=X                   skip the TTV fit when the median expected SNR of a
                              single transit (LinEph best fit, epochs with data
-                             in transit) is below X; default 3, 0 always fits.
+                             in transit) is below X; default 3, 0 disables this test. A TTV fit
+                             (sampled or --mle) also needs at least 3 epochs
+                             with data in transit, whatever X: fewer is
+                             skipped, as two times fit a linear ephemeris
+                             exactly.
                              A skip writes <target>_ttv_skipped.csv (reason and
                              each epoch's SNR) and exits 0 on LinEph's verdict
 --PL=auto|exact|hybrid|ratio how the baseline coefficients are solved

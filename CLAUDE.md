@@ -847,7 +847,19 @@ stream (that fallback is turin's `log_prob_hi`). Similarly turin writes its
 own likelihood rather than using `ChunkedGaussianLogLike`, which chunks the
 data axis across epoch boundaries and so cannot hold a per-epoch solve.
 
-### The per-transit SNR gate (`--TTVsnr`, default 3)
+### The transit-count floor and the per-transit SNR gate (`--TTVsnr`, default 3)
+
+**A TTV fit needs `pipeline.MIN_TTV_TRANSITS` = 3 epochs with data in
+transit** (0.1.85, the user's call; the count is the epochs whose expected
+SNR at the LinEph best fit exceeds `_SNR_COVERED`). With two, a linear
+ephemeris fits the times exactly and the sampler only returns the timing
+priors; with one, even the period is free. Fewer skips the sampled TTV fit
+(`<target>_ttv_skipped.csv` with the count, exit 0 on LinEph's verdict) and
+refuses `--mle`'s; `--TTVsnr=0` and `--SNRgate=0` do **not** lift it, and it
+is not an option. Found on TESS: TOI-6007.01 and TOI-6075.01 (period 950 and
+833 d, two transits each) both ran full TTV fits, whose epoch-0 offset is
+zero by construction. Not evaluated without a LinEph
+best fit for the lineage (`--modes=ttv` alone), as the SNR test below.
 
 Before a TTV fit, `pipeline.transit_snrs` computes each epoch's expected
 single-transit SNR, `sqrt(sum (d/sigma)^2)` with `d` the LinEph best fit's

@@ -363,9 +363,11 @@ def transit_snrs(prepared, centering, shape, *, b_prior="transiting",
 
 def _ttv_snr_gate(args, prepared, centering, outdir, lineph_ml, *, log,
                   outcome):
-    """Skip the TTV fit when a single transit is too weak to time.
+    """Skip the TTV fit when there are too few transits, or each is too weak.
 
-    The statistic is the median of :func:`transit_snrs` over epochs with
+    First, fewer than :data:`MIN_TTV_TRANSITS` epochs with data in transit
+    (``--TTVsnr=0`` does not lift this). Then the SNR test below. The
+    statistic is the median of :func:`transit_snrs` over epochs with
     data in transit, at the LinEph best fit (this run's, or the saved
     lineage's). Below ``--TTVsnr`` (default 3) the per-epoch times come back
     close to their priors, the sampler spends hours on near-prior multimodal
@@ -377,8 +379,6 @@ def _ttv_snr_gate(args, prepared, centering, outdir, lineph_ml, *, log,
     target = prepared.target
     note = _outputs.ttv_skipped_path(outdir, target)
     threshold = float(getattr(args, "ttv_snr_min", TTV_SNR_MIN) or 0.0)
-    if threshold <= 0:
-        return False
     shape = lineph_ml
     if not shape:
         saved = _outputs.load_resume(outdir, target, "lineph")
@@ -386,18 +386,26 @@ def _ttv_snr_gate(args, prepared, centering, outdir, lineph_ml, *, log,
     law = getattr(args, "law", "quadratic")
     need = ("k", "beta", "T14") + _model_ld_names(law)
     if not shape or not all(n in shape for n in need):
-        log("  per-transit SNR gate not evaluated: no LinEph best fit for "
-            "this lineage (run --modes=lineph first, or --TTVsnr=0 to "
-            "silence this)")
+        log("  TTV gates not evaluated: no LinEph best fit for this "
+            "lineage (run --modes=lineph first)")
         return False
     snr = transit_snrs(prepared, centering, shape, b_prior=args.b_prior,
                        law=law)
     covered = snr[snr > _SNR_COVERED]
+    n_arr = np.asarray(centering["n_arr"], dtype=int)
+    if covered.size < MIN_TTV_TRANSITS:
+        reason = _too_few_transits_reason(covered.size)
+        log(f"  TTV fit SKIPPED: {reason}")
+        _outputs.export_ttv_skipped(outdir, target, reason, n_arr, snr,
+                                    log=log)
+        outcome["ttv"] = reason
+        return True
+    if threshold <= 0:
+        return False
     if covered.size == 0:
         typical = 0.0
     else:
         typical = float(np.median(covered))
-    n_arr = np.asarray(centering["n_arr"], dtype=int)
     summary = (f"median expected SNR of a single transit {typical:.2f} over "
                f"{covered.size} of {snr.size} epochs with data in transit "
                f"(range {covered.min() if covered.size else 0:.2f}-"
@@ -426,6 +434,21 @@ TTV_SNR_MIN = 3.0
 #: An epoch counts as having data in transit above this expected SNR (a
 #: transit that fell entirely in a gap scores exactly 0).
 _SNR_COVERED = 1e-3
+
+#: A TTV fit needs at least this many epochs with data in transit. Two times
+#: are what a linear ephemeris fits exactly, so the fit has nothing to say
+#: about timing variations, and one transit leaves even the period free; the
+#: sampler would only reproduce the timing priors (the user's call,
+#: 2026-10-20). Not an option: --TTVsnr=0 does not lift it.
+MIN_TTV_TRANSITS = 3
+
+
+def _too_few_transits_reason(n):
+    return (f"skipped: {n} epoch{'s' if n != 1 else ''} with data in "
+            f"transit, fewer than the {MIN_TTV_TRANSITS} a TTV fit needs "
+            "(two times are fitted exactly by a linear ephemeris, so the "
+            "fit would only return the timing priors). LinEph is the "
+            "result for this target")
 
 
 def _run_mle(args, prepared, cv, outdir, *, log):
@@ -522,6 +545,10 @@ def _run_mle_ttv(args, prepared, centering, orders, outdir, lineph_fit,
                        dict((round_lineph or lineph_fit).rows),
                        b_prior=args.b_prior, law=args.law)
     covered = snr[snr > _SNR_COVERED]
+    if covered.size < MIN_TTV_TRANSITS:
+        log(f"[{target}] ttv maximum likelihood: TTV fit REFUSED: "
+            f"{_too_few_transits_reason(covered.size)[len('skipped: '):]}")
+        return None
     typical = float(np.median(covered)) if covered.size else 0.0
     log(f"[{target}] ttv maximum likelihood: median expected SNR of a single "
         f"transit {typical:.2f} over {covered.size} of {snr.size} epochs "

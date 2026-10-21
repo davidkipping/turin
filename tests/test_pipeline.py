@@ -761,6 +761,38 @@ def test_ttv_is_skipped_below_the_per_transit_snr_gate(tmp_path, fake_target):
     assert "KOI-1.01_ttv_summary.csv" in os.listdir(d)
 
 
+def test_ttv_is_skipped_with_too_few_transits_whatever_the_snr_gate(
+        tmp_path, fake_target, monkeypatch):
+    """Fewer than MIN_TTV_TRANSITS epochs with data in transit: no TTV fit,
+    a skipped CSV naming the count, and --TTVsnr=0 does not lift it. At the
+    real minimum the same fixture fits (the test above)."""
+    monkeypatch.setattr(pipeline, "MIN_TTV_TRANSITS", 10_000)
+    logs = []
+    args = _args(tmp_path, modes=("lineph", "ttv"), ttv_snr_min=0.0)
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    d = str(tmp_path)
+    names = os.listdir(d)
+    assert "KOI-1.01_ttv_skipped.csv" in names
+    assert "KOI-1.01_ttv_summary.csv" not in names
+    assert any("TTV fit SKIPPED" in l and "with data in transit, fewer than "
+               "the 10000" in l for l in logs)
+    note = open(os.path.join(d, "KOI-1.01_ttv_skipped.csv")).read()
+    assert "# skipped:" in note and "fewer than the 10000" in note
+
+
+def test_mle_ttv_refuses_with_too_few_transits(tmp_path, fake_target,
+                                               monkeypatch):
+    """--mle's TTV fit has the same floor, whatever --SNRgate says."""
+    monkeypatch.setattr(pipeline, "MIN_TTV_TRANSITS", 10_000)
+    logs = []
+    assert pipeline.run(_args(tmp_path, modes=("lineph", "ttv"), mle=True,
+                              snr_gate=0.0), log=logs.append) == 0
+    assert any("TTV fit REFUSED" in l and "fewer than the 10000" in l
+               for l in logs)
+    assert not any(n.startswith("KOI-1.01_ttv_mle_")
+                   for n in os.listdir(str(tmp_path)))
+
+
 def test_transit_snrs_follow_the_data_present(fake_target):
     """Expected SNR scales as 1/sigma, and a transit with its in-transit
     points removed scores lower; one with none scores 0."""
