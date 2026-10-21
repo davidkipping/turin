@@ -708,6 +708,37 @@ Note `n_gl` defaults to 5 in MetalPlanet from 0.7.0, matching
 positional, so turin's existing call is unaffected, and 0.7.0's default
 outputs and gradients are bitwise-equal to 0.6.1's.
 
+**Checked against elome 0.20.0** (`3b44004`) **and anvil 0.11.0**
+(`231d41f`), turin 0.1.87. elome 0.18.8-0.20.0: eccentric and ringed
+fixes and speed (unused), exposures outside the contacts skipped (stated
+bitwise), and **the quadratic law's float32 kernels run 8 elliptic-integral
+iterations instead of 10**. Measured as the A/B below (same turin, elome
+0.18.7 from `git archive` on `PYTHONPATH`, KOI-518.02, 64 vectors, 30
+quantities, now with the profiled TTV `--mle` targets round and oblate):
+every float64 value and every hybrid4 and oblate float32 one **bitwise**;
+the quadratic float32 values and gradients move at rounding -- median 1e-4
+nats, about a tenth of their own float32 error, which is unchanged (median
+|fp32 - fp64| 1.98e-3 -> 1.67e-3 sampled, 9.2e-4 -> 8.9e-4 collapsed, TTV
+and per-epoch terms likewise), gradients by <= 5e-5 of each column's
+scale. No MODEL_REV bump: the model is unchanged, its float32 rounding is
+not. anvil 0.10.2 (review fixes: `optimize`'s bound settling, `optima`
+merging, L-BFGS rechecks; `Transform.to_model` branches; dense ChEES, which
+turin does not use) and 0.11.0 (**the diagonal preconditioner's variance
+accumulated centred, without the 1e-4-in-u floor**: ChEES draws change for
+any warmup past 50 iterations). Measured: KOI-518.02 LinEph + TTV to
+convergence under 0.10.1 and 0.11.0 (512 chains, one round each, 394 vs
+400 s): every parameter within 0.0072 sd (43 compared), none beyond 3 MCSE
+(max 1.77), widths 0.994-1.005, bulk ESS 0.91-1.04x (median 0.99); no
+parameter there is narrow enough in u for the floor to have mattered.
+`--mle` (round TTV quadratic, LinEph and oblate hybrid4) on the suite plus
+KOI-518.02: all 24 ln L identical to 4 decimals, TTV certified every time.
+The pipeline's TTV MAP came out 0.47 below in the 0.11.0 run, but that is
+its start (from the LinEph chains, which differ), not `optimize`: from the
+same starts the TTV MAP is identical under both at 8 seeds, whose own
+spread is 1.2 nats. The 0.11.0 TTV run's warmup report said TOO SHORT
+(spread still drifting) and converged anyway (R-hat 1.0093); one run, not
+followed up. `MIN_ANVIL` stays 0.9.0. Full suite: 474 passed.
+
 **Checked against elome 0.18.7** (`962aedb`) **and anvil 0.10.1**
 (`f3f289f`), turin 0.1.79. elome 0.18.6 fixed oblate and ring gradients at
 f = 0 (d/df below the fp32 switch f = 1e-5 is now the ellipse's at the
