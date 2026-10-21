@@ -267,6 +267,14 @@ class EpochGrid:
     #: :func:`phase_order`. None evaluates in storage order.
     order: mx.array | None = None
     unorder: mx.array | None = None
+    #: per-epoch exposure (days), host-side, when the epochs were observed at
+    #: more than one cadence (``exp_time`` is then the most common one, for
+    #: the consumers that take a single value). None for a single cadence.
+    exp_epoch: np.ndarray | None = None
+    #: ``((exp_time, start, stop), ...)``: the slices of the phase-ordered
+    #: flat points that share an exposure, one kernel call each. Empty for a
+    #: single cadence.
+    groups: tuple = ()
 
     @property
     def n_epochs(self) -> int:
@@ -288,9 +296,18 @@ class EpochGrid:
         round-trip this costs never reaches a traced call.
         """
         order = unorder = None
+        exp_epoch, groups, exp_time = self.exp_epoch, (), self.exp_time
+        gid = None
+        if exp_epoch is not None:
+            exp_epoch = exp_epoch[lo:hi]
+            gid, groups = exposure_groups(exp_epoch, self.max_pts)
+            if not groups:
+                # every epoch of this block shares one exposure, which is
+                # its own and not the grid's representative one
+                exp_time = float(exp_epoch[0])
         if self.order is not None:
             order, unorder = phase_order(np.array(self.times[lo:hi]),
-                                         np.array(self.d_arr[lo:hi]))
+                                         np.array(self.d_arr[lo:hi]), gid)
         return EpochGrid(
             times=self.times[lo:hi],
             n_arr=self.n_arr[lo:hi],
@@ -299,14 +316,37 @@ class EpochGrid:
             P_ref=self.P_ref,
             tau0_ref=self.tau0_ref,
             dtype=self.dtype,
-            exp_time=self.exp_time,
+            exp_time=exp_time,
             n_gl=self.n_gl,
             order=order,
             unorder=unorder,
+            exp_epoch=exp_epoch if groups else None,
+            groups=groups,
         )
 
 
-def phase_order(times, d_arr):
+def exposure_groups(exp_epoch, max_pts):
+    """Group epochs by exposure time.
+
+    Returns ``(gid, groups)``: ``gid`` the group index of each epoch, and
+    ``groups`` the ``(exp_time, start, stop)`` slices of the flattened points
+    once they are sorted by group (:func:`phase_order`), shortest exposure
+    first. ``groups`` is empty when every epoch has the same exposure, which
+    is the single-kernel-call path turin has always taken. Exposures are
+    compared exactly: :func:`turin.prep.snap_cadences` makes equal cadences
+    identical floats.
+    """
+    e = np.asarray(exp_epoch, dtype=np.float64)
+    values, gid = np.unique(e, return_inverse=True)
+    if values.size < 2:
+        return gid, ()
+    ends = np.cumsum(np.bincount(gid, minlength=values.size)) * int(max_pts)
+    starts = np.concatenate([[0], ends[:-1]])
+    return gid, tuple((float(v), int(a), int(b))
+                      for v, a, b in zip(values, starts, ends))
+
+
+def phase_order(times, d_arr, group=None):
     """Permutation sorting flattened points by time from predicted mid-transit.
 
     elome's kernel runs one point per GPU thread, and threads execute
@@ -321,13 +361,22 @@ def phase_order(times, d_arr):
     Log-likelihoods were bit-identical; gradients agree to 2e-7 (summation
     order).
 
+    ``group`` (one index per epoch, from :func:`exposure_groups`) sorts by
+    exposure first, so each exposure's points are one contiguous slice.
+
     The key is the reference ephemeris, fixed at build time, so the order is
     static. Parameters move the true mid-times by far less than a window, and
     order affects only speed: every point is still evaluated at its own time.
     """
     key = (np.asarray(times, dtype=np.float64)
            - np.asarray(d_arr, dtype=np.float64)[:, None]).ravel()
-    order = np.argsort(key, kind="stable")
+    if group is None:
+        order = np.argsort(key, kind="stable")
+    else:
+        # epochs at one exposure stay together (see exposure_groups), the
+        # phase order holding within each
+        g = np.repeat(np.asarray(group), np.shape(times)[1])
+        order = np.lexsort((key, g))
     unorder = np.empty_like(order)
     unorder[order] = np.arange(order.size)
     return (mx.array(order.astype(np.int32)),
@@ -335,7 +384,8 @@ def phase_order(times, d_arr):
 
 
 def build_grid(centering, sub_offsets, dtype=mx.float32, *,
-               exp_time=0.0, n_gl=N_GL, mask=None, sort_points=True):
+               exp_time=0.0, n_gl=N_GL, mask=None, sort_points=True,
+               exp_epoch=None):
     """Upload the host-side centred arrays as an :class:`EpochGrid`.
 
     ``centering`` is :func:`turin.prep.centering_constants` output;
@@ -352,6 +402,15 @@ def build_grid(centering, sub_offsets, dtype=mx.float32, *,
     geometry, so their deviation is exactly zero.
 
     ``sort_points`` attaches :func:`phase_order`.
+
+    ``exp_epoch`` is each epoch's exposure in days, for a light curve that
+    mixes cadences (a Kepler quarter of short cadence beside long, TESS
+    sectors at 2 and 10 minutes). Epochs never straddle two cadences, since
+    an epoch lies within one quarter or semi-sector. Each exposure then gets
+    its own kernel call (``exp_time`` there is one scalar); the points are
+    ordered by exposure and then by phase, so the speed measure of
+    :func:`phase_order` is kept inside each call. Left out, or all equal, the
+    grid is the single-exposure one it always was.
     """
     times = np.array(centering["times_centered"], dtype=np.float64)
     d_arr = np.asarray(centering["d_arr"], dtype=np.float64)
@@ -359,9 +418,17 @@ def build_grid(centering, sub_offsets, dtype=mx.float32, *,
         pad = np.asarray(mask) <= 0
         times[pad] = np.broadcast_to(
             d_arr[:, None] + 0.25 * float(centering["P_ref"]), times.shape)[pad]
+    gid, groups = None, ()
+    if exp_epoch is not None:
+        exp_epoch = np.asarray(exp_epoch, dtype=np.float64)
+        if exp_epoch.shape != d_arr.shape:
+            raise ValueError("exp_epoch needs one exposure per epoch")
+        gid, groups = exposure_groups(exp_epoch, times.shape[1])
+        if not groups and exp_epoch.size:
+            exp_time = float(exp_epoch[0])
     order = unorder = None
-    if sort_points:
-        order, unorder = phase_order(times, d_arr)
+    if sort_points or groups:
+        order, unorder = phase_order(times, d_arr, gid if groups else None)
     return EpochGrid(
         times=mx.array(np.ascontiguousarray(times), dtype=dtype),
         n_arr=mx.array(np.ascontiguousarray(centering["n_arr"]), dtype=dtype),
@@ -374,6 +441,8 @@ def build_grid(centering, sub_offsets, dtype=mx.float32, *,
         n_gl=int(n_gl),
         order=order,
         unorder=unorder,
+        exp_epoch=exp_epoch if groups else None,
+        groups=groups,
     )
 
 
@@ -418,6 +487,10 @@ def _expanded_flux_dev(grid, tau, *, k, b, T14, q1, q2, period, geometry):
     supersampling, whose error at a realistic ``n_sub`` is ~1.5e-4, about 2% of
     a transit depth and 1000x the float32 floor.
     """
+    if grid.groups:
+        raise ValueError("this light curve mixes cadences, which only "
+                         "elome's tau kernel (geometry='circular') can "
+                         "integrate per epoch")
     n_chains = tau.shape[0]
     nodes = tau[..., None] + grid.sub_offsets[None, None, None, :]
     flat = nodes.reshape(n_chains, -1)
@@ -435,6 +508,29 @@ def _expanded_flux_dev(grid, tau, *, k, b, T14, q1, q2, period, geometry):
     dev = dev.reshape(n_chains, grid.n_epochs, grid.max_pts,
                       grid.sub_offsets.shape[0])
     return mx.mean(dev, axis=-1)
+
+
+def _tau_kernel(grid, flat, *args, **kw):
+    """elome's ``flux_dev_from_tau`` over ``flat``, the phase-ordered points.
+
+    One call at ``grid.exp_time`` for a single cadence -- exactly the call
+    turin has always made. For a grid with exposure groups
+    (:func:`build_grid`'s ``exp_epoch``) one call per group on that group's
+    slice of ``flat``, each at its own exposure, joined along the point axis.
+    The parameters are per chain, ``(n_chains, 1)``, so they broadcast over
+    any slice; the output's trailing axes (a limb-darkening basis) pass
+    through the concatenation.
+    """
+    def call(x, exp):
+        return elome.flux_dev_from_tau(
+            x, *args, exp_time=exp,
+            integration="contact" if exp > 0 else "none",
+            n_gl=grid.n_gl, **kw)
+
+    if not grid.groups:
+        return call(flat, grid.exp_time)
+    return mx.concatenate(
+        [call(flat[:, a:b], exp) for exp, a, b in grid.groups], axis=1)
 
 
 def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
@@ -485,12 +581,9 @@ def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
         flat = tau.reshape(n_chains, -1)
         if grid.order is not None:
             flat = mx.take(flat, grid.order, axis=1)
-        dev = elome.flux_dev_from_tau(
-            flat, period, a_over_rstar(T14, period, k, b), b, k,
-            exp_time=grid.exp_time,
-            integration="contact" if grid.exp_time > 0 else "none",
-            n_gl=grid.n_gl, limb_dark=law, u=ld_weights(q, law),
-            **oblate_kw(f, theta))
+        dev = _tau_kernel(
+            grid, flat, period, a_over_rstar(T14, period, k, b), b, k,
+            limb_dark=law, u=ld_weights(q, law), **oblate_kw(f, theta))
         if grid.order is not None:
             dev = mx.take(dev, grid.unorder, axis=1)
         return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
@@ -513,12 +606,9 @@ def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
     flat = tau.reshape(n_chains, -1)
     if grid.order is not None:
         flat = mx.take(flat, grid.order, axis=1)
-    dev = elome.flux_dev_from_tau(
-        flat, period,
-        a_over_rstar(T14, period, k, b), b, k, u1, u2,
-        exp_time=grid.exp_time,
-        integration="contact" if grid.exp_time > 0 else "none",
-        n_gl=grid.n_gl)
+    dev = _tau_kernel(
+        grid, flat, period,
+        a_over_rstar(T14, period, k, b), b, k, u1, u2)
     if grid.order is not None:
         dev = mx.take(dev, grid.unorder, axis=1)
     return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
@@ -550,11 +640,9 @@ def vertex_flux_devs(grid, *, mid, k, b, T14, period):
     flat = time_from_mid(grid, mid).reshape(n_chains, -1)
     if grid.order is not None:
         flat = mx.take(flat, grid.order, axis=1)
-    basis = elome.flux_dev_from_tau(
-        flat, period, a_over_rstar(T14, period, k, b), b, k,
-        exp_time=grid.exp_time,
-        integration="contact" if grid.exp_time > 0 else "none",
-        n_gl=grid.n_gl, ld_basis=True)                       # (C, m, 3)
+    basis = _tau_kernel(
+        grid, flat, period, a_over_rstar(T14, period, k, b), b, k,
+        ld_basis=True)                                       # (C, m, 3)
     if grid.order is not None:
         basis = mx.take(basis, grid.unorder, axis=1)
     shape = (n_chains, grid.n_epochs, grid.max_pts)
@@ -603,11 +691,9 @@ def generator_flux_devs(grid, *, mid, k, b, T14, period, law="hybrid4",
     flat = time_from_mid(grid, mid).reshape(n_chains, -1)
     if grid.order is not None:
         flat = mx.take(flat, grid.order, axis=1)
-    basis = elome.flux_dev_from_tau(
-        flat, period, a_over_rstar(T14, period, k, b), b, k,
-        exp_time=grid.exp_time,
-        integration="contact" if grid.exp_time > 0 else "none",
-        n_gl=grid.n_gl, limb_dark=law, ld_basis=True,
+    basis = _tau_kernel(
+        grid, flat, period, a_over_rstar(T14, period, k, b), b, k,
+        limb_dark=law, ld_basis=True,
         **oblate_kw(f, theta))                                 # (C, m, n_g)
     if grid.order is not None:
         basis = mx.take(basis, grid.unorder, axis=1)

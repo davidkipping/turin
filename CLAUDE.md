@@ -299,6 +299,30 @@ chains, 200 warmup + 200 draws) went from 549 s to 118 s, medians within
 this, cost looked flat in `N_GL` because divergence swamped the arithmetic;
 it is not flat any more (9.1 / 14.1 / 18.0 ms at 5 / 9 / 12).
 
+**Mixed cadences (0.1.86).** The exposure is not one number per light curve.
+A Kepler `--sc` fit takes short cadence only in the quarters that have it, and
+a TESS star can have 2-minute sectors beside FFI ones, so each epoch carries
+its own: the median step of its quarter or semi-sector
+(`prep.segment_cadences`, merged within 5% by `snap_cadences`; an epoch lies
+within one segment, so one cadence). `epoch_data["exposure"]` exists only when
+epochs differ, and a single-cadence light curve takes the old path exactly (no
+key, one kernel call, same point order). With it, `build_grid(exp_epoch=)`
+sorts the points by exposure and then by phase, and `model._tau_kernel` makes
+one `flux_dev_from_tau` call per exposure on its contiguous slice (elome takes
+`exp_time` as a scalar), which keeps the point-order speed measure inside each
+call; `select` re-derives the groups for a block, and a block whose epochs
+share one exposure uses that one, not the grid's representative `exp_time`
+(the most common, for plots and the fallback). Anything new that calls the tau
+kernel goes through `_tau_kernel`, not `elome.flux_dev_from_tau` directly.
+No `MODEL_REV` bump: a one-cadence light curve is bitwise unchanged. A mixed
+one is a different likelihood, guarded by `ResumeState.exposures` /
+`check_exposure` (the data decide it, so it is not in `GUARDS`). The sigma
+clip runs per cadence (its window is a number of cadences). Refused:
+`--geometry=chord`, whose supersampling takes one value. Found by asking
+whether turin knew Kepler's and TESS's integration times: it never did, it
+measured one from the stitched series. The 17 TOIs run before the fix were all
+2-minute in every sector.
+
 Two things to keep in mind. `geometry="chord"` has no kernel path and always
 supersamples. And **finite differences are not a valid gradient reference**
 under the contact rule: it freezes its split points (exact, since moving an

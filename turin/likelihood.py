@@ -136,7 +136,8 @@ class ProfiledTransitLogProb:
         sub_offsets = _prep_offsets(exposure_time, num_resample)
         full_grid = _model.build_grid(centering, sub_offsets, dtype=dtype,
                                       exp_time=exposure_time,
-                                      mask=epoch_data["mask"])
+                                      mask=epoch_data["mask"],
+                                      exp_epoch=epoch_data.get("exposure"))
         full_design = _profile.build_design(epoch_data, orders, dtype=dtype)
         if full_grid.n_epochs != full_design.n_epochs:
             raise ValueError(

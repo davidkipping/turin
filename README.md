@@ -77,6 +77,12 @@ kernel, which matters more than it sounds: the supersampling it replaced was
 wrong by ~2% of a transit depth at a typical sub-exposure count, and got
 `dF/d(period)` wrong by ~100x with the wrong sign.
 
+The exposure is each epoch's own: the median step of the quarter or sector it
+lies in. A light curve that mixes cadences (Kepler `--sc`, short cadence only
+where a quarter has it; a TESS star with 2-minute and FFI sectors) integrates
+every transit over the exposure it was observed with, one kernel call per
+cadence. A single-cadence light curve is fitted exactly as before.
+
 The baseline polynomial coefficients are never sampled. They are solved
 analytically inside every log-density evaluation — a profile likelihood — so a
 30-transit fit carries 7 parameters rather than 7 + 90.

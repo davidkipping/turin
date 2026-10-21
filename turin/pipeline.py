@@ -65,6 +65,13 @@ def _ghk_kw(layout, state):
         return {}
     return dict(ghk_layout=state.ghk_layout, ghk_points=state.ghk_points)
 
+def _exposures(prepared):
+    """The distinct per-epoch exposures of a light curve that mixes cadences,
+    as the resume state records them; ``()`` for a single cadence."""
+    e = prepared.epoch_data.get("exposure")
+    return () if e is None else tuple(float(x) for x in np.unique(e))
+
+
 def _rhostar(args):
     """The ``--rhostar`` prior as the layout and the resume guard carry it:
     ``(mean, sigma)``, or ``()`` for none (so "none" is a value a resumed
@@ -128,6 +135,12 @@ def run(args, log=print):
     prepared = _prep.prepare_data(
         target, ttv_max_days=args.ttv_max_days or 0.0,
         sc_override=args.sc_override, log=log)
+
+    if _exposures(prepared) and args.geometry != "circular":
+        raise ValueError(
+            "this light curve mixes cadences, and only the circular "
+            "geometry's kernel integrates each epoch over its own exposure; "
+            "chord geometry takes one value")
 
     if getattr(args, "replot", False):
         return replot(args, prepared, outdir, log=log)
@@ -208,6 +221,7 @@ def replot(args, prepared, outdir, *, log=print):
                     law=getattr(args, "law", "quadratic"),
                     oblate=getattr(args, "oblate", False),
                     rhostar=_rhostar(args))
+        state.check_exposure(prepared.exposure_time, _exposures(prepared))
         chains_path = _outputs.product_path(outdir, target, mode, "chains",
                                             "csv.tar.gz")
         summary_path = _outputs.product_path(outdir, target, mode, "summary",
@@ -691,6 +705,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             law=getattr(args, "law", "quadratic"),
             oblate=getattr(args, "oblate", False),
             rhostar=_rhostar(args))
+        prior_state.check_exposure(prepared.exposure_time,
+                                   _exposures(prepared))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -749,6 +765,11 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         log(f"  limb darkening ({layout.law}): collapsed -- integrated out of "
             f"the log-density; {', '.join(_model_ld_names(layout.law))} drawn "
             "afterwards from their exact conditional")
+    if _exposures(prepared):
+        log("  exposures: "
+            + ", ".join(f"{e * 1440:.3g} min" for e in _exposures(prepared))
+            + f" -- {len(_exposures(prepared))} cadences in this light curve, "
+            "one kernel call each")
     if prepared.exposure_time > 0:
         from .model import HAS_TAU_KERNEL, N_GL
 
@@ -1260,7 +1281,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         geometry=args.geometry, sampler=args.sampler,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         ld=layout.ld, law=layout.law, oblate=layout.oblate,
-        rhostar=layout.rhostar,
+        rhostar=layout.rhostar, exposures=_exposures(prepared),
         ghk_layout=getattr(lp, "ghk_layout", None),
         ghk_points=getattr(lp, "ghk_points", None),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,

@@ -129,7 +129,7 @@ def _one_stretch(t_epoch, seg_epoch, tc):
 
 def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
                    n_durations=N_DURATIONS, min_pts=MIN_PTS, tau_shift_max=0.0,
-                   segment=None):
+                   segment=None, exposure=None):
     """Segment windowed data into per-epoch padded 2D arrays.
 
     Every predicted transit has a window of ``n_durations`` transit durations
@@ -143,6 +143,10 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     remains has at least ``min_pts`` points (:data:`MIN_PTS`), in transit or
     not.
 
+    ``exposure`` (days) is each point's exposure time, for a light curve that
+    mixes cadences; the result then carries ``exposure``, one value per epoch
+    (an epoch lies within one segment, so within one cadence).
+
     ``tau_shift_max`` (days) only widens the zone counted as in transit for
     ``n_in_transit`` (reported, not a criterion), for declared-TTV systems.
 
@@ -152,7 +156,7 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     Returns a dict with ``times_padded``, ``flux_padded``, ``ferr_padded``,
     ``mask`` (all ``(n_epochs, max_pts)``), ``epoch_centers``,
     ``half_window``, ``n_epochs``, ``max_pts`` and ``n_in_transit`` (points
-    in each kept epoch's transit zone).
+    in each kept epoch's transit zone), and ``exposure`` when given.
     """
     dur_days = duration_hours / 24.0
     half_window = n_durations * dur_days
@@ -171,9 +175,14 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
     inside = np.abs(time - centre) <= half_window
     half_transit = 0.5 * dur_days + tau_shift_max
 
+    if exposure is not None:
+        exposure = np.asarray(exposure, dtype=np.float64)
+        if exposure.shape != time.shape:
+            raise ValueError("exposure needs one value per point")
     epoch_groups = []
     epoch_centers = []
     n_in_transit = []
+    epoch_exposure = []
     for n in np.unique(n_pt[inside]):
         idx = np.where(inside & (n_pt == n))[0]
         tt = epoch + n * period
@@ -184,6 +193,8 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         epoch_groups.append((t_epoch, flux[idx], flux_err[idx]))
         epoch_centers.append(tt)
         n_in_transit.append(int(np.sum(np.abs(t_epoch - tt) <= half_transit)))
+        if exposure is not None:
+            epoch_exposure.append(float(np.median(exposure[idx])))
 
     n_epochs = len(epoch_groups)
     if n_epochs == 0:
@@ -211,7 +222,7 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         mask[i, :n_i] = 1.0
         times_padded[i, n_i:] = epoch_centers[i]
 
-    return {
+    out = {
         "times_padded": times_padded,
         "flux_padded": flux_padded,
         "ferr_padded": ferr_padded,
@@ -224,6 +235,9 @@ def segment_epochs(time, flux, flux_err, period, epoch, duration_hours,
         "max_pts": max_pts,
         "n_in_transit": np.array(n_in_transit, dtype=int),
     }
+    if exposure is not None:
+        out["exposure"] = np.array(epoch_exposure, dtype=np.float64)
+    return out
 
 
 def basis_x(epoch_data, times=None):
@@ -425,6 +439,52 @@ def cv_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER, n_folds=10,
     }
 
 
+#: Two cadences are the same if they differ by less than this fraction: a
+#: Kepler quarter's median step varies at the 1e-7 level, a TESS 2-minute
+#: sector's likewise, while the nearest distinct cadences (TESS 120 and 200 s)
+#: are 67% apart.
+CADENCE_RTOL = 0.05
+
+
+def segment_cadences(time, segment):
+    """Each point's cadence (days): the median step of its own segment.
+
+    ``segment`` labels the quarter or semi-sector of each point. Files are
+    one cadence each and a segment never mixes cadences, so the segment's
+    median step is its exposure -- the same estimate turin has always made
+    for the whole light curve, taken per segment. A segment with fewer than
+    two points gets the median step of the whole series.
+    """
+    t = np.asarray(time, dtype=np.float64)
+    seg = np.asarray(segment)
+    out = np.full(t.shape, np.nan)
+    for s in np.unique(seg):
+        idx = np.where(seg == s)[0]
+        if idx.size > 1:
+            out[idx] = np.median(np.diff(np.sort(t[idx])))
+    fill = float(np.nanmedian(np.diff(np.sort(t)))) if t.size > 1 else np.nan
+    return np.where(np.isfinite(out), out, fill)
+
+
+def snap_cadences(cadence):
+    """Merge cadences within :data:`CADENCE_RTOL` of each other.
+
+    Returns per-point cadences in which every cluster is one identical float
+    (its median), so equal exposures compare exactly equal downstream. A
+    light curve of a single cadence comes back as one value.
+    """
+    c = np.asarray(cadence, dtype=np.float64)
+    values = np.unique(c[np.isfinite(c)])
+    out = c.copy()
+    start = 0
+    for i in range(1, values.size + 1):
+        if i == values.size or values[i] > values[start] * (1.0 + CADENCE_RTOL):
+            members = (c >= values[start]) & (c <= values[i - 1])
+            out[members] = np.median(c[members])
+            start = i
+    return out
+
+
 def supersample_offsets(exposure_time, n_sub):
     """Sub-exposure time offsets, batman's endpoint-inclusive convention.
 
@@ -504,6 +564,27 @@ def _labels_of(time, time_src, labels_src):
     return labels_src[src]
 
 
+def _clip_by_cadence(time, flux, flux_err, cadence, duration_hours):
+    """:func:`sigma_clip` run on each cadence's points on their own.
+
+    The clip's window is a number of cadences and its scatter a property of
+    one kind of data, so a light curve that mixes cadences is clipped one
+    cadence at a time and the survivors merged back into time order.
+    """
+    parts, n_removed, skipped = [], 0, []
+    for c in np.unique(cadence):
+        m = cadence == c
+        t, f, e, n, skip = sigma_clip(time[m], flux[m], flux_err[m],
+                                      duration_hours, float(c))
+        parts.append((t, f, e))
+        n_removed += n
+        if skip:
+            skipped.append(f"{c * 1440:.3g}-min data: {skip}")
+    t, f, e = (np.concatenate([p[i] for p in parts]) for i in range(3))
+    o = np.argsort(t, kind="stable")
+    return t[o], f[o], e[o], n_removed, "; ".join(skipped) or None
+
+
 def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
     """Download, clean and condition one target's light curve.
 
@@ -545,9 +626,20 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
             time_raw[good], flux_raw[good], flux_err_raw[good], seg_raw[good])
 
     cadence = float(np.nanmedian(np.diff(time_raw)))
-    time, flux, flux_err, n_outliers, clip_skipped = sigma_clip(
-        time_raw, flux_raw, flux_err_raw, eph["duration"], cadence)
+    # Cadence per point, from its own quarter or semi-sector. A light curve
+    # may mix them (Kepler short cadence only where it exists, TESS sectors
+    # at 2 and 10 minutes), and every transit must be integrated over the
+    # exposure it was observed with, not the series' median step.
+    cad_raw = snap_cadences(segment_cadences(time_raw, seg_raw))
+    mixed = np.unique(cad_raw[np.isfinite(cad_raw)]).size > 1
+    if mixed:
+        time, flux, flux_err, n_outliers, clip_skipped = _clip_by_cadence(
+            time_raw, flux_raw, flux_err_raw, cad_raw, eph["duration"])
+    else:
+        time, flux, flux_err, n_outliers, clip_skipped = sigma_clip(
+            time_raw, flux_raw, flux_err_raw, eph["duration"], cadence)
     segment = _labels_of(time, time_raw, seg_raw)
+    cad_pt = _labels_of(time, time_raw, cad_raw) if mixed else None
     if clip_skipped:
         notes.append(f"sigma clip skipped: {clip_skipped}")
         _log(f"  Sigma clip skipped: {clip_skipped}; "
@@ -566,6 +658,8 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         _log(f"  Masked {int(np.sum(~keep))} points from other planets")
         time, flux, flux_err, segment = (
             time[keep], flux[keep], flux_err[keep], segment[keep])
+        if mixed:
+            cad_pt = cad_pt[keep]
 
     # The epochs, segmented once here and carried on PreparedData: the CV
     # and every fit mode use this same epoch_data, so the occupied count,
@@ -583,7 +677,8 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
                                   ephem["period"], ephem["epoch"],
                                   ephem["duration"], n_durations=n_dur,
                                   tau_shift_max=ttv_max_days,
-                                  segment=segment[w])
+                                  segment=segment[w],
+                                  exposure=cad_pt[w] if mixed else None)
         except ValueError:
             raise ValueError(
                 f"{target}: no occupied transit epochs in the data") from None
@@ -601,6 +696,27 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
          f"transit: {', '.join(map(str, epoch_data['n_in_transit']))})")
 
     cadence_days = float(lc.get("cadence_days") or cadence)
+    exposure_time = cadence_days
+    if mixed:
+        exp_e = epoch_data["exposure"]
+        n_e = np.asarray(epoch_data["mask"]).sum(axis=1)
+        kinds = np.unique(exp_e)
+        for c in kinds:
+            _log(f"  Cadence {c * 1440:.3g} min: {int((exp_e == c).sum())} "
+                 f"epoch(s), {int(n_e[exp_e == c].sum())} points")
+        if kinds.size > 1:
+            # the representative value for what takes a single exposure
+            # (plots, the supersampling fallback): the one with most points
+            exposure_time = float(kinds[np.argmax(
+                [n_e[exp_e == c].sum() for c in kinds])])
+            _log("  Mixed cadences: each epoch is integrated over its own "
+                 "exposure")
+        else:
+            # the other cadences contribute no fitted epoch
+            exposure_time = float(kinds[0])
+            del epoch_data["exposure"]
+            _log(f"  Light curve mixes cadences, but every fitted epoch is "
+                 f"{exposure_time * 1440:.3g} min")
     n_resam = recommended_resample(eph, cadence_days, flux_err) or 1
 
     _log(f"  Recentered epoch: {eph_fit['epoch']:.5f} "
@@ -617,7 +733,7 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         eph=eph_fit,
         eph_nea=eph,
         cadence_days=cadence_days,
-        exposure_time=cadence_days,
+        exposure_time=exposure_time,
         num_resample=n_resam,
         epoch_data=epoch_data,
         n_durations=n_dur,

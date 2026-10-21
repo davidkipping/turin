@@ -382,6 +382,10 @@ class ResumeState:
     #: ``()`` for none -- the default, so every older state reads "no prior"
     #: and a run with a prior can never continue one without (or vice versa)
     rhostar: tuple = ()
+    #: the distinct exposures (days) of a light curve that mixes cadences,
+    #: each epoch integrated over its own; ``()`` for a single cadence, which
+    #: is what every older state was. See :meth:`check_exposure`.
+    exposures: tuple = ()
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
               "gibbsgrid", "ld", "law", "oblate", "rhostar")
@@ -414,6 +418,34 @@ class ResumeState:
             f"likelihood revision {self.model_rev}, but this turin is "
             f"revision {MODEL_REV} -- the log-density has changed since, so "
             "the chains cannot be continued. Re-run with --fresh.")
+
+    def check_exposure(self, exposure_time, exposures=()):
+        """Refuse chains sampled with a different exposure model.
+
+        Not a command-line choice, so it is not in :data:`GUARDS`: the data
+        decide it. A state records the single exposure it used and, for a
+        light curve that mixes cadences, the exposure of each kind of epoch;
+        a lineage fitted before turin integrated every epoch over its own
+        exposure read as one cadence and cannot be continued as mixed.
+        """
+        stored = tuple(getattr(self, "exposures", ()))
+        same = (len(stored) == len(exposures) and all(
+            abs(a - b) <= 1e-9 * max(abs(a), 1e-300)
+            for a, b in zip(stored, exposures)))
+        if same and not exposures:
+            same = abs(self.exposure_time - exposure_time) <= (
+                1e-9 * max(abs(exposure_time), 1e-300))
+        if not same:
+            def show(e, one):
+                return (", ".join(f"{x * 1440:.3g}" for x in e) if e
+                        else f"{one * 1440:.3g}") + " min"
+            raise SystemExit(
+                f"{self.target} {self.mode}: this run integrated exposures of "
+                f"{show(stored, self.exposure_time)}, but the light curve now "
+                f"gives {show(exposures, exposure_time)} (each epoch is "
+                "integrated over its own cadence since turin 0.1.86). The "
+                "likelihood differs, so the chains cannot be continued. "
+                "Re-run with --fresh.")
 
     def check(self, **cli):
         """Raise if the CLI disagrees with this state on any guarded field."""
