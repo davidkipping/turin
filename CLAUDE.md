@@ -736,8 +736,12 @@ The pipeline's TTV MAP came out 0.47 below in the 0.11.0 run, but that is
 its start (from the LinEph chains, which differ), not `optimize`: from the
 same starts the TTV MAP is identical under both at 8 seeds, whose own
 spread is 1.2 nats. The 0.11.0 TTV run's warmup report said TOO SHORT
-(spread still drifting) and converged anyway (R-hat 1.0093); one run, not
-followed up. `MIN_ANVIL` stays 0.9.0. Full suite: 474 passed.
+(spread still drifting) and converged anyway (R-hat 1.0093). Followed up
+(0.1.88) at seeds 1 and 2 under both: TTV TOO SHORT at 1 of 3 seeds under
+0.10.1 and 2 of 3 under 0.11.0, every run converged in one round (R-hat
+<= 1.0093, ESS 45,000-53,000), LinEph settled every time. So it is
+KOI-518.02's TTV warmup sitting at the report's edge (it settles at
+iteration ~780 of 800 when it does), not anvil 0.11.0. `MIN_ANVIL` stays 0.9.0. Full suite: 474 passed.
 
 **Checked against elome 0.18.7** (`962aedb`) **and anvil 0.10.1**
 (`f3f289f`), turin 0.1.79. elome 0.18.6 fixed oblate and ring gradients at
