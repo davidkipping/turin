@@ -540,3 +540,33 @@ def test_aligned_central_share_counts_the_false_mode_family():
     b = np.array([0.02, 0.05, 0.02, 0.0, 0.4])
     # in: rows 0 and 1; out: theta too large, f too small, b too large
     assert pipeline.aligned_central_share(f, th, b) == pytest.approx(0.4)
+
+
+def test_releasing_the_graph_changes_when_not_what_is_computed():
+    """``model.release_graph`` evaluates each kernel call as it is made, so a
+    float64 re-score of a large oblate fit never holds every block's graph at
+    once (Metal's 499,000-buffer limit). The values are bitwise the same, the
+    flag is off outside the context and restored after it, and the float64
+    wrapper turns it on."""
+    cen = dict(times_centered=np.linspace(-0.3, 0.3, 300)[None, :],
+               n_arr=np.zeros(1), d_arr=np.zeros(1), P_ref=9.0, tau0_ref=0.0)
+    col = lambda v: mx.array([[float(v)]], dtype=mx.float64)
+    with mx.stream(mx.cpu):
+        grid = M.build_grid(cen, np.zeros(1), dtype=mx.float64,
+                            exp_time=29.4 / 1440, mask=np.ones((1, 300)))
+        kw = dict(mid=mx.zeros((1, 1), dtype=mx.float64), k=col(0.1),
+                  b=col(0.5), T14=col(0.15), period=col(9.0),
+                  f=col(0.2), theta=col(0.5))
+        plain = [np.array(x) for x in M.generator_flux_devs(grid, **kw)]
+        assert M._RELEASE[0] == 0
+        with M.release_graph():
+            assert M._RELEASE[0] == 1
+            held = [np.array(x) for x in M.generator_flux_devs(grid, **kw)]
+        assert M._RELEASE[0] == 0
+        seen = []
+        wrapper = likelihood._Fp64Wrapper(lambda v: seen.append(M._RELEASE[0])
+                                          or v)
+        wrapper(mx.zeros((1, 1), dtype=mx.float64))
+    assert seen == [1] and M._RELEASE[0] == 0
+    for a, b in zip(plain, held):
+        assert np.array_equal(a, b)

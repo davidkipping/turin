@@ -49,6 +49,7 @@ hurin >= 0.1.68 the orbit model is the only remaining difference.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass
 
@@ -522,15 +523,48 @@ def _tau_kernel(grid, flat, *args, **kw):
     through the concatenation.
     """
     def call(x, exp):
-        return elome.flux_dev_from_tau(
+        out = elome.flux_dev_from_tau(
             x, *args, exp_time=exp,
             integration="contact" if exp > 0 else "none",
             n_gl=grid.n_gl, **kw)
+        if _RELEASE[0]:
+            mx.eval(out)
+        return out
 
     if not grid.groups:
         return call(flat, grid.exp_time)
     return mx.concatenate(
         [call(flat[:, a:b], exp) for exp, a, b in grid.groups], axis=1)
+
+
+#: depth of :func:`release_graph` contexts; non-zero makes every kernel call
+#: evaluate its result at once
+_RELEASE = [0]
+
+
+@contextlib.contextmanager
+def release_graph():
+    """Evaluate each tau-kernel call as it is made, for a value-only path.
+
+    MLX builds a graph lazily and holds every array in it until something
+    evaluates. elome's oblate float64 kernel is thousands of small operations
+    per point, and a likelihood made of many epoch blocks builds all of them
+    before its first evaluation: past ~12,000 points that exceeded Metal's
+    499,000-buffer limit ("[metal::malloc] Resource limit (499000)
+    exceeded"), and a 16-row float64 re-score of an oblate ``--mle`` fit
+    could not run. Evaluating the kernel's output frees its graph, leaving one
+    call's worth live. The values are the same; only when they are computed
+    changes.
+
+    Only for a path that is not differentiated or compiled: evaluating inside
+    ``mx.grad`` or ``mx.compile`` is an error. The float64 path
+    (:class:`turin.likelihood._Fp64Wrapper`) is value-only by construction.
+    """
+    _RELEASE[0] += 1
+    try:
+        yield
+    finally:
+        _RELEASE[0] -= 1
 
 
 def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,

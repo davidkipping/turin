@@ -1022,6 +1022,20 @@ with synthetic cap-sized draws (16,400 x 512 chains) and time
 `mx.get_peak_memory()`. On KOI-5616.01's layout that measured peak RSS
 8.76 -> 2.84 GB, MLX 10.5 -> 1.3 GB, and 306 -> 41 s per round.
 
+### The float64 re-score releases its graph (`model.release_graph`, 0.1.89)
+
+`anvil.optimize` re-scores its top 16 starts in float64 on the CPU stream in
+one unchunked call (`_Fp64Wrapper`). MLX builds the whole lazy graph before
+evaluating, and elome's oblate float64 kernel is thousands of small ops per
+point, so a target of 11k-60k points exceeded Metal's 499,000-buffer limit
+(`[metal::malloc] Resource limit`). `_tau_kernel` therefore evaluates each
+call as it is made while `release_graph()` is active, which `_Fp64Wrapper`
+enters. **Only for value-only paths**: `mx.eval` inside `mx.grad` or
+`mx.compile` is an error. Values are bitwise unchanged. Open, unrelated: an
+`IndexError: unordered_map::at` from MLX's compile of the float32 oblate
+gradient on large targets (19 of 164 in the oblate scan); the cause is not
+found (batch size ruled out), and anvil catches only MLX's `RuntimeError`.
+
 ### The MAP search (`seeding.find_map`, anvil.optimize, 0.1.71)
 
 Every fresh fit starts its chains from `anvil.optimize` on 128 starts (a

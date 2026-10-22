@@ -435,6 +435,6 @@ class _Fp64Wrapper:
         self.inner = inner
 
     def __call__(self, v):
-        with mx.stream(mx.cpu):
+        with mx.stream(mx.cpu), _model.release_graph():
             return self.inner(v if v.dtype == mx.float64
                               else v.astype(mx.float64))
