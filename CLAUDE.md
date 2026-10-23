@@ -36,6 +36,10 @@ in a matching `*_reply.md`. Existing briefs:
 - `docs/upstream/anvil_prompt.md` — resumable runs (needed for
   `--extend`/auto-resume), the ChEES bounded-parameter boundary trap,
   per-chain divergence counts.
+- `docs/upstream/anvil_compile_indexerror_prompt.md` — `CompiledOrEager`
+  should treat MLX's compile-time `IndexError: unordered_map::at` (oblate
+  gradient over 4+ epoch blocks) as a compile refusal. Sent 0.1.91; turin's
+  `MAX_OBLATE_BLOCKS` cap stays either way. **Outstanding.**
 - `docs/upstream/anvil_gibbs_prompt.md` — `ResumeState.with_positions`,
   so grid-Gibbs can move chains without turin rewriting ChEES's internal
   `u`/`log_prob`/`grad` cache itself. **Landed in anvil `849159f`**; see
@@ -69,8 +73,7 @@ acceptance against the default on KOI-518.02 and KOI-448.02 was recorded in
 0.1.43 and its analysis corrected in 0.1.44 after code review
 (`docs/bench/collapsed_ld_acceptance.md`).
 
-**Every brief turin has sent has landed, so nothing is outstanding
-upstream.** Do not open a new one without being asked to: write the finding
+**Every brief turin has sent has landed except the `IndexError` one above.** Do not open a new one without being asked to: write the finding
 down here or in `docs/`, and let the user decide whether it goes upstream. A
 brief commits someone else's session to work.
 - `docs/upstream/hurin_doc_prompt.md` — documentation only: hurin's
