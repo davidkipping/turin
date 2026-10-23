@@ -1031,10 +1031,17 @@ point, so a target of 11k-60k points exceeded Metal's 499,000-buffer limit
 (`[metal::malloc] Resource limit`). `_tau_kernel` therefore evaluates each
 call as it is made while `release_graph()` is active, which `_Fp64Wrapper`
 enters. **Only for value-only paths**: `mx.eval` inside `mx.grad` or
-`mx.compile` is an error. Values are bitwise unchanged. Open, unrelated: an
-`IndexError: unordered_map::at` from MLX's compile of the float32 oblate
-gradient on large targets (19 of 164 in the oblate scan); the cause is not
-found (batch size ruled out), and anvil catches only MLX's `RuntimeError`.
+`mx.compile` is an error. Values are bitwise unchanged.
+
+**Oblate targets are capped at 3 epoch blocks (`likelihood.MAX_OBLATE_BLOCKS`,
+0.1.90).** MLX's compiler raises `IndexError: unordered_map::at: key not
+found` on the oblate value+gradient over 4 or more blocks, at any batch size
+(KOI-254.01 forced from 3 to 6 blocks; KOI-1225.01 passes at 3, fails at 4).
+It is not the compile cache (held references still fail), the batch, or one
+epoch. anvil catches only MLX's `RuntimeError`, so it escaped `optimize`.
+Large targets hit it via the memory budget (KOI-971.01: 26 blocks). The cap
+costs no memory (blocking bounds a launch, not the peak). Round layouts are
+untouched. Why 4 is the limit is MLX's; not investigated further.
 
 ### The MAP search (`seeding.find_map`, anvil.optimize, 0.1.71)
 

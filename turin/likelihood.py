@@ -59,6 +59,17 @@ BYTES_PER_POINT = 48
 #: variant. Blocking bounds the size of any one kernel launch; it does not
 #: bound the peak.
 DEFAULT_BLOCK_BUDGET_BYTES = 1 << 31   # 2 GiB
+#: An oblate target is split into at most this many epoch blocks. MLX's
+#: compiler cannot compile the oblate value+gradient over more: the same
+#: target compiles at 1-3 blocks and raises ``IndexError: unordered_map::at:
+#: key not found`` at 4 or more, at any batch size (KOI-254.01 forced from 3
+#: to 6 blocks; KOI-1225.01 passes at 504 epochs, 3 blocks, and fails at 508,
+#: 4). Large targets reach it through the memory budget (KOI-971.01: 26
+#: blocks). It costs nothing in memory, because blocking bounds a launch and
+#: not the peak (KOI-3794.01, 128 rows: 1.74 GB at 3 blocks, 2.61 at 1). The
+#: round model compiles at any count, so only oblate layouts are capped and
+#: every other path keeps its blocks bitwise.
+MAX_OBLATE_BLOCKS = 3
 
 
 class WhiteNoise:
@@ -158,6 +169,8 @@ class ProfiledTransitLogProb:
                                 self.n_sub, budget_bytes,
                                 itemsize=8 if dtype == mx.float64 else 4,
                                 bytes_per_point=bytes_per_point)
+        if getattr(layout, "oblate", False):
+            step = max(step, -(-self.n_epochs // MAX_OBLATE_BLOCKS))
         self.blocks = [
             _Block(lo, min(lo + step, self.n_epochs),
                    full_grid.select(lo, min(lo + step, self.n_epochs)),

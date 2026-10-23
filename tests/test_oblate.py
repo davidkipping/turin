@@ -570,3 +570,33 @@ def test_releasing_the_graph_changes_when_not_what_is_computed():
     assert seen == [1] and M._RELEASE[0] == 0
     for a, b in zip(plain, held):
         assert np.array_equal(a, b)
+
+
+def test_an_oblate_target_is_capped_at_three_blocks_because_mlx_cannot_compile_more(data):
+    """MLX's compiler raises ``IndexError: unordered_map::at: key not found``
+    on the oblate value+gradient split into 4 or more epoch blocks (real
+    targets reach that through the memory budget: KOI-971.01 split into 26).
+    ``MAX_OBLATE_BLOCKS`` caps oblate layouts; the round model, which compiles
+    at any count, keeps its blocks."""
+    ed, cen, _, _, orders = data
+    tiny = 1 << 14                    # a budget that would make many blocks
+    kw = dict(num_resample=7, exposure_time=H4.EXP, n_chains_hint=16,
+              budget_bytes=tiny)
+    rlay = params.lineph_layout(H4.EPH, law="hybrid4", ld="collapsed")
+    _, _, rlo, _ = likelihood.build_target(rlay, cen, ed, orders, **kw)
+    assert len(rlo.blocks) > 3
+
+    olay = params.lineph_layout(H4.EPH, law="hybrid4", oblate=True,
+                                ld="collapsed")
+    tr, _, olo, _ = likelihood.build_target(olay, cen, ed, orders,
+                                            likelihood_only=True, **kw)
+    assert len(olo.blocks) <= likelihood.MAX_OBLATE_BLOCKS, len(olo.blocks)
+    assert sum(b.hi - b.lo for b in olo.blocks) == ed["n_epochs"]
+
+    def vg(u):
+        out, vjps = mx.vjp(tr.log_prob, [u],
+                           [mx.ones(u.shape[:1], dtype=u.dtype)])
+        return out[0], vjps[0]
+    v, g = mx.compile(vg)(mx.zeros((2, olay.dim), dtype=mx.float32))
+    mx.eval(v, g)                      # raised IndexError at 4+ blocks
+    assert g.shape == (2, olay.dim)
