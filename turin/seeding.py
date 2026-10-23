@@ -180,6 +180,28 @@ def _supersample(exposure_time, num_resample):
 #: hybrid4 target (~3 MB per row) to the memory of a 512-chain evaluation.
 MAX_ROWS = 512
 
+#: Rows x points one ``anvil.optimize`` call may carry, for ``--mle``. macOS
+#: kills a GPU command buffer that runs too long ("Impacting Interactivity"),
+#: and the optimizer's finite-difference Hessian sends 512 rows at a time: on
+#: a 50,000-point oblate TTV target (1,900 parameters) that is a ~7 s launch,
+#: and KOI-7259.01 and KOI-1631.01 both lost hours of work to the watchdog
+#: there. 8e6 gives ~128 rows (~1.6 s) at 50k points. Per row the cost is
+#: flat from 128 rows up (12 ms vs 13.6 ms at 512), so smaller batches cost
+#: nothing from 128 rows up (64 rows measured 35% slower per row, and the
+#: 5-parameter LinEph fit of KOI-1631.01 took 195 s at 64 rows against 123 s
+#: at 512, so only the TTV polish uses this); a target under 15,625 points
+#: keeps 512.
+ROW_POINTS = 8_000_000
+MIN_ROWS = 128
+
+
+def rows_for(n_points, max_rows=MAX_ROWS):
+    """The ``max_rows`` for a target of ``n_points`` (padded) points: a power
+    of two, at most ``max_rows``, at least :data:`MIN_ROWS`, with rows x points near
+    :data:`ROW_POINTS`."""
+    n = max(1, int(ROW_POINTS // max(1, int(n_points))))
+    return int(max(MIN_ROWS, min(max_rows, 1 << (n.bit_length() - 1))))
+
 
 def find_map(target, u_starts, *, seed=0, max_rows=MAX_ROWS):
     """The fit's best point from ``u_starts`` ((n, dim), unconstrained), by

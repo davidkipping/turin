@@ -411,7 +411,9 @@ def fit_ttv(prepared, centering, epoch_data, orders, *, law, b_prior,
         if extra is not None and npass == 0:
             U[-len(extra):] = extra      # after the beta-stratified rows
         res = anvil.optimize(tr, U, objective="mle", seed=seed,
-                             max_rows=_seeding.MAX_ROWS, hessian=HESSIAN)
+                             max_rows=_seeding.rows_for(
+                                 epoch_data["mask"].size),
+                             hessian=HESSIAN)
         log(f"  [{label}] pass {npass + 1}: polish ln L "
             f"{res.log_value:.3f} in {res.wall_time:.1f}s")
         theta = np.asarray(res.model, dtype=np.float64)

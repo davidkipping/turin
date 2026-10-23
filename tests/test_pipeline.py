@@ -16,7 +16,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from turin import cli, model as M, pipeline, prep, outputs
+from turin import cli, mle, model as M, pipeline, prep, outputs
 from turin import MODEL_REV as _MODEL_REV
 
 P_TRUE, EPOCH_TRUE, DUR_H = 6.2431, 131.7, 3.1
@@ -970,6 +970,33 @@ def test_mle_oblate_fits_ttv_round_and_oblate(tmp_path, fake_ttv_target):
     assert has.sum() >= 8
     np.testing.assert_array_less(np.abs(times["tmid"] - truth)[has] * 1440,
                                  2.0)
+
+
+def test_a_gpu_kill_in_the_oblate_ttv_fit_keeps_the_round_ttv_fit(
+        tmp_path, fake_ttv_target, monkeypatch):
+    """0.1.92: macOS killed a long GPU launch in the oblate TTV polish of two
+    big scan targets (KOI-7259.01 after 4.5 h, KOI-1631.01 after 13.8 h).
+    The round TTV fit is on disk before the oblate one starts, the failure is
+    explained in the log, and it still propagates (the target did not
+    finish)."""
+    real = mle.fit_ttv
+
+    def killed(*a, **kw):
+        if kw.get("oblate"):
+            raise RuntimeError("[METAL] Command buffer execution failed: "
+                               "Impacting Interactivity")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(mle, "fit_ttv", killed)
+    logs = []
+    with pytest.raises(RuntimeError, match="Impacting Interactivity"):
+        pipeline.run(_args(tmp_path, mle=True, law="hybrid4", oblate=True,
+                           modes=("lineph", "ttv")), log=logs.append)
+    names = os.listdir(str(tmp_path))
+    assert "KOI-1.01_ttv_mle_round.csv" in names
+    assert "KOI-1.01_lineph_mle_fit.csv" in names
+    assert "KOI-1.01_ttv_mle_fit.csv" not in names
+    assert "oblate ttv FAILED" in "\n".join(logs)
 
 
 def test_mle_ttv_gate_refuses_weak_transits(tmp_path, fake_target):

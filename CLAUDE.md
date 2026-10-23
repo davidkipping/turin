@@ -1046,6 +1046,18 @@ Large targets hit it via the memory budget (KOI-971.01: 26 blocks). The cap
 costs no memory (blocking bounds a launch, not the peak). Round layouts are
 untouched. Why 4 is the limit is MLX's; not investigated further.
 
+**The `--mle` TTV polish's optimizer batches shrink with the target
+(`seeding.rows_for`, 0.1.92; LinEph keeps 512 rows, 64 measured 1.6x slower).** macOS kills a GPU command buffer that runs too long
+(`Impacting Interactivity`), and two large oblate TTV scan targets died in
+`anvil.optimize`'s finite-difference Hessian after 4.5 h and 13.8 h. The
+512-row call there is a ~7 s launch at 50k points; 128 rows is 1.6 s at the
+same cost per row. `rows_for` keeps rows x points near `ROW_POINTS`. The
+failure was not reproduced in isolation, so this is a mitigation, not a
+confirmed fix: if a big target still dies, look at the launch time at the
+optimizer's real points (extreme oblateness could be slower than the
+near-origin points timed). The round TTV fit is written before the oblate
+one starts.
+
 ### The MAP search (`seeding.find_map`, anvil.optimize, 0.1.71)
 
 Every fresh fit starts its chains from `anvil.optimize` on 128 starts (a

@@ -579,9 +579,23 @@ def _run_mle_ttv(args, prepared, centering, orders, outdir, lineph_fit,
     if round_lineph is not None:
         rnd = _mle.fit_ttv(prepared, centering, epoch_data, orders,
                            lineph_fit=round_lineph, **ttv_kw)
-        fit = _mle.fit_ttv(prepared, centering, epoch_data, orders,
-                           lineph_fit=lineph_fit, oblate=True, round_fit=rnd,
-                           **ttv_kw)
+        # on disk before the oblate fit starts, which can take hours: a
+        # failure there (macOS killing a long GPU launch, 0.1.92) must not
+        # take the round TTV fit with it
+        _outputs.export_mle(outdir, target, "round", rnd, mode=_mle.MODE_TTV,
+                            log=log)
+        try:
+            fit = _mle.fit_ttv(prepared, centering, epoch_data, orders,
+                               lineph_fit=lineph_fit, oblate=True,
+                               round_fit=rnd, **ttv_kw)
+        except RuntimeError as exc:
+            if str(exc).startswith("[METAL]"):
+                log(f"  oblate ttv FAILED: {exc}\n  macOS killed a GPU "
+                    f"launch that ran too long. The LinEph fits and the "
+                    f"round TTV fit (ln L {rnd.lnL:.3f}, "
+                    f"{_mle.MODE_TTV}_mle_round.csv) are on disk; the "
+                    f"oblate TTV fit is not.")
+            raise
     else:
         fit = _mle.fit_ttv(prepared, centering, epoch_data, orders,
                            lineph_fit=lineph_fit, **ttv_kw)

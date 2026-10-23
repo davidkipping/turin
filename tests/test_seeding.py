@@ -85,6 +85,22 @@ class _null:
         return False
 
 
+def test_rows_per_launch_shrink_with_the_target():
+    """0.1.92: a big target's optimizer call stays a ~1.6 s launch (macOS
+    kills a long one); a small target keeps the full 512 rows."""
+    from turin import seeding
+
+    assert seeding.rows_for(3_000) == seeding.MAX_ROWS
+    assert seeding.rows_for(15_000) == seeding.MAX_ROWS
+    assert seeding.rows_for(50_000) == 128          # KOI-7259.01's size
+    assert seeding.rows_for(56_000) == 128
+    assert seeding.rows_for(70_000) == seeding.MIN_ROWS   # 64 is slower per row
+    assert seeding.rows_for(10 ** 8) == seeding.MIN_ROWS
+    for n in (1, 777, 20_000, 61_234, 10 ** 6):
+        r = seeding.rows_for(n)
+        assert r & (r - 1) == 0 and seeding.MIN_ROWS <= r <= seeding.MAX_ROWS
+
+
 def test_sweep_recovers_zero_ttv():
     ed, cen, dtau, n_ep = build_dataset(0.0)
     seeds, gap, scores, grids = sweep(ed, cen, tau_half=0.05)
