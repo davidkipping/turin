@@ -44,6 +44,13 @@ HEAVY_EVERY_S = 1200
 #: take 20+. Thinning is systematic and R-hat/ESS still see every draw, so
 #: only the products' row count changes.
 _EXPORT_ROWS_COLLAPSED_HYBRID = 160_000
+#: Export row budget for a collapsed mode's **interim** exports (every round
+#: but the last). Their q draws are post-hoc conditional draws that nothing
+#: feeds back into the sampling, and the next export replaces them, so a
+#: round need not pay for the full budget: measured at 0.6-3.7 ms per row
+#: (collapsed hybrid4, 0.1.94), 160,000 rows cost 93-591 s every round. The
+#: final export (converged, or at the draw cap) keeps the full budget.
+_EXPORT_ROWS_COLLAPSED_INTERIM = 16_384
 
 PARAM_LABELS = {
     "dP": "$P$ (d)", "dtau0": r"$\tau_0$", "k": "$k = R_p/R_\\star$",
@@ -953,7 +960,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         _export_all(mode, args, prepared, epoch_data, centering, orders,
                     layout, transform, lp, results, verdict, outdir,
                     log=log, state_holder=state_holder, cfg=cfg,
-                    pl_mode=pl_choice.mode, heavy=heavy)
+                    pl_mode=pl_choice.mode, heavy=heavy, final=final)
         if heavy:
             last_heavy["t"] = time.perf_counter()
         outcome[mode] = verdict
@@ -1148,7 +1155,7 @@ def _ml_row(results, lp, transform):
 
 def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                 transform, lp, results, verdict, outdir, *, log,
-                state_holder, cfg, pl_mode, heavy=True):
+                state_holder, cfg, pl_mode, heavy=True, final=True):
     """Write this mode's products. Called after each sampling round.
 
     Everything is computed from a bounded, systematic subsample of the pooled
@@ -1156,14 +1163,20 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
     ``verdict``, which saw every draw. ``heavy=False`` skips the chains
     tarball and the PDFs -- the expensive products -- and writes the small
     ones and the resume state, which are what make a run interruptible.
+    ``final=False`` (an interim round) caps a collapsed mode's rows at
+    :data:`_EXPORT_ROWS_COLLAPSED_INTERIM`: each row costs a conditional
+    limb-darkening draw, and the final export redraws them all.
     """
     target = prepared.target
     names_s = list(layout.names)            # what was sampled
     names = names_s
     collapsed = layout.ld == "collapsed"
-    thin = _sampling.export_thin(
-        results, max_rows=_EXPORT_ROWS_COLLAPSED_HYBRID
-        if collapsed and layout.law == "hybrid4" else _sampling.EXPORT_MAX_ROWS)
+    max_rows = (_EXPORT_ROWS_COLLAPSED_HYBRID
+                if collapsed and layout.law == "hybrid4"
+                else _sampling.EXPORT_MAX_ROWS)
+    if collapsed and not final:
+        max_rows = min(max_rows, _EXPORT_ROWS_COLLAPSED_INTERIM)
+    thin = _sampling.export_thin(results, max_rows=max_rows)
     ld_cols = list(_model_ld_names(layout.law))
     if collapsed:
         # collapsed Gibbs: the limb darkening was integrated out of the
@@ -1187,7 +1200,8 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
             where = "a triangle edge"
         phys = np.column_stack([transform.to_physical(v_model), q])
         names = names_s + ld_cols
-        log(f"  limb darkening: {len(q)} conditional draws of "
+        log(f"  limb darkening: {len(q)} conditional draws"
+            f"{'' if final else f' (interim export, at most {_EXPORT_ROWS_COLLAPSED_INTERIM} rows)'} of "
             f"{', '.join(ld_cols)} (MH acceptance {acc:.2f}; expansion point "
             f"on {where} for {100 * edge:.0f}% of draws)")
     else:

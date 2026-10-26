@@ -352,6 +352,32 @@ def test_hybrid4_refusals_reach_the_pipeline(tmp_path, fake_target, over,
     assert not any(tmp_path.iterdir())
 
 
+def test_collapsed_interim_exports_draw_fewer_rows(tmp_path, fake_target,
+                                                  monkeypatch):
+    """A collapsed mode's interim export (a round that is not the last) caps
+    its rows -- each costs a conditional limb-darkening draw that the next
+    export replaces -- and the final export draws the full budget. Round 0
+    is kept unconverged by an unreachable R-hat target."""
+    from turin import ldmarg, sampling
+
+    monkeypatch.setattr(sampling, "RHAT_MAX", 0.0)
+    monkeypatch.setattr(pipeline, "_EXPORT_ROWS_COLLAPSED_INTERIM", 64)
+    seen = []
+    real = ldmarg.draw_limb_darkening
+
+    def spy(lp, v_model, **kw):
+        seen.append(len(v_model))
+        return real(lp, v_model, **kw)
+
+    monkeypatch.setattr(ldmarg, "draw_limb_darkening", spy)
+    logs = []
+    args = _args(tmp_path, ld="collapsed", max_samples=80)
+    assert pipeline.run(args, log=logs.append) in FINISHED
+    assert len(seen) == 2, seen
+    assert seen[0] <= 64 < seen[1] == 32 * 80
+    assert any("interim export, at most 64 rows" in l for l in logs)
+
+
 def test_collapsed_lineph_writes_hurin_products(tmp_path, fake_target):
     """--ld=collapsed samples 5 parameters but writes hurin's products
     unchanged: q1, q2 rows and columns come from exact conditional draws."""

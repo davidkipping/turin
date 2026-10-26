@@ -602,8 +602,8 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   GHK converges to the true marginal as N grows. At 1,024 points it errs by
   0.005-0.064 nats (sd over posterior thetas) on the acceptance targets, and
   by up to ~2 nats at narrow off-axis thetas far from any posterior (0.004
-  at 4,096). Accepted and documented, not fixed: a larger rule costs ~2/3 of
-  the evaluation per doubling. A probe that integrates one layout's GHK mean
+  at 4,096). Accepted and documented, not fixed: a larger rule is costly
+  (1,024 -> 4,096 points: 9x -> 22-39x a sampled evaluation; 0.1.94). A probe that integrates one layout's GHK mean
   and covariance under another layout produces a fake "layout bug" of
   ~1 nat. That happened in 0.1.64's review; every layout agrees to 0.001
   when done consistently.
@@ -611,6 +611,24 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   (`pipeline._EXPORT_ROWS_COLLAPSED_HYBRID`): every exported row needs a
   conditional draw (~1.3 ms), and the general 1,000,000-row budget would
   make each export take 20+ minutes. R-hat and ESS still see every draw.
+  **Interim exports** (every round but the last, either collapsed law) cap
+  at `_EXPORT_ROWS_COLLAPSED_INTERIM` = 16,384 rows since 0.1.94: the q draws
+  are post-hoc, nothing feeds them back into sampling, and the next export
+  replaces them, so only the final export (converged or at the cap) pays for
+  the full budget. Measured before the change: 0.6-3.7 ms per row, 93-591 s
+  per round (KOI-1361.01, 518.02, 4016.01). An interrupted run's products
+  carry the interim rows until it is resumed.
+- **Where an evaluation's time goes** (0.1.94; scratchpad
+  `ghk/cost_split.py`, 512 chains, float32 value+grad, KOI-518.02, 1361.01,
+  4016.01, in units of a sampled hybrid4 evaluation, 2-4 ms): the five
+  generator curves 0.7-1.6x, plus one profile solve 1.1-2.0x; the QP for x*
+  (31 faces) +1.5-2.3x; the GHK Gaussian (`_gauss`) +2x; GHK at 1,024 points
+  +3-6x (256 points: +0.5-1.3x); total 9.1-11.5x. Value alone 3.5-4.6x, so
+  the backward pass is ~60%. The curves are not the cost, as the
+  quadratic's 1.26x wall time suggests; the per-chain 4x4 algebra (Python
+  loops over faces and columns, thousands of tiny MLX ops) is as large as
+  GHK itself. Taking GHK's gradient through 256 of the 1,024 points, value
+  exact, measured 7.0-8.0x (not built).
 - **Real-target acceptance** (`docs/bench/collapsed_hybrid_acceptance.md`):
   the user's five-target suite (KOI-4016.01, 4087.01, 1430.03, 1361.01,
   2650.01) against sampled hybrid4. The first pass (0.1.63) found the three
