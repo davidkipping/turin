@@ -20,9 +20,26 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .data.ephemeris import get_ephemeris, get_other_planet_ephemerides
-from .data.lightcurve import get_lightcurve
 from .data.preprocessing import sigma_clip
+
+
+# The data layer (lightkurve, astropy: ~1.6 s) is imported on first use, so
+# the numerical helpers here -- and profile, likelihood, ldhybrid, which
+# import them -- load without it. Module-level names, so tests can replace
+# them.
+def get_lightcurve(*args, **kwargs):
+    from .data.lightcurve import get_lightcurve as f
+    return f(*args, **kwargs)
+
+
+def get_ephemeris(*args, **kwargs):
+    from .data.ephemeris import get_ephemeris as f
+    return f(*args, **kwargs)
+
+
+def get_other_planet_ephemerides(*args, **kwargs):
+    from .data.ephemeris import get_other_planet_ephemerides as f
+    return f(*args, **kwargs)
 
 #: Default window half-width, in transit durations, around each predicted
 #: transit centre (hurin's n_durations).

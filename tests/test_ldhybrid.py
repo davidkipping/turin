@@ -621,3 +621,15 @@ def test_conditional_draws_where_the_model_fits_loosely(weak, v, ref):
     assert np.all(err < 0.1), err
     np.testing.assert_allclose(q.std(0) / sd, 1.0, atol=0.1)
     assert acc > 0.5
+
+
+def test_the_collapsed_machinery_imports_without_the_data_layer():
+    """ldhybrid, simplexmass, likelihood and mle load without lightkurve or
+    astropy (``prep`` imports the data layer on first use): other packages
+    import these pieces on their own data (WASP103b_CHEOPS)."""
+    import subprocess
+
+    code = ("import sys, turin.ldhybrid, turin.simplexmass, turin.likelihood, "
+            "turin.mle; bad = [m for m in ('lightkurve', 'astropy') "
+            "if m in sys.modules]; assert not bad, bad")
+    subprocess.run([sys.executable, "-c", code], check=True)

@@ -24,7 +24,10 @@ its quadratic model about a detached expansion point ``x*``:
   frozen once per fit (:mod:`turin.simplexmass`), where the triangle used
   Gauss-Legendre. Measured against a 2^18 reference at posterior draws: max
   0.015 nats on KOI-518.02, 95th percentile 0.03 (max 0.085) on KOI-448.02's
-  two-solution posterior; ~1/N, and not improved by re-choosing the layout.
+  two-solution posterior (0.1.63, old basis); ~1/N. On the curvature basis
+  (0.1.93, 40 thetas per target) the frozen layout errs by a median
+  0.004-0.014 with tails to 0.12 (0.84 at one KOI-448.02 theta); no other
+  frozen rule did better, only a per-theta choice (see CLAUDE.md).
 - All algebra on the **QR factor** ``R`` of the projected columns (two-pass
   Gram-Schmidt, TSQR over epoch blocks), never on ``H``: on KOI-448.02 ``H``
   reaches cond 7e9, where a float32 solve is wrong by 12x; ``R``'s is <= 8.5e4.

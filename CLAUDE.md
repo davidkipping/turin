@@ -73,6 +73,14 @@ acceptance against the default on KOI-518.02 and KOI-448.02 was recorded in
 0.1.43 and its analysis corrected in 0.1.44 after code review
 (`docs/bench/collapsed_ld_acceptance.md`).
 
+**Inbound, 2026-10-26: WASP103b_CHEOPS** (`../WASP103b_CHEOPS/docs/upstream/
+turin_prompt.md`, reply `turin_reply.md` beside it) runs turin's collapsed
+hybrid4 scheme under an anvil-gp GP likelihood, calling `simplexmass` and
+copies of `ldhybrid`'s helpers. Two requests: lazy data-layer imports (done
+in 0.1.93: `turin.ldhybrid`, `simplexmass`, `likelihood`, `mle` load without
+lightkurve or astropy, pinned by a test) and a different GHK layout rule
+(measured and not adopted; see "Collapsed hybrid4").
+
 **Every brief turin has sent has landed except the `IndexError` one above.** Do not open a new one without being asked to: write the finding
 down here or in `docs/`, and let the user decide whether it goes upstream. A
 brief commits someone else's session to work.
@@ -510,9 +518,26 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
 
 - **Integral by GHK**, 1,024 frozen scrambled-Sobol points, layout
   `(dep, order)` frozen at the fit's MAP (`ldhybrid.freeze_layout`). Error
-  ~1/N; re-choosing the layout per draw did not help. The layout and the
+  ~1/N. The layout and the
   **points themselves** are stored in `ResumeState` (not a seed: scipy
   could change), so resume and `--replot` rebuild the identical target.
+  **The layout rule, re-measured (0.1.93,** on WASP103b_CHEOPS's report that
+  `choose_layout`'s slack rule picked a layout 1.6 nats off at a point of
+  theirs, unconverged at 2^20 points). It can pick a bad layout at a single
+  point here too (effective sample size 4 of 4096 at KOI-4016.01's best fit,
+  27 at 1430.03's), but what matters is the error over the posterior: on the
+  suite plus KOI-518.02 and 448.02 (40 posterior thetas each, sampled-hybrid4
+  draws; reference 2^18 random points with each theta's max-ESS layout,
+  whose two best layouts agree to 0.0000), every **frozen** rule has tails --
+  the slack rule median 0.004-0.014, max 0.026-0.12, and 0.84 on KOI-448.02;
+  max ESS at the best fit (their fix) no better overall (max 0.020-0.12, 1.0
+  on 448.02); max min-ESS or mean log-ESS over 16 other draws worse (0.54 on
+  1430.03, 19-21 nats on 448.02). Only a layout chosen **per theta** by ESS
+  is uniformly good (median 0.001-0.005, max <= 0.033, sd 0.005-0.008), at
+  120 layouts' cost per evaluation; a cheaper per-theta choice among a few
+  layouts is the open idea, not built. So the slack rule stays. These
+  figures are on the curvature basis and above 0.1.63's old-basis probe
+  (KOI-518.02 max 0.015). Scratchpad `ghk/layout_probe*.py`.
 - **Algebra on R, never H.** Two-pass MGS of the projected columns, TSQR
   across blocks, ridge as appended rows, unrolled triangular solves, the
   GHK factor from a second QR of `R^-T T^T`. KOI-448.02's H reached cond
