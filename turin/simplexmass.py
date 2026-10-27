@@ -451,7 +451,11 @@ def ghk_lw_vjp(my, Ly, U, dep, order, inv_fstar):
     (no underflow in the tails). Ties follow MLX: the ``eps_gap`` floor on
     ``hi`` takes the gradient on a tie, as does a bound ``z`` was clipped
     to. Autodiff's backward cost ~5x its forward (10.6 ms of a 34 ms
-    evaluation at 512 chains, 0.1.97); this is a few elementwise passes."""
+    evaluation at 512 chains, 0.1.97); this is a few elementwise passes.
+
+    Since 0.1.98 the float32 GPU path is :mod:`turin.ghkmetal`, the same
+    forward and reverse pass in two Metal kernels; this MLX-ops version is
+    their executable specification, kept and tested against both."""
     D = my.shape[-1]
     key = (D, int(dep), tuple(int(o) for o in order),
            tuple(float(f) for f in inv_fstar))
@@ -600,8 +604,11 @@ def ghk_log_mass(my, Ly, U, dep, order, inv_fstar):
     """``log int_simplex exp(-1/2 (y - my)^T Cy^-1 (y - my)) p(y) dy``,
     ``Cy = Ly Ly^T``: the Gaussian's normaliser times GHK's estimate of the
     prior-weighted probability, ``(C,)``."""
-    if (my.dtype == mx.float32 and U.ndim == 2 and _gpu_stream_active()):
-        lw = ghk_lw_vjp(my, Ly, U, dep, order, inv_fstar)
+    if (my.dtype == mx.float32 and U.ndim == 2 and _gpu_stream_active()
+            and mx.metal.is_available()):
+        from . import ghkmetal as _ghkmetal
+
+        lw = _ghkmetal.ghk_lw(my, Ly, U, dep, order, inv_fstar)
     else:
         lw, _ = ghk_terms(my, Ly, U, dep, order, inv_fstar)
     N = U.shape[-2]

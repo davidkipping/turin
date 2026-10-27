@@ -245,6 +245,86 @@ def test_ghk_hand_vjp_is_autodiffs_gradient_and_the_same_value():
     assert np.all(eh <= 3 * ea + 1e-6), (eh, ea)
 
 
+@pytest.mark.parametrize("case", ["tail", "moderate"])
+def test_ghk_metal_kernels_match_the_graph_in_value_and_gradient(case):
+    """turin.ghkmetal (float32 on the GPU): ``lw`` and the gradient of the
+    logsumexp over points -- what ``ghk_log_mass`` uses -- against float64,
+    no less accurate than the MLX graph and its autodiff. Values: logZ per
+    chain relative to max(|logZ|, 1) (deep-tail chains reach logZ ~ -1e8,
+    where a float32 ulp is 8 nats). Gradients: every chain within float32's
+    reach (2e-4 relative) or 3x autodiff's own error, and no worse than it
+    at the worst chain."""
+    if case == "tail":
+        my, Ly = _ghk_tail_case()
+        U, dep, order = SM.sobol_points(512, 4, 7), 1, (3, 0, 4, 2)
+    else:
+        rng = np.random.default_rng(3)
+        C, D = 128, 4
+        my = rng.uniform(-0.3, 0.6, (C, D))
+        Ly = np.zeros((C, D, D))
+        for c in range(C):
+            A = rng.standard_normal((D, D)) * np.exp(rng.uniform(-4, -1, D))
+            Ly[c] = np.linalg.cholesky(A @ A.T + 1e-6 * np.eye(D))
+        U, dep, order = SM.sobol_points(1024, 4, 2024), 0, (1, 2, 3, 4)
+    from turin import ghkmetal as GM
+
+    m, L, Ux = (mx.array(a, dtype=mx.float32) for a in (my, Ly, U))
+    metal = lambda a, b: GM.ghk_lw(a, b, Ux, dep, order, LH.INV_FSTAR)
+    graph = lambda a, b: SM.ghk_terms(a, b, Ux, dep, order, LH.INV_FSTAR)[0]
+    with mx.stream(mx.cpu):
+        a6 = [mx.array(a) for a in (my, Ly, U)]
+        lw64 = np.array(SM.ghk_terms(*a6, dep, order, LH.INV_FSTAR)[0])
+        g64 = [np.array(x) for x in mx.grad(
+            lambda a, b: mx.sum(mx.logsumexp(SM.ghk_terms(
+                a, b, a6[2], dep, order, LH.INV_FSTAR)[0], axis=-1)),
+            argnums=(0, 1))(a6[0], a6[1])]
+
+    def lse(x):
+        return x.max(-1) + np.log(np.exp(x - x.max(-1, keepdims=True)).sum(-1))
+
+    sc = np.maximum(np.abs(lse(lw64)), 1.0)
+    rel = lambda f: np.abs(lse(np.array(f(m, L), dtype=np.float64))
+                           - lse(lw64)) / sc
+    rk, rg = rel(metal), rel(graph)
+    assert np.all(np.isfinite(rk))
+    assert rk.max() <= 2 * rg.max() + 1e-6
+    assert np.median(rk) <= 2 * np.median(rg) + 1e-7
+
+    def grad_err(f):
+        g = [np.array(x, dtype=np.float64) for x in mx.grad(
+            lambda a, b: mx.sum(mx.logsumexp(f(a, b), axis=-1)),
+            argnums=(0, 1))(m, L)]
+        e0 = np.abs(g[0] - g64[0]).max(1) / np.abs(g64[0]).max(1)
+        e1 = np.abs(g[1] - g64[1]).max((1, 2)) / np.abs(g64[1]).max((1, 2))
+        return np.maximum(e0, e1)
+
+    ek, ea = grad_err(metal), grad_err(graph)
+    assert np.all(np.isfinite(ek))
+    assert np.all((ek <= 2e-4) | (ek <= 3 * ea)), (ek.max(), ea.max())
+    assert ek.max() <= 2 * ea.max() + 1e-6
+
+
+@pytest.mark.parametrize("C,N", [(1, 4), (1, 1024), (3, 8)])
+def test_ghk_metal_kernels_take_small_inputs(C, N):
+    """MLX passes a small kernel input in Metal's constant address space,
+    a large one in device memory; the kernels compile for both (a single
+    chain, as the MAP search's rescoring sends, failed to build before)."""
+    from turin import ghkmetal as GM
+
+    rng = np.random.default_rng(C * N)
+    my = mx.array(rng.uniform(0, 0.3, (C, 4)), dtype=mx.float32)
+    Ly = mx.array(np.tile(np.diag([0.1, 0.05, 0.03, 0.02]), (C, 1, 1)),
+                  dtype=mx.float32)
+    U = mx.array(SM.sobol_points(N, 4, 1), dtype=mx.float32)
+    order = (1, 2, 3, 4)
+    a = np.array(GM.ghk_lw(my, Ly, U, 0, order, LH.INV_FSTAR))
+    b = np.array(SM.ghk_terms(my, Ly, U, 0, order, LH.INV_FSTAR)[0])
+    np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-4)
+    g = mx.grad(lambda m: mx.sum(GM.ghk_lw(m, Ly, U, 0, order,
+                                           LH.INV_FSTAR)))(my)
+    assert np.isfinite(np.array(g)).all()
+
+
 def test_ghk_matches_direct_monte_carlo():
     """``log int_simplex exp(-1/2 (x-xh)^T H (x-xh)) p(x) dx`` by GHK vs by
     direct sampling of the Gaussian (cases where enough of it is inside)."""

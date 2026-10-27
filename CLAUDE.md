@@ -679,6 +679,34 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   value+grad 0.82-0.91x. It is memory-bound (dozens of passes over C x N
   arrays per step), which a Metal kernel holding each point's reverse pass
   in registers would remove; the formulas are the ones to port.
+- **GHK runs as two Metal kernels** (`turin/ghkmetal.py`, 0.1.98; float32
+  on the GPU with a shared rule, from `ghk_log_mass`). Forward: one thread
+  per (chain, point), `_ghk_forward`'s arithmetic step for step (normtail's
+  log Phi, inverse and truncated draw, the eps floor, the clip). Backward:
+  each thread recomputes its point's forward in registers and runs
+  `ghk_lw_vjp`'s reverse pass (which stays, as the kernels' executable
+  specification), summed per simdgroup with `simd_sum` and by MLX after.
+  MLX passes a small kernel input in Metal's `constant` address space, a
+  large one in `device`: helpers taking input pointers are templates over
+  the pointer type (a single chain failed to build otherwise).
+  **Metal's default `metal::log`/`exp` are fast approximations, not
+  accurate to relative precision near 1**: with them the classic
+  `log1p`/`expm1` constructions (Metal has neither) erred by up to 0.39 and
+  1e-2, and the forward's median error was 8x the graph's. Every log, exp
+  and sqrt is `metal::precise::`; each ported function then matches or
+  beats MLX's own against float64. The value is the graph's to float32
+  rounding, not bitwise: logZ against float64 at least as accurate (worst
+  relative 4.7e-5 vs 1.1e-4 on deep-tail cases); gradient worst 1.5e-4 vs
+  autodiff's 9.9e-4. On real targets value and gradient errors against
+  float64 match 0.1.97's; value+grad 0.57-0.81x 0.1.97's (KOI-4016.01
+  15.5 -> 8.9 ms, KOI-518.02 30.3 -> 23.5). **End to end** (scratchpad
+  `ghk/gradsplit_ab.py`, ChEES, 512 chains, 400 + 200, the same seeds as
+  0.1.95's runs): posteriors agree with 0.1.95 within 0.0077 sd and 1.54
+  MCSE, widths 0.990-1.010 (two seeds of one version: 0.011 sd, 2.57);
+  **ESS/s 1.56-2.70x 0.1.95's** (KOI-4016.01 2.31/2.70, 1361.01 1.93/2.33,
+  518.02 1.56/1.89), the QP kernel, hand VJP and Metal GHK together. Not
+  touched: sampled LD, quadratic collapsed, the Legendre baseline profile;
+  `--mle --law=hybrid4` gains the QP kernel only (4 QPs per evaluation).
 - **Real-target acceptance** (`docs/bench/collapsed_hybrid_acceptance.md`):
   the user's five-target suite (KOI-4016.01, 4087.01, 1430.03, 1361.01,
   2650.01) against sampled hybrid4. The first pass (0.1.63) found the three
