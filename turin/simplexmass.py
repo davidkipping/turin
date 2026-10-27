@@ -147,24 +147,181 @@ def _lstsq(cols, b):
 _FACE_SETS = {}
 
 
+def _face_sets(G):
+    if G not in _FACE_SETS:
+        _FACE_SETS[G] = [S for r in range(1, G + 1)
+                         for S in itertools.combinations(range(G), r)]
+    return _FACE_SETS[G]
+
+
 def qp_simplex_r(R, b):
     """``argmin |R x - b|^2`` over ``{x >= 0, sum x <= 1}``, exact and
     batched: every support of ``omega = (1 - sum x, x)`` is solved as a small
     least-squares problem on ``R``'s columns (by QR, so the conditioning is
     ``R``'s, the square root of the curvature's), and the best feasible one
     kept. ``R (C, D, D)``, ``b (C, D)`` -> ``x (C, D)``. Not differentiable
-    (the caller detaches it)."""
+    (the caller detaches it).
+
+    float32 on the GPU runs one Metal kernel, one thread per chain
+    (:func:`_qp_simplex_r_metal`); everything else -- float64, the CPU
+    stream -- the MLX graph (:func:`_qp_simplex_r_graph`), the reference.
+    The graph is thousands of tiny operations (faces x columns x passes) and
+    cost 1.5-2.3 sampled-hybrid4 evaluations per collapsed evaluation
+    (0.1.94); the same steps in one thread agree to float32 rounding."""
+    if (R.dtype == mx.float32 and _gpu_stream_active()
+            and mx.metal.is_available()):
+        return _qp_simplex_r_metal(mx.stop_gradient(R), mx.stop_gradient(b))
+    return _qp_simplex_r_graph(R, b)
+
+
+def _gpu_stream_active():
+    try:
+        return mx.default_device() == mx.Device(mx.DeviceType.gpu)
+    except Exception:
+        return False
+
+
+_QP_KERNELS = {}
+
+_QP_SOURCE = """
+    uint c = thread_position_in_grid.x;
+    if (c >= (uint)R_shape[0]) return;
+    const float tol = 1e-7f;
+    const float tiny = 1e-30f;
+    float Rm[D][D];
+    float bv[D];
+    for (int i = 0; i < D; ++i) {
+        bv[i] = b[c * D + i];
+        for (int j = 0; j < D; ++j) Rm[i][j] = R[(c * D + i) * D + j];
+    }
+    float best_x[D];
+    for (int j = 0; j < D; ++j) best_x[j] = 1.0f / (float)(D + 1);
+    float best_q = INFINITY;
+    for (int f = 0; f < NF; ++f) {
+        const int m = FACES[f];
+        const bool has0 = (m & 1) != 0;
+        int idx[D];
+        int k = 0;
+        for (int g = 1; g <= D; ++g) if (m & (1 << g)) idx[k++] = g - 1;
+        if (!has0 && k == 0) continue;
+        int ncol = has0 ? k : k - 1;
+        int last = has0 ? -1 : idx[k - 1];
+        float A[D][D];
+        float rhs[D];
+        for (int r = 0; r < D; ++r) {
+            float sub = has0 ? 0.0f : Rm[r][last];
+            rhs[r] = bv[r] - sub;
+            for (int i = 0; i < ncol; ++i) A[r][i] = Rm[r][idx[i]] - sub;
+        }
+        float z[D];
+        if (ncol > 0) {
+            /* two-pass modified Gram-Schmidt, as mgs_r */
+            float Q[D][D];
+            float Rf[D][D];
+            for (int i = 0; i < D; ++i) for (int j = 0; j < D; ++j) Rf[i][j] = 0.0f;
+            for (int j = 0; j < ncol; ++j) {
+                float v[D];
+                for (int r = 0; r < D; ++r) v[r] = A[r][j];
+                float rj[D];
+                for (int i = 0; i < D; ++i) rj[i] = 0.0f;
+                for (int pass = 0; pass < 2; ++pass) {
+                    for (int i = 0; i < j; ++i) {
+                        float cd = 0.0f;
+                        for (int r = 0; r < D; ++r) cd += Q[r][i] * v[r];
+                        for (int r = 0; r < D; ++r) v[r] = v[r] - cd * Q[r][i];
+                        rj[i] = rj[i] + cd;
+                    }
+                }
+                float nn = 0.0f;
+                for (int r = 0; r < D; ++r) nn += v[r] * v[r];
+                float nv = metal::sqrt(nn);
+                bool live = nv > tiny;
+                for (int r = 0; r < D; ++r) Q[r][j] = live ? v[r] / metal::max(nv, tiny) : 0.0f;
+                for (int i = 0; i < j; ++i) Rf[i][j] = rj[i];
+                Rf[j][j] = nv;
+            }
+            /* R^T y = A^T rhs, then R z = y (as _lstsq) */
+            float y[D];
+            for (int i = 0; i < ncol; ++i) {
+                float atb = 0.0f;
+                for (int r = 0; r < D; ++r) atb += A[r][i] * rhs[r];
+                float sacc = atb;
+                for (int kk = 0; kk < i; ++kk) sacc = sacc - Rf[kk][i] * y[kk];
+                y[i] = sacc / Rf[i][i];
+            }
+            for (int i = ncol - 1; i >= 0; --i) {
+                float sacc = y[i];
+                for (int kk = i + 1; kk < ncol; ++kk) sacc = sacc - Rf[i][kk] * z[kk];
+                z[i] = sacc / Rf[i][i];
+            }
+        }
+        float x[D];
+        for (int j = 0; j < D; ++j) x[j] = 0.0f;
+        if (has0) {
+            for (int i = 0; i < ncol; ++i) x[idx[i]] = z[i];
+        } else {
+            float tot = 0.0f;
+            for (int i = 0; i < ncol; ++i) { x[idx[i]] = z[i]; tot = tot + z[i]; }
+            x[last] = 1.0f - tot;
+        }
+        bool ok = true;
+        float sx = 0.0f;
+        for (int j = 0; j < D; ++j) {
+            ok = ok && metal::isfinite(x[j]) && (x[j] >= -tol);
+            sx += x[j];
+        }
+        ok = ok && (sx <= 1.0f + tol);
+        if (!ok) continue;
+        float q = 0.0f;
+        for (int r = 0; r < D; ++r) {
+            float rr = 0.0f;
+            for (int j = 0; j < D; ++j) rr += Rm[r][j] * x[j];
+            rr = rr - bv[r];
+            q += rr * rr;
+        }
+        if (q < best_q) {
+            best_q = q;
+            for (int j = 0; j < D; ++j) best_x[j] = x[j];
+        }
+    }
+    float tot = 0.0f;
+    for (int j = 0; j < D; ++j) { best_x[j] = metal::clamp(best_x[j], 0.0f, 1.0f); tot += best_x[j]; }
+    float den = metal::max(1.0f, tot);
+    for (int j = 0; j < D; ++j) out[c * D + j] = best_x[j] / den;
+"""
+
+
+def _qp_simplex_r_metal(R, b):
+    """:func:`qp_simplex_r` in one Metal thread per chain (float32): the
+    graph's faces in its order, its two-pass MGS and solves, the same
+    feasibility tolerance and strict-improvement tie rule."""
+    C, D, _ = R.shape
+    if D not in _QP_KERNELS:
+        masks = [sum(1 << g for g in S) for S in _face_sets(D + 1)]
+        header = (f"constant constexpr int D = {D};\n"
+                  f"constant constexpr int NF = {len(masks)};\n"
+                  f"constant int FACES[{len(masks)}] = "
+                  f"{{{', '.join(map(str, masks))}}};\n")
+        _QP_KERNELS[D] = mx.fast.metal_kernel(
+            name=f"turin_qp_simplex_r_{D}", input_names=["R", "b"],
+            output_names=["out"], source=_QP_SOURCE, header=header)
+    (out,) = _QP_KERNELS[D](
+        inputs=[R, b], grid=(max(C, 1), 1, 1),
+        threadgroup=(min(256, max(C, 1)), 1, 1),
+        output_shapes=[(C, D)], output_dtypes=[mx.float32])
+    return out
+
+
+def _qp_simplex_r_graph(R, b):
+    """:func:`qp_simplex_r` as an MLX graph (any dtype or stream)."""
     C, D, _ = R.shape
     G = D + 1
     dt = R.dtype
-    if G not in _FACE_SETS:
-        _FACE_SETS[G] = [S for r in range(1, G + 1)
-                         for S in itertools.combinations(range(G), r)]
     tol = 1e-7 if dt == mx.float32 else 1e-12
     best_x = mx.full((C, D), 1.0 / G, dtype=dt)
     best_q = mx.full((C,), float("inf"), dtype=dt)
     col = [R[:, :, j] for j in range(D)]
-    for S in _FACE_SETS[G]:
+    for S in _face_sets(G):
         free = [j - 1 for j in S if j >= 1]
         if 0 in S:
             z, _ = _lstsq([col[j] for j in free], b)

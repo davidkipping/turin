@@ -375,21 +375,40 @@ def test_floor_oblateness_keeps_chains_off_the_dead_zone(data):
 def test_chain_starts_are_spread_and_finite(data):
     """Laplace starts at an oblate fit's optimum: finite, spread, each
     principal sd capped at 0.5 x 0.5 in u, also where anvil gives no
-    covariance (a round planet's f ~ 0)."""
+    covariance (a round planet's f ~ 0, where (fc, fs) are not negative
+    definite). Whether a real search ends at such a point depends on
+    float32 rounding (0.1.96's Metal QP moved this case's optimum to one
+    that is), so that branch is forced explicitly below."""
+    import dataclasses
+
     lay, tr, _, _ = _targets(data, ld="collapsed")
     T = lay.transform()
     u_map = T.from_model_np(_vec()[:7])
     rng = np.random.default_rng(1)
     res = seeding.find_map(tr, u_map + 0.02 * rng.standard_normal((32, 7)))
-    u0, n_flat = seeding.chain_starts(res, 64, seed=1)
-    u0 = np.array(u0, dtype=np.float64)
-    # a round planet: the optimum is at f ~ 0, where (fc, fs) are not
-    # negative-definite, so anvil alone would refuse
-    assert res.cov_u is None and n_flat >= 1
-    lp = np.array(tr.log_prob(mx.array(u0, dtype=mx.float32)))
-    assert np.all(np.isfinite(lp))
-    spread = u0.std(0)
-    assert np.all(spread > 1e-4) and np.all(spread <= 0.5 * 0.5 * 1.3)
+    assert res.hessian_u is not None
+
+    def check(u0):
+        u0 = np.array(u0, dtype=np.float64)
+        lp = np.array(tr.log_prob(mx.array(u0, dtype=mx.float32)))
+        assert np.all(np.isfinite(lp))
+        spread = u0.std(0)
+        assert np.all(spread > 1e-4) and np.all(spread <= 0.5 * 0.5 * 1.3)
+        return spread
+
+    check(seeding.chain_starts(res, 64, seed=1)[0])        # as the search ended
+    # a round planet's optimum: (fc, fs) flat or curving the wrong way, so
+    # anvil gives no covariance and turin floors those directions
+    i = [lay.index("fc"), lay.index("fs")]
+    H = np.array(res.hessian_u, dtype=np.float64)
+    H[i, :] = 0.0
+    H[:, i] = 0.0
+    H[i, i] = 1e-3
+    flat = dataclasses.replace(res, cov_u=None, hessian_u=H)
+    u0, n_flat = seeding.chain_starts(flat, 64, seed=1)
+    assert n_flat >= 2
+    spread = check(u0)
+    assert np.all(spread[i] > 0.1)                     # floored, so spread
 
 
 # -- end to end ---------------------------------------------------------------------

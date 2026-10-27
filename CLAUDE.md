@@ -545,6 +545,15 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
 - **x\* is the exact QP optimum of the centroid model** (face enumeration,
   31 supports, each by QR on R: `simplexmass.qp_simplex_r`), then detached.
   A Euclidean projection was tried and is pinned against by a test.
+  **float32 on the GPU runs it as one Metal kernel, one thread per chain**
+  (`_qp_simplex_r_metal`, 0.1.96): the graph's faces in its order, its
+  two-pass MGS and solves, its tolerance and tie rule. The MLX graph
+  (`_qp_simplex_r_graph`) stays for float64 and the CPU stream, and is the
+  reference. Measured: x* within float32 rounding of the graph (79-95% of
+  rows bitwise on KOI-518.02, 4016.01, 448.02), error against float64 the
+  same (20,000 random problems: median 1.6e-8 vs 1.4e-8, 99% 2.0e-6 vs
+  2.4e-6), value+grad 0.85-0.92x. The graph was thousands of tiny
+  operations; the kernel removed nearly all of its ~3.5 ms.
 - **Normal tails** (`normtail.py`): NR erfcc in log form, Acklam inverse,
   and one lower-tail truncated normal after reflecting to a non-positive
   centre (a third of the work of three where-branches; GHK dominates cost).

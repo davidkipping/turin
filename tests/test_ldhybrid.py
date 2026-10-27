@@ -140,6 +140,31 @@ def test_simplex_qp_on_r_is_the_exact_constrained_optimum():
 
 # -- GHK ----------------------------------------------------------------------
 
+def test_the_metal_qp_matches_the_graph_and_is_as_accurate():
+    """float32 on the GPU runs the QP as one Metal kernel per chain: it
+    agrees with the MLX graph to float32 rounding and is no less accurate
+    against float64, on random problems whose column scales span e^+-3
+    (both dimensions turin uses: hybrid4's 4, the quadratic's 2)."""
+    for D in (4, 2):
+        rng = np.random.default_rng(D)
+        C = 4000
+        A = rng.standard_normal((C, D, D)) * np.exp(rng.uniform(-3, 3, (C, 1, D)))
+        R = np.linalg.qr(A)[1]
+        R = R * np.sign(np.diagonal(R, axis1=1, axis2=2))[:, :, None]
+        b = 3 * rng.standard_normal((C, D))
+        R32, b32 = mx.array(R, dtype=mx.float32), mx.array(b, dtype=mx.float32)
+        xk = np.array(SM.qp_simplex_r(R32, b32))           # the kernel
+        xg = np.array(SM._qp_simplex_r_graph(R32, b32))
+        with mx.stream(mx.cpu):
+            x64 = np.array(SM.qp_simplex_r(mx.array(R, dtype=mx.float64),
+                                           mx.array(b, dtype=mx.float64)))
+        ek, eg = np.abs(xk - x64).max(1), np.abs(xg - x64).max(1)
+        assert np.all(xk >= 0) and np.all(xk.sum(1) <= 1 + 1e-6)
+        assert np.median(np.abs(xk - xg).max(1)) < 1e-6
+        assert np.median(ek) <= 2 * np.median(eg) + 1e-9
+        assert np.quantile(ek, 0.99) <= 2 * np.quantile(eg, 0.99) + 1e-9
+
+
 def _gauss_case(rng, scale):
     A = rng.normal(size=(4, 4))
     H = scale * (A @ A.T + 0.05 * np.eye(4))
