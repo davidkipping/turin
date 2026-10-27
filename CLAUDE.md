@@ -553,7 +553,13 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   rows bitwise on KOI-518.02, 4016.01, 448.02), error against float64 the
   same (20,000 random problems: median 1.6e-8 vs 1.4e-8, 99% 2.0e-6 vs
   2.4e-6), value+grad 0.85-0.92x. The graph was thousands of tiny
-  operations; the kernel removed nearly all of its ~3.5 ms.
+  operations; the kernel removed nearly all of its ~3.5 ms. **`--mle
+  --law=hybrid4`** (its profile runs the QP 4 times per evaluation;
+  measured 0.1.99, the suite plus KOI-518.02, second in-process run): the
+  round fit 2.1-3.1x faster (3.6-6.0 s -> 1.2-2.5 s), the oblate fit
+  0.65-0.93x (the oblate kernel dominates); ln L equal to 4 decimals, or
+  higher by 3e-4 and 6e-4 on two oblate fits (KOI-4016.01, 1430.03, on the
+  flat f-edge ridge).
 - **Normal tails** (`normtail.py`): NR erfcc in log form, Acklam inverse,
   and one lower-tail truncated normal after reflecting to a non-positive
   centre (a third of the work of three where-branches; GHK dominates cost).
