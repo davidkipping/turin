@@ -302,11 +302,13 @@ constrained optimum. Two things differ from the quadratic law's version:
 
 - **The integral is GHK** (Geweke-Hajivassiliou-Keane: sequential truncated
   normals on a fixed 1,024-point scrambled-Sobol rule, so the value is
-  deterministic and differentiable). Against a 2^18-point reference at
-  posterior draws its error is at most 0.015 nats on KOI-518.02, and 0.03 at
-  the 95th percentile on KOI-448.02's two-solution posterior. The rule's
-  layout is frozen at the fit's MAP, and the layout and points are stored
-  with the fit, so a resume or `--replot` rebuilds the identical target.
+  deterministic and differentiable). Against a 2^18-point reference at 40
+  posterior draws per target (re-measured in 0.1.93 on the suite plus
+  KOI-518.02 and KOI-448.02) its error is a median 0.004-0.014 nats, at
+  most 0.03-0.12, and 0.84 at one KOI-448.02 draw. The rule's layout is
+  frozen at the fit's MAP, and the layout and points are stored with the
+  fit, so a resume or `--replot` rebuilds the identical target. On the GPU
+  the integral and its gradient run as Metal kernels (since 0.1.98).
 - **The algebra runs on the triangular factor of the curvature**, never the
   curvature itself, which reaches a condition number of 7e9 on KOI-448.02
   (beyond float32); its factor's is at most 8.5e4. A small fixed ridge keeps
@@ -346,12 +348,18 @@ On KOI-2650.01, collapsed mode reproducibly carries 0.2-0.4% of its draws
 in a far grazing tail (k > 0.06) that sampled mode's chains barely visit. Collapsed mode's density there matches the true marginal, so the
 likely reading is that sampled mode under-explores it.
 
-**It is slower: 5.7-8.2x the wall time of sampled hybrid4 (median 6.7x),
-0.09-0.27x the effective samples per second (median 0.17x).** The GHK
-integral is a fixed per-chain cost, so the gap is widest on small datasets.
-It has widened since 0.1.64 (median 4.4x) because sampled mode got about
-twice as fast, not because collapsed mode slowed. Sampled hybrid4
-stays the default. Collapsed mode is for taking the limb darkening out of
+**It is slower than sampled hybrid4.** Measured in 0.1.76: 5.7-8.2x the
+wall time (median 6.7x), 0.09-0.27x the effective samples per second
+(median 0.17x). Since then 0.1.94-0.1.98 made collapsed mode faster without
+changing its posterior: the integral's x* step, its gradient and the
+integral itself on the GPU, and interim exports that no longer redraw the
+limb darkening for every row. Against itself that raised its effective
+samples per second 1.6-2.7x (ChEES on KOI-4016.01, 1361.01, 518.02, two
+seeds each). The end-to-end comparison with sampled hybrid4 has not been
+re-run; scaling the old ratios by those gains puts it near 0.15-0.7x (median about 0.35x) the effective samples
+per second. The remaining cost is mostly the five generator curves and
+two profile passes over the light curve, so the gap is widest on small
+datasets. Sampled hybrid4 stays the default. Collapsed mode is for taking the limb darkening out of
 the sampled vector, or for a target whose sampled fit mixes poorly in `k`.
 Products, restrictions and the resume guard are as for the quadratic law,
 with `q1..q4` and derived `w1..w4`.

@@ -165,6 +165,8 @@ turin/
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
   ldhybrid.py     --law=hybrid4 --ld=collapsed: the same over a 4-simplex (MarginalHybridLogProb, HybridOmegaSampler)
   simplexmass.py  GHK over a simplex, two-pass MGS/TSQR, triangular solves, exact simplex QP on R
+                  (float32 GPU: the QP as a Metal kernel, GHK's gradient by hand)
+  ghkmetal.py     GHK's per-point log-weights and their VJP as two Metal kernels (float32 GPU)
   normtail.py     tail-stable log Phi, its inverse, truncated-normal draws (MLX has no erfc)
   outputs.py      CSV/PDF products, resume state
   capabilities.py minimum-anvil gate, installed versions, MLX cache release
@@ -742,7 +744,13 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   Collapsed mode did not slow down (8-27% faster); sampled mode got 1.1-2.1x
   faster (elome 0.18.2's contact rule, the anvil MAP search) while the
   per-chain GHK cost, plus ~200 s of post-hoc draws per export, stayed. It
-  stays opt-in.
+  stays opt-in. **Superseded in part (0.1.94-0.1.98):** interim exports cap
+  their draws, and the QP kernel, hand VJP and Metal GHK raised collapsed
+  hybrid4's ESS/s 1.6-2.7x against its 0.1.95 self with the same posterior
+  (see "Where an evaluation's time goes" and the bullets after it). The
+  end-to-end ratio to sampled hybrid4 has not been re-measured; the numbers
+  scale the old 0.09-0.27x to roughly 0.15-0.7x (median about 0.35x), an
+  estimate, not a measurement.
 - How the accuracy was mis-measured once, recorded so it is not repeated:
   uniform-simplex QMC is not a reference for a peaked integrand (it was off
   by up to thousands of nats at high SNR and was misread as a bug in x*);

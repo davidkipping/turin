@@ -1,5 +1,12 @@
 # Collapsed hybrid4: real-target acceptance
 
+> **Cost since (turin 0.1.94-0.1.98, 2026-10-26/27):** collapsed hybrid4
+> got 1.6-2.7x faster in effective samples per second against its own
+> 0.1.95 runs, posteriors unchanged (QP kernel, hand-written GHK gradient,
+> GHK as Metal kernels; interim exports cap their limb-darkening draws).
+> The cost comparison below predates that and was not re-run; see the
+> README and CLAUDE.md.
+
 > **Re-measured on the curvature basis** (turin 0.1.74, elome 0.18.4,
 > 2026-10-19), the weights on LDhybrid's curvature basis that turin uses
 > since 0.1.67. It passes on the same terms as before; collapsed mode now
