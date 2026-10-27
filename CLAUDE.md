@@ -627,8 +627,21 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   the backward pass is ~60%. The curves are not the cost, as the
   quadratic's 1.26x wall time suggests; the per-chain 4x4 algebra (Python
   loops over faces and columns, thousands of tiny MLX ops) is as large as
-  GHK itself. Taking GHK's gradient through 256 of the 1,024 points, value
-  exact, measured 7.0-8.0x (not built).
+  GHK itself.
+- **Tried and not adopted (0.1.95): GHK's gradient through 256 of the
+  1,024 points, value still the full rule's.** Built as
+  `out = sg(V_1024) + (V_256 - sg(V_256))`: value bitwise V_1024, gradient
+  exactly the 256-point rule's (cutting 768 points out of one logsumexp by
+  `stop_gradient` would not do: that gradient is scaled by the 256 points'
+  share of the mass, ~1/4). Exact HMC (the Metropolis step uses the value),
+  0.70-0.80x the evaluation cost. A/B (scratchpad `ghk/gradsplit_ab.py`:
+  ChEES, 512 chains, 400 + 200, two seeds, KOI-4016.01, 518.02, 1361.01):
+  posteriors agree as two seeds of one mode do (<= 0.011 sd, <= 2.3 MCSE,
+  widths 0.993-1.014), but ESS/s is 1.35/1.68x, 1.19/1.47x and **0.51/1.07x
+  on KOI-1361.01**, whose ESS fell 2.5x on every parameter at seed 0 (R-hat
+  1.020): a coarser force can tune ChEES onto worse trajectories, and that
+  can cost more than it saves. Making the exact function cheaper (a fused
+  QP or GHK kernel) carries no such risk.
 - **Real-target acceptance** (`docs/bench/collapsed_hybrid_acceptance.md`):
   the user's five-target suite (KOI-4016.01, 4087.01, 1430.03, 1361.01,
   2650.01) against sampled hybrid4. The first pass (0.1.63) found the three
