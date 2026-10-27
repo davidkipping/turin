@@ -172,6 +172,79 @@ def _gauss_case(rng, scale):
     return xh, H
 
 
+def _ghk_tail_case(C=48, D=4, seed=0):
+    """(my, Ly) spanning the hard cases: centres well outside the simplex
+    (intervals hundreds of sd into a tail, reflected and not) and narrow
+    intervals deep in a tail, where the gradient is a small difference of
+    large terms."""
+    rng = np.random.default_rng(seed)
+    my = rng.uniform(-0.3, 0.6, (C, D))
+    my[: C // 3] *= rng.uniform(10, 60, (C // 3, 1))         # far outside
+    Ly = np.zeros((C, D, D))
+    for c in range(C):
+        A = rng.standard_normal((D, D)) * np.exp(rng.uniform(-5, 1, D))
+        Ly[c] = np.linalg.cholesky(A @ A.T + 1e-7 * np.eye(D))
+    # collapsed intervals: the first weight pressed against 1 leaves the
+    # next an interval narrower than the eps floor (float64's too)
+    for c in range(4):
+        my[c] = [1.5, 0.1, 0.1, 0.1]
+        Ly[c] = np.diag([1e-3, 1e4, 1.0, 1.0])
+    return my, Ly
+
+
+def test_ghk_hand_vjp_is_autodiffs_gradient_and_the_same_value():
+    """``ghk_lw_vjp`` (float32 on the GPU's ``ghk_log_mass``): the value is
+    ``ghk_terms``'s bitwise in both precisions. In float64 the hand gradient
+    equals autodiff's to 1e-6 under a cotangent weighting every point alike
+    (the formulas are exact everywhere, degenerate points included). In
+    float32 it is judged on what the density uses, the logsumexp over
+    points, and must be no less accurate than float32 autodiff per chain --
+    on centres far outside the simplex and narrow intervals deep in a tail
+    (where taking ratios as exp(log phi - log P) once cost 0.4%). Points
+    with zero-width intervals hundreds of sd out (weight ~e^-1e5 in the
+    logsumexp) round differently from autodiff there, harmlessly."""
+    my, Ly = _ghk_tail_case()
+    U = SM.sobol_points(512, 4, 7)
+    dep, order = 1, (3, 0, 4, 2)
+    W = np.random.default_rng(1).standard_normal((my.shape[0], 512))
+
+    def obj_all(lw):                 # every point weighted alike
+        return (mx.sum(lw * mx.array(W, dtype=lw.dtype) * 1e-3)
+                + mx.sum(mx.logsumexp(lw, axis=-1)))
+
+    def obj_used(lw):                # what ghk_log_mass differentiates
+        return mx.sum(mx.logsumexp(lw, axis=-1))
+
+    hand = lambda m, L, Ux: SM.ghk_lw_vjp(m, L, Ux, dep, order, LH.INV_FSTAR)
+    auto = lambda m, L, Ux: SM.ghk_terms(m, L, Ux, dep, order, LH.INV_FSTAR)[0]
+
+    def run(fn, dt, stream, obj):
+        with mx.stream(stream):
+            m, L, Ux = (mx.array(a, dtype=dt) for a in (my, Ly, U))
+            val = np.array(fn(m, L, Ux), dtype=np.float64)
+            g = mx.grad(lambda a, b: obj(fn(a, b, Ux)), argnums=(0, 1))(m, L)
+            return val, [np.array(x, dtype=np.float64) for x in g]
+
+    def err(g, ref):     # per chain, relative to that chain's largest entry
+        e0 = np.abs(g[0] - ref[0]).max(1) / np.abs(ref[0]).max(1)
+        e1 = (np.abs(g[1] - ref[1]).max((1, 2))
+              / np.abs(ref[1]).max((1, 2)))
+        return np.maximum(e0, e1)
+
+    v64h, g64h = run(hand, mx.float64, mx.cpu, obj_all)
+    v64a, g64a = run(auto, mx.float64, mx.cpu, obj_all)
+    assert np.array_equal(v64h, v64a)
+    assert err(g64h, g64a).max() < 1e-6
+
+    v32h, g32h = run(hand, mx.float32, mx.gpu, obj_used)
+    v32a, g32a = run(auto, mx.float32, mx.gpu, obj_used)
+    _, ref = run(auto, mx.float64, mx.cpu, obj_used)
+    assert np.array_equal(v32h, v32a)
+    assert np.all(np.isfinite(g32h[0])) and np.all(np.isfinite(g32h[1]))
+    eh, ea = err(g32h, ref), err(g32a, ref)
+    assert np.all(eh <= 3 * ea + 1e-6), (eh, ea)
+
+
 def test_ghk_matches_direct_monte_carlo():
     """``log int_simplex exp(-1/2 (x-xh)^T H (x-xh)) p(x) dx`` by GHK vs by
     direct sampling of the Gaussian (cases where enough of it is inside)."""

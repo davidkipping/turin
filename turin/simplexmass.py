@@ -34,7 +34,7 @@ import math
 import mlx.core as mx
 import numpy as np
 
-from .normtail import trunc_normal
+from .normtail import _NR, log_ndtr, trunc_normal
 
 _TWO_LOG_2PI = 2.0 * math.log(2.0 * math.pi)
 
@@ -385,6 +385,14 @@ def ghk_terms(my, Ly, U, dep, order, inv_fstar, *, eps_gap=None):
     not chained elementwise adds, which MLX fuses into one Metal kernel and
     can refuse to compile ("too many inputs fused").
     """
+    f = _ghk_forward(my, Ly, U, dep, order, inv_fstar, eps_gap=eps_gap)
+    return f["lw"], f["Y"]
+
+
+def _ghk_forward(my, Ly, U, dep, order, inv_fstar, *, eps_gap=None):
+    """:func:`ghk_terms` with the intermediates its hand VJP needs (each
+    ``(C, N)`` per step k): the bounds ``lo``, ``hi_raw``, ``hi`` and the
+    draw ``z``; and ``s``, the prior's sum."""
     C, D = my.shape
     dt = my.dtype
     eps_gap = eps_gap if eps_gap is not None else (
@@ -392,6 +400,7 @@ def ghk_terms(my, Ly, U, dep, order, inv_fstar, *, eps_gap=None):
     shared = U.ndim == 2
     N = U.shape[-2]
     zs, ys, lms = [], [], []
+    los, his_raw, his = [], [], []
     for k in range(D):
         if k:
             Z = mx.stack(zs, axis=-1)                              # (C, N, k)
@@ -402,13 +411,18 @@ def ghk_terms(my, Ly, U, dep, order, inv_fstar, *, eps_gap=None):
             ub = mx.ones((C, N), dtype=dt)
         lkk = Ly[:, k, k][:, None]
         lo = (0.0 - cond) / lkk
-        hi = mx.maximum((ub - cond) / lkk, lo + eps_gap)
+        hi_raw = (ub - cond) / lkk
+        hi = mx.maximum(hi_raw, lo + eps_gap)
         uk = (mx.broadcast_to(U[None, :, k], (C, N)) if shared
               else U[:, :, k])
-        zk, lm = trunc_normal(lo, hi, uk.astype(dt))
+        uk = uk.astype(dt)
+        zk, lm = trunc_normal(lo, hi, uk)
         zs.append(zk)
         ys.append(cond + lkk * zk)
         lms.append(lm)
+        los.append(lo)
+        his_raw.append(hi_raw)
+        his.append(hi)
     Y = mx.stack(ys, axis=-1)
     G = D + 1
     inv_dep = float(inv_fstar[dep])
@@ -417,14 +431,179 @@ def ghk_terms(my, Ly, U, dep, order, inv_fstar, *, eps_gap=None):
     tiny = 1e-300 if dt == mx.float64 else 1e-30
     lprior = -G * mx.log(mx.maximum(s, tiny))
     lw = mx.sum(mx.stack(lms, axis=-1), axis=-1) + lprior
-    return lw, Y
+    return dict(lw=lw, Y=Y, z=zs, lo=los, hi_raw=his_raw, hi=his, s=s)
+
+
+_GHK_LW = {}
+
+
+def ghk_lw_vjp(my, Ly, U, dep, order, inv_fstar):
+    """``lw`` of :func:`ghk_terms` (shared rule ``U (N, D)``) with a
+    hand-written VJP in place of autodiff's.
+
+    The value is :func:`ghk_terms`'s, bitwise (the same forward). The
+    reverse pass uses the exact derivatives of the truncated normal rather
+    than differentiating the tail-stable approximations that compute it:
+    ``d log P/da = -phi(a)/P``, ``d log P/db = phi(b)/P``, and for the draw
+    ``Phi(z) = Phi(a) + v P`` (or ``Phi(b) - v P`` where the interval was
+    reflected), ``dz/da = phi(a) (1-v)/phi(z)``, ``dz/db = phi(b) v/phi(z)``
+    (v and 1 - v swapped when reflected), all as ratios of log-densities
+    (no underflow in the tails). Ties follow MLX: the ``eps_gap`` floor on
+    ``hi`` takes the gradient on a tie, as does a bound ``z`` was clipped
+    to. Autodiff's backward cost ~5x its forward (10.6 ms of a 34 ms
+    evaluation at 512 chains, 0.1.97); this is a few elementwise passes."""
+    D = my.shape[-1]
+    key = (D, int(dep), tuple(int(o) for o in order),
+           tuple(float(f) for f in inv_fstar))
+    if key not in _GHK_LW:
+        _GHK_LW[key] = _make_ghk_lw(dep, order, inv_fstar)
+    return _GHK_LW[key](my, Ly, U)[0]
+
+
+_SQRT2 = math.sqrt(2.0)
+
+
+def _dlog_ndtr(x):
+    """The exact derivative of :func:`normtail.log_ndtr` -- of its
+    approximation, as autodiff would take it, so it stays consistent with
+    the ``log Phi`` values the forward used (their differences, deep in a
+    tail, are where the gradient's cancellations happen). For ``x < 0``,
+    ``log Phi = log t - z^2 + P(t) - log 2`` with ``z = -x/sqrt2``,
+    ``t = 1/(1 + z/2)``; for ``x >= 0`` the upper form
+    ``log1p(-exp(log Phi(-x)))``."""
+    z = mx.abs(x) / _SQRT2
+    t = 1.0 / (1.0 + 0.5 * z)
+    acc = _NR[9]
+    dacc = 0.0
+    for c in _NR[8::-1]:
+        dacc = dacc * t + acc
+        acc = acc * t + c
+    # d/dz [log t - z^2 + P(t)] = -t/2 - 2z - (t^2/2) P'(t)
+    g = (0.5 * t + 2.0 * z + 0.5 * t * t * dacc) / _SQRT2   # d log Phi(-|x|) / d(-|x|)
+    neg = x < 0
+    le = mx.log(t) - z * z + acc - math.log(2.0)              # log Phi(-|x|)
+    e = mx.exp(mx.where(neg, -1.0, le))
+    upper = g * e / (-mx.expm1(mx.where(neg, -1.0, le)))
+    return mx.where(neg, g, upper)
+
+
+def _tn_partials(a, b, z, v):
+    """Partials of :func:`normtail.trunc_normal` on ``[a, b]`` (its
+    reflected frame, centre <= 0) at the draw ``z`` from uniform ``v``:
+    ``(dlogP/da, dlogP/db, dz/da, dz/db)``. The chain autodiff takes
+    through ``lm = lb + log(-expm1(min(la - lb, -1e-30)))`` and ``z =
+    Phi^-1(exp(min(logaddexp(la, log v + lm), 0)))``, in closed form: the
+    same ``la``, ``lb`` and clamps (MLX's ``minimum`` sends a tie's gradient
+    to its constant), the derivative of the ``log Phi`` approximation
+    itself, and ``dz/dlp = 1/(d log Phi/dz)`` at the draw -- without
+    differentiating the inverse's three branches."""
+    la, lb = log_ndtr(a), log_ndtr(b)
+    d = la - lb
+    clamped = d >= -1e-30
+    q = -mx.expm1(mx.minimum(d, -1e-30))
+    lm = lb + mx.log(q)
+    ed_q = mx.exp(mx.minimum(d, -1e-30)) / q
+    dlm_dla = mx.where(clamped, 0.0, -ed_q)
+    dlm_dlb = mx.where(clamped, 1.0, 1.0 + ed_q)
+    dla, dlb = _dlog_ndtr(a), _dlog_ndtr(b)
+    dlm_da = dlm_dla * dla
+    dlm_db = dlm_dlb * dlb
+    t2 = mx.log(v) + lm
+    capped = mx.logaddexp(la, t2) >= 0.0
+    sa = mx.sigmoid(la - t2)                     # d lp / d la; 1 - sa: d lp / d lm
+    dz_dlp = mx.where(capped, 0.0, 1.0 / _dlog_ndtr(z))
+    dz_da = dz_dlp * (sa * dla + (1.0 - sa) * dlm_da)
+    dz_db = dz_dlp * ((1.0 - sa) * dlm_db)
+    return dlm_da, dlm_db, dz_da, dz_db
+
+
+def _make_ghk_lw(dep, order, inv_fstar):
+    G = len(inv_fstar)
+
+    @mx.custom_function
+    def lw_fn(my, Ly, U):
+        f = _ghk_forward(my, Ly, U, dep, order, inv_fstar)
+        st = lambda key: mx.stack(f[key], axis=-1)
+        return f["lw"], st("z"), st("lo"), st("hi_raw"), st("hi"), f["s"]
+
+    @lw_fn.vjp
+    def lw_vjp(primals, cotangents, outputs):
+        my, Ly, U = primals
+        gbar = cotangents[0]                                   # (C, N)
+        _, Z, LO, HIR, HI, s = outputs
+        C, D = my.shape
+        dt = my.dtype
+        N = U.shape[0]
+        eps_gap = 1e-9 if dt == mx.float64 else 1e-6
+        tiny = 1e-300 if dt == mx.float64 else 1e-30
+        inv_dep = float(inv_fstar[dep])
+        coef = [float(inv_fstar[g]) - inv_dep for g in order]
+        # the prior -G log max(s, tiny): d/dy_k = -G coef_k / s
+        dprior = mx.where(s > tiny, -G * gbar / s, 0.0)
+        ybar = [dprior * c for c in coef]
+        zbar = [mx.zeros((C, N), dtype=dt) for _ in range(D)]
+        my_bar = [None] * D
+        L_bar = [[None] * D for _ in range(D)]
+        for k in range(D - 1, -1, -1):
+            lkk = Ly[:, k, k][:, None]
+            z = Z[..., k]
+            lo, hi_raw, hi = LO[..., k], HIR[..., k], HI[..., k]
+            v = mx.broadcast_to(U[None, :, k], (C, N)).astype(dt)
+            flip = (lo + hi) > 0
+            # y_k = cond_k + l_k z_k
+            cond_bar = ybar[k]
+            l_bar = ybar[k] * z
+            zb = zbar[k] + ybar[k] * lkk
+            # in trunc_normal's reflected frame [a2, b2] (centre <= 0)
+            a2 = mx.where(flip, -hi, lo)
+            b2 = mx.where(flip, -lo, hi)
+            z2 = mx.where(flip, -z, z)
+            da2, db2, dz_da2, dz_db2 = _tn_partials(a2, b2, z2, v)
+            # back to (lo, hi): a2 = -hi, b2 = -lo, z = -z2 when reflected
+            dlm_dlo = mx.where(flip, -db2, da2)
+            dlm_dhi = mx.where(flip, -da2, db2)
+            dz_dlo = mx.where(flip, dz_db2, dz_da2)
+            dz_dhi = mx.where(flip, dz_da2, dz_db2)
+            # z = clip(z_raw, lo, hi): a touched bound takes the gradient
+            at_lo, at_hi = z <= lo, z >= hi
+            inner = ~(at_lo | at_hi)
+            dz_dlo = mx.where(inner, dz_dlo, at_lo.astype(dt))
+            dz_dhi = mx.where(inner, dz_dhi, at_hi.astype(dt))
+            lo_bar = gbar * dlm_dlo + zb * dz_dlo
+            hi_bar = gbar * dlm_dhi + zb * dz_dhi
+            # hi = maximum(hi_raw, lo + eps): a tie goes to lo + eps (MLX)
+            raw = hi_raw > lo + eps_gap
+            hir_bar = mx.where(raw, hi_bar, 0.0)
+            lo_bar = lo_bar + mx.where(raw, 0.0, hi_bar)
+            # lo = -cond/l, hi_raw = (ub - cond)/l
+            cond_bar = cond_bar - (lo_bar + hir_bar) / lkk
+            l_bar = l_bar - (lo_bar * lo + hir_bar * hi_raw) / lkk
+            ub_bar = hir_bar / lkk
+            # cond_k = my_k + sum_j<k L[k, j] z_j ; ub_k = 1 - sum_j<k y_j
+            my_bar[k] = mx.sum(cond_bar, axis=-1)
+            for j in range(k):
+                L_bar[k][j] = mx.sum(cond_bar * Z[..., j], axis=-1)
+                zbar[j] = zbar[j] + cond_bar * Ly[:, k, j][:, None]
+                ybar[j] = ybar[j] - ub_bar
+            L_bar[k][k] = mx.sum(l_bar, axis=-1)
+        zero = mx.zeros((C,), dtype=dt)
+        dmy = mx.stack(my_bar, axis=-1)
+        dLy = mx.stack([mx.stack([L_bar[i][j] if L_bar[i][j] is not None
+                                  else zero for j in range(D)], axis=-1)
+                        for i in range(D)], axis=-2)
+        return dmy, dLy, mx.zeros_like(U)
+
+    return lw_fn
 
 
 def ghk_log_mass(my, Ly, U, dep, order, inv_fstar):
     """``log int_simplex exp(-1/2 (y - my)^T Cy^-1 (y - my)) p(y) dy``,
     ``Cy = Ly Ly^T``: the Gaussian's normaliser times GHK's estimate of the
     prior-weighted probability, ``(C,)``."""
-    lw, _ = ghk_terms(my, Ly, U, dep, order, inv_fstar)
+    if (my.dtype == mx.float32 and U.ndim == 2 and _gpu_stream_active()):
+        lw = ghk_lw_vjp(my, Ly, U, dep, order, inv_fstar)
+    else:
+        lw, _ = ghk_terms(my, Ly, U, dep, order, inv_fstar)
     N = U.shape[-2]
     logdet = mx.sum(mx.log(mx.abs(mx.stack(
         [Ly[:, k, k] for k in range(Ly.shape[-1])], axis=-1))), axis=-1)

@@ -651,6 +651,34 @@ numbers: `docs/bench/collapsed_hybrid_probe.md`):
   1.020): a coarser force can tune ChEES onto worse trajectories, and that
   can cost more than it saves. Making the exact function cheaper (a fused
   QP or GHK kernel) carries no such risk.
+- **Forward and backward by stage** (0.1.97, scratchpad
+  `ghk/backward_split.py`, 512 chains, with the 0.1.96 QP kernel; ms on
+  KOI-518.02 / 1361.01 / 4016.01): curves + profile + QP forward 9.0 / 7.3
+  / 2.5; the Gaussian's 4x4 algebra 0.2-0.5 (vectorising it is not worth
+  it); GHK forward 2.0-2.2; the backward into the data through L, g, R
+  11.7 / 8.9 / 3.1 (scales with the light curve); **GHK's backward 10.5-10.7
+  on all three, ~5x its forward** -- per chain x point, so constant.
+- **GHK's gradient is hand-written** (`simplexmass.ghk_lw_vjp`, an
+  `mx.custom_function`, used by `ghk_log_mass` for float32 on the GPU with
+  a shared rule; 0.1.97). The forward is `ghk_terms`'s (`_ghk_forward`),
+  so the value is bitwise; the reverse pass is autodiff's own chain in
+  closed form (`_tn_partials`): the derivative of `normtail.log_ndtr`'s
+  approximation itself (`_dlog_ndtr`), the forward's `la`, `lb` and clamps,
+  `dz/dlp = 1/(d log Phi/dz)` at the draw, MLX's tie rules (`maximum`,
+  `minimum`, `clip`), without differentiating the inverse's three branches.
+  Two forms that failed first, recorded: ratios as `exp(log phi - log P)`
+  lost 0.4% where intervals sit ~300 sd into a tail (both logs ~ -5.5e4 in
+  float32); exact-normal identities (inverse Mills ratios) mixed with the
+  approximation's values were 5-20x worse than autodiff at a few thetas,
+  because the gradient there is a small difference of large terms whose
+  errors only cancel when every piece comes from one approximation.
+  Measured: value bitwise 0.1.96 on KOI-518.02, 4016.01, 1361.01, 448.02;
+  float32 gradient against float64 autodiff no worse than float32
+  autodiff's (worst per-column error 2.5e-4 vs 3.3e-4, 3.4e-4 vs 3.4e-4,
+  3.0e-4 vs 5.5e-4, 1.8e-3 vs 2.0e-3); float64 hand = autodiff to 2e-8;
+  value+grad 0.82-0.91x. It is memory-bound (dozens of passes over C x N
+  arrays per step), which a Metal kernel holding each point's reverse pass
+  in registers would remove; the formulas are the ones to port.
 - **Real-target acceptance** (`docs/bench/collapsed_hybrid_acceptance.md`):
   the user's five-target suite (KOI-4016.01, 4087.01, 1430.03, 1361.01,
   2650.01) against sampled hybrid4. The first pass (0.1.63) found the three
