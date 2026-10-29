@@ -28,7 +28,8 @@ from .profile import PROFILE_MODES
 #: ``--PL`` accepts any solve mode, or "auto" to measure and choose.
 PL_CHOICES = ("auto",) + tuple(PROFILE_MODES)
 
-TARGET_RE = re.compile(r"^--(KOI-\d+\.\d+|TOI-\d+\.\d+)$", re.IGNORECASE)
+TARGET_RE = re.compile(r"^--(KOI-\d+\.\d+|TOI-\d+\.\d+|GAIA(?:DR\d+)?-\d+)$",
+                       re.IGNORECASE)
 MODES = ("lineph", "ttv")
 SAMPLERS = ("chees", "ensemble")
 GIBBSGRID = ("on", "off")
@@ -73,12 +74,21 @@ _VALUE_FLAGS = {
     "--ld": "ld",
     "--law": "law",
     "--rhostar": "rhostar",
+    "--period": "period",
+    "--t0": "t0",
+    "--T14": "T14_hours",
+    "--depth": "depth_ppm",
+    "--lcfile": "lcfile",
 }
+#: The flags that carry a Gaia candidate's ephemeris (no archive has one).
+GAIA_EPHEMERIS = (("--period", "period"), ("--t0", "t0"),
+                  ("--T14", "T14_hours"), ("--depth", "depth_ppm"))
 
-USAGE = f"""turin {__version__} — GPU transit fitting for Kepler and TESS
+USAGE = f"""turin {__version__} — GPU transit fitting for Kepler, TESS and Gaia
 
 usage: turin --KOI-448.02 [options]
        turin --TOI-406.01 [options]
+       turin --GaiaDR3-<source_id> --period=P --t0=T0 --T14=H --depth=D [options]
 
   --fresh                 ignore existing resume state for this lineage
   --extend1 / --extend2   extend the LinEph / TTV fit by one round
@@ -180,6 +190,18 @@ usage: turin --KOI-448.02 [options]
                           below it the run stops after LinEph. 0 always fits
   --geometry=circular|chord   true circular orbit (default) or hurin's chord
 
+  --period=DAYS --t0=T0 --T14=HOURS --depth=PPM
+                          Gaia targets only, all four required: the
+                          candidate's ephemeris from the search that found
+                          it (no archive has one). t0 is in Gaia time,
+                          BJD(TCB) - 2455197.5. The fit samples a small box
+                          about the period given and stays on that period's
+                          peak; to fit another alias, run again with it
+  --lcfile=PATH           Gaia targets only: read the photometry from a CSV
+                          (columns time [Gaia time], flux, flux_err, and
+                          optionally band = G|BP|RP) instead of the archive;
+                          the route for DR4 until turin has its reader
+
   --sc                    prefer short cadence
   --cache-dir=PATH --outdir=PATH
   --clear-cache           delete cached light curves and exit
@@ -238,6 +260,15 @@ class Args:
     modes: tuple = MODES
     cache_dir: str | None = None
     outdir: str | None = None
+    #: a Gaia candidate's ephemeris (--period days, --t0 Gaia time, --T14
+    #: hours, --depth ppm), and --lcfile; None unless given
+    period: float | None = None
+    t0: float | None = None
+    T14_hours: float | None = None
+    depth_ppm: float | None = None
+    lcfile: str | None = None
+    #: whether --modes was given (a Gaia target's default is LinEph alone)
+    modes_given: bool = False
 
     @property
     def ttv_max_days(self):
@@ -266,15 +297,17 @@ def parse_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     args = Args()
     vocabulary = (list(_BOOL_FLAGS) + [f"{k}=" for k in _VALUE_FLAGS]
-                  + ["--KOI-<n>.<nn>", "--TOI-<n>.<nn>"])
+                  + ["--KOI-<n>.<nn>", "--TOI-<n>.<nn>",
+                     "--GaiaDR3-<source_id>"])
 
     for token in argv:
         m = TARGET_RE.match(token)
         if m:
+            name = _target_name(m.group(1))
             if args.target:
                 _fail(f"more than one target given ({args.target} and "
-                      f"{m.group(1).upper()})")
-            args.target = m.group(1).upper()
+                      f"{name})")
+            args.target = name
             continue
         if token in _BOOL_FLAGS:
             setattr(args, _BOOL_FLAGS[token], True)
@@ -283,11 +316,14 @@ def parse_args(argv=None):
             key, _, value = token.partition("=")
             if key in _VALUE_FLAGS:
                 _assign(args, _VALUE_FLAGS[key], key, value)
+                args.modes_given |= key == "--modes"
                 continue
         _fail(f"unrecognized argument {token!r}", token, vocabulary)
 
     if args.nongrazing:
         args.b_prior = "nongrazing"
+    if is_gaia_target(args.target) and not args.modes_given:
+        args.modes = ("lineph",)
     if args.mle and args.ld is not None:
         _fail(f"--mle profiles the limb darkening over its simplex; "
               f"--ld={args.ld} does not apply to it")
@@ -303,13 +339,85 @@ def parse_args(argv=None):
     _choice("law", args.law, LAW_CHOICES)
     for mode in args.modes:
         _choice("modes", mode, MODES)
-    problem = (mle_problem(args) or oblate_problem(args) or law_problem(args)
-               or collapsed_ld_problem(args))
+    problem = (gaia_problem(args) or mle_problem(args) or oblate_problem(args)
+               or law_problem(args) or collapsed_ld_problem(args))
     if problem:
         _fail(problem)
     if args.tag is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
         _fail(f"--tag={args.tag!r} must match [A-Za-z0-9_-]+")
     return args
+
+
+def _target_name(token):
+    """The canonical spelling of a target token: ``KOI-448.02``,
+    ``TOI-406.01``, ``GaiaDR3-<source_id>``."""
+    if token.upper().startswith("GAIA"):
+        m = re.fullmatch(r"GAIA(DR\d+)?-(\d+)", token.upper())
+        if not m.group(1):
+            _fail(f"--{token} needs its Gaia release: --GaiaDR3-{m.group(2)}")
+        return f"Gaia{m.group(1)}-{m.group(2)}"
+    return token.upper()
+
+
+def is_gaia_target(target):
+    """Whether ``target`` (canonical spelling) is a Gaia source."""
+    return bool(target) and str(target).startswith("Gaia")
+
+
+def gaia_problem(args):
+    """Why this combination cannot run, given the target's survey, or None.
+
+    A Gaia target needs its ephemeris on the command line, and fits LinEph
+    only: with ~1 point per transit there is no per-transit time to measure.
+    The ephemeris and --lcfile flags belong to Gaia targets alone (KOI and
+    TOI ephemerides and light curves come from the archives). Checked here
+    and again by the pipeline.
+    """
+    target = getattr(args, "target", None)
+    if not target:
+        return None
+    given = [flag for flag, name in GAIA_EPHEMERIS
+             if getattr(args, name, None) is not None]
+    if getattr(args, "lcfile", None):
+        given.append("--lcfile")
+    if not is_gaia_target(target):
+        if given:
+            return (f"{', '.join(given)}: Gaia targets only; {target}'s "
+                    "ephemeris and light curve come from the archives")
+        return None
+    from .data.gaia import ARCHIVE_RELEASES, RELEASES, parse_target
+
+    release = parse_target(target)["release"]
+    if release not in RELEASES:
+        return f"{target}: turin knows Gaia {', '.join(RELEASES)}"
+    if release not in ARCHIVE_RELEASES and not getattr(args, "lcfile", None):
+        return (f"{target}: turin has no archive reader for Gaia {release} "
+                "yet; pass its photometry with --lcfile=PATH")
+    missing = [flag for flag, name in GAIA_EPHEMERIS
+               if getattr(args, name, None) is None]
+    if missing:
+        return (f"{target} needs its candidate ephemeris: "
+                f"{' '.join(f'{m}=' for m in missing)} (--t0 in Gaia time, "
+                "BJD(TCB) - 2455197.5; --T14 in hours; --depth in ppm)")
+    if tuple(args.modes) != ("lineph",):
+        return ("Gaia targets fit LinEph only (--modes=lineph): with about "
+                "one point per transit there is no per-transit time to fit")
+    for flag, name in (("--mle", "mle"), ("--oblate", "oblate"),
+                       ("--sc", "sc_override")):
+        if getattr(args, name, False):
+            return f"{flag} is not available for Gaia targets"
+    if getattr(args, "ld", None) == "collapsed":
+        return "--ld=collapsed is not available for Gaia targets"
+    if args.geometry != "circular":
+        return ("Gaia targets need --geometry=circular: each band is "
+                "integrated over its own exposure on the tau kernel")
+    if args.profile_mode in ("ratio", "hybrid"):
+        return (f"Gaia targets need --PL=exact (or auto), not "
+                f"--PL={args.profile_mode}: each band's baseline is solved "
+                "exactly over the whole light curve")
+    if getattr(args, "ttv_max_min", None) is not None:
+        return "--TTVmax is for TTV fits; Gaia targets fit LinEph only"
+    return None
 
 
 def resolve_ld(args):
@@ -429,6 +537,14 @@ def _assign(args, field_name, flag, raw):
             value = float(raw)
             if value <= 0:
                 raise ValueError
+        elif field_name in ("period", "T14_hours", "depth_ppm"):
+            value = float(raw)
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError
+        elif field_name == "t0":
+            value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError
         elif field_name in ("ttv_snr_min", "snr_gate"):
             value = float(raw)
             if not value >= 0:
@@ -454,6 +570,9 @@ def _assign(args, field_name, flag, raw):
         if field_name == "rhostar":
             _fail(f"{flag} needs MEAN,SIGMA in log10(rho*/kg m^-3), sigma "
                   f"> 0 (the Sun is 3.149), got {raw!r}")
+        if field_name == "t0":
+            _fail(f"{flag} needs a finite time in Gaia time "
+                  f"(BJD(TCB) - 2455197.5), got {raw!r}")
         nonneg = least == 0 or field_name in ("ttv_snr_min", "snr_gate")
         _fail(f"{flag} needs a {'non-negative' if nonneg else 'positive'} "
               f"{'integer' if field_name in ints else 'value'}, got {raw!r}")
@@ -487,7 +606,8 @@ def main(argv=None):
         return 0
 
     if not args.target:
-        _fail("no target given. Use --KOI-448.02 or --TOI-406.01")
+        _fail("no target given. Use --KOI-448.02, --TOI-406.01 or "
+              "--GaiaDR3-<source_id>")
 
     from . import pipeline
 

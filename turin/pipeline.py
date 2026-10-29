@@ -114,15 +114,18 @@ def _gibbsgrid(mode, args):
 def run(args, log=print):
     """Run every requested fit for one target. Returns a process exit code."""
     _caps.require_anvil()        # before anything touches the disk
-    from .cli import (collapsed_ld_problem, law_problem, mle_problem,
-                      oblate_problem, resolve_ld)
+    from .cli import (collapsed_ld_problem, gaia_problem, is_gaia_target,
+                      law_problem, mle_problem, oblate_problem, resolve_ld)
 
     resolve_ld(args)
     _caps.require_elome_for_law(args.law)
-    problem = (mle_problem(args) or oblate_problem(args) or law_problem(args)
-               or collapsed_ld_problem(args))
+    problem = (gaia_problem(args) or mle_problem(args) or oblate_problem(args)
+               or law_problem(args) or collapsed_ld_problem(args))
     if problem:
         raise SystemExit(f"turin: {problem}")
+    if is_gaia_target(args.target):
+        raise SystemExit("turin: Gaia targets are read (turin.data.gaia) but "
+                         "not yet fitted; the Gaia likelihood comes next")
     _outputs.set_run_status("")
     _outputs.set_run_tag(args.tag)
     target = args.target
