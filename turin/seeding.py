@@ -313,6 +313,11 @@ def default_shape_start(eph, layout):
     start = {"k": k0, "beta": float(np.clip(beta0, 0.01, 0.95)),
              "T14": float(np.clip(T14_0, 1e-4, 0.95 * T14_hi)),
              **{n: 0.5 for n in _model.ld_names(layout.law)}}
+    for band in getattr(layout, "bands", ()):
+        # Gaia: each band's limb darkening mid-box, its error scale at 1
+        # (the pipeline passes each band's robust chi instead)
+        start.update({f"{n}_{band}": 0.5 for n in _model.ld_names(layout.law)})
+        start[f"lns_{band}"] = 0.0
     if getattr(layout, "oblate", False):
         # round: the MAP's starts spread (fc, fs) by ~0.1 either way, and
         # floor_oblateness keeps the chains' centre off f = 0
@@ -341,3 +346,28 @@ def initial_model_vector(layout, eph, *, shape=None, dtau=None, dP=0.0,
     lo, hi = layout.lo[layout.n_shape:], layout.hi[layout.n_shape:]
     taus = np.clip(taus, 0.98 * lo, 0.98 * hi)
     return np.concatenate([base, taus])
+
+
+#: Spread of the MAP search's starts in unconstrained units: the shape and
+#: nuisance coordinates take ``MAP_START_SD``.
+MAP_START_SD = 0.25
+#: A Gaia fit's dP and dtau0 starts stay at the candidate's ephemeris: over
+#: ~1000 d of sparse data ln L(P, t0) is a comb of peaks 1e-5 to 2e-4 d wide
+#: in P, rivals 1e-3 to 0.05 d away and sometimes higher than the true one
+#: (13 known planets in Gaia DR3; on 4 a wrong peak won). The fit is of the
+#: peak the search found (the user's decision, 2026-10-29: another peak is
+#: another run with its --period). In u near the box centre, dP moves
+#: 0.05 d per unit, so 1e-4 is ~5e-6 d; dtau0 0.02 is ~1.4 min.
+GAIA_START_SD_DP = 1e-4
+GAIA_START_SD_DTAU0 = 0.02
+
+
+def map_start_sd(layout):
+    """Per-column spread of the MAP search's starts, ``(dim,)``, in
+    unconstrained units: :data:`MAP_START_SD`, except a Gaia layout's dP and
+    dtau0 (:data:`GAIA_START_SD_DP`, :data:`GAIA_START_SD_DTAU0`)."""
+    sd = np.full(layout.dim, MAP_START_SD)
+    if getattr(layout, "bands", ()):
+        sd[layout.index("dP")] = GAIA_START_SD_DP
+        sd[layout.index("dtau0")] = GAIA_START_SD_DTAU0
+    return sd

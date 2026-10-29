@@ -563,6 +563,11 @@ class PreparedData:
     n_durations: float
     mission: str = ""
     notes: list = field(default_factory=list)
+    #: Gaia only: each point's band code, the bands fitted (labels, in code
+    #: order) and each band's robust chi out of transit (see prepare_gaia)
+    band: np.ndarray | None = None
+    bands: tuple = ()
+    noise_chi: dict = field(default_factory=dict)
 
     @property
     def n_occupied(self):
@@ -757,3 +762,269 @@ def prepare_data(target, ttv_max_days=0.0, sc_override=False, log=print):
         mission=str(lc.get("mission", "")),
         notes=notes,
     )
+
+
+# -- Gaia epoch photometry ---------------------------------------------------
+#
+# A Gaia light curve has a few dozen points per band over ~3 years, often one
+# per transit, so nothing above applies as it is: a per-epoch baseline would
+# absorb a one-point epoch whole. Instead each (transit, band) with any point
+# is one *row* of the padded arrays -- so the per-epoch tau machinery
+# (centering_constants, the grid, mid_times) is reused untouched -- and each
+# band has one baseline across the whole light curve (see
+# turin.gaialik).
+
+
+def get_gaia_lightcurve(*args, **kwargs):
+    from .data.gaia import get_lightcurve as f
+    return f(*args, **kwargs)
+
+
+#: Upward outliers beyond this many robust sigma are dropped per band (dips
+#: are kept: a transit is one).
+GAIA_CLIP_SIGMA = 5.0
+#: A band with fewer points than this after cleaning is left out of the fit.
+GAIA_MIN_BAND_POINTS = 10
+
+
+def robust_sigma(x):
+    """1.4826 x the median absolute deviation."""
+    x = np.asarray(x, dtype=np.float64)
+    return 1.4826 * float(np.median(np.abs(x - np.median(x))))
+
+
+def clip_gaia(time, flux, flux_err, band, clip_sigma=GAIA_CLIP_SIGMA):
+    """Drop each band's upward outliers (``flux - median`` above
+    ``clip_sigma`` robust sigma of the band). Returns the kept mask."""
+    keep = np.ones(np.size(time), dtype=bool)
+    for code in np.unique(band):
+        m = band == code
+        f = flux[m]
+        s = robust_sigma(f)
+        if s > 0:
+            keep[np.where(m)[0][f - np.median(f) > clip_sigma * s]] = False
+    return keep
+
+
+def gaia_noise_chi(time, flux, flux_err, band, period, epoch, duration_hours):
+    """Each band's robust chi out of transit, ``{code: chi}``: the robust
+    sigma of ``(flux - median)/flux_err`` more than one duration from any
+    predicted transit. Gaia's catalogue errors run small (MetalLS: median
+    2.85); this starts each band's fitted error scale and is logged."""
+    _, centre = nearest_transit(time, period, epoch)
+    oot = np.abs(time - centre) > duration_hours / 24.0
+    out = {}
+    for code in np.unique(band):
+        m = (band == code) & oot
+        if m.sum() < 3:
+            m = band == code
+        r = (flux[m] - np.median(flux[m])) / flux_err[m]
+        out[int(code)] = robust_sigma(r)
+    return out
+
+
+def segment_gaia(time, flux, flux_err, band, period, epoch, duration_hours,
+                 exposure_by_band):
+    """One padded row per (transit, band) holding any point.
+
+    Every point belongs to its nearest predicted transit (no window: points
+    far from any transit still pin the band's baseline). Rows are ordered by
+    band, then transit. Returns :func:`segment_epochs`'s dict (each row an
+    "epoch", ``half_window`` half a period) plus ``band`` (each row's band
+    code), ``exposure`` (each row's band's exposure, days) and
+    ``x_global = (mid, half)``, the map of the whole light curve's span onto
+    [-1, 1] for the bands' baselines.
+    """
+    time = np.asarray(time, dtype=np.float64)
+    flux = np.asarray(flux, dtype=np.float64)
+    flux_err = np.asarray(flux_err, dtype=np.float64)
+    band = np.asarray(band)
+    if time.size == 0:
+        raise ValueError("No Gaia points to fit")
+    n_pt, _ = nearest_transit(time, period, epoch)
+    half_transit = 0.5 * duration_hours / 24.0
+    rows = []
+    for code in np.unique(band):
+        for n in np.unique(n_pt[band == code]):
+            idx = np.where((band == code) & (n_pt == n))[0]
+            rows.append((int(code), int(n), idx[np.argsort(time[idx])]))
+    n_rows = len(rows)
+    max_pts = max(r[2].size for r in rows)
+    times_padded = np.zeros((n_rows, max_pts))
+    flux_padded = np.ones((n_rows, max_pts))
+    ferr_padded = np.full((n_rows, max_pts), 1e10)
+    mask = np.zeros((n_rows, max_pts))
+    centers = np.array([epoch + n * period for _, n, _ in rows],
+                       dtype=np.float64)
+    n_in_transit = []
+    for i, (_, _, idx) in enumerate(rows):
+        k = idx.size
+        times_padded[i, :k] = time[idx]
+        flux_padded[i, :k] = flux[idx]
+        ferr_padded[i, :k] = flux_err[idx]
+        mask[i, :k] = 1.0
+        times_padded[i, k:] = centers[i]
+        n_in_transit.append(int(np.sum(np.abs(time[idx] - centers[i])
+                                       <= half_transit)))
+    codes = np.array([c for c, _, _ in rows], dtype=np.int64)
+    lo, hi = float(time.min()), float(time.max())
+    return {
+        "times_padded": times_padded,
+        "flux_padded": flux_padded,
+        "ferr_padded": ferr_padded,
+        "mask": mask,
+        "epoch_centers": centers,
+        "half_window": 0.5 * float(period),
+        "x_mid": np.array([0.5 * (times_padded[i, :r[2].size].min()
+                                  + times_padded[i, :r[2].size].max())
+                           for i, r in enumerate(rows)]),
+        "x_half": np.ones(n_rows),          # unused: see gaia_basis_x
+        "n_epochs": n_rows,
+        "max_pts": max_pts,
+        "n_in_transit": np.array(n_in_transit, dtype=int),
+        "band": codes,
+        "exposure": np.array([float(exposure_by_band[c]) for c in codes]),
+        "x_global": (0.5 * (lo + hi), max(0.5 * (hi - lo), 1e-6)),
+    }
+
+
+def gaia_basis_x(epoch_data):
+    """The bands' baseline coordinate: every row's times mapped onto [-1, 1]
+    across the whole light curve's span, ``(n_rows, max_pts)``, padded slots
+    at 0. One map for every band (a degree-K polynomial spans the same space
+    under any affine map; this one keeps the normal matrix conditioned)."""
+    mid, half = epoch_data["x_global"]
+    t = np.asarray(epoch_data["times_padded"], dtype=np.float64)
+    x = (t - mid) / half
+    return np.where(np.asarray(epoch_data["mask"]) > 0, x, 0.0)
+
+
+def cv_band_orders(epoch_data, duration_hours, *, max_order=MAX_ORDER,
+                   n_folds=10, log=None):
+    """Each band's baseline order by cross-validation, as :func:`cv_orders`
+    does per epoch: the band's out-of-transit points (more than one duration
+    from their transit) in time order, split into contiguous folds, the
+    held-out log-likelihood accumulated per order, the best relative to K=0
+    taken. Returns :func:`cv_orders`'s dict with ``orders`` per row (each
+    row its band's) and ``band_orders`` ``{code: K}``."""
+    if log is None:
+        def log(msg):
+            pass
+    T14 = duration_hours / 24.0
+    x_all = gaia_basis_x(epoch_data)
+    mask = np.asarray(epoch_data["mask"]) > 0
+    band = np.asarray(epoch_data["band"])
+    centres = np.asarray(epoch_data["epoch_centers"])
+    t_all = np.asarray(epoch_data["times_padded"])
+    band_orders, scores = {}, {}
+    for code in np.unique(band):
+        rows = band == code
+        m = mask & rows[:, None]
+        t = t_all[m]
+        x = x_all[m]
+        f = np.asarray(epoch_data["flux_padded"])[m]
+        e = np.asarray(epoch_data["ferr_padded"])[m]
+        tc = np.broadcast_to(centres[:, None], t_all.shape)[m]
+        o = np.argsort(t)
+        oot = o[np.abs(t[o] - tc[o]) > T14]
+        k_folds = min(n_folds, len(oot) // MIN_FOLD_POINTS)
+        if k_folds < 2:
+            band_orders[int(code)] = 0
+            continue
+        folds = np.array_split(oot, k_folds)
+        logL = np.zeros(max_order + 1)
+        for K in range(max_order + 1):
+            for j in range(k_folds):
+                val = folds[j]
+                train = np.concatenate([folds[i] for i in range(k_folds)
+                                        if i != j])
+                if len(train) < K + 1:
+                    logL[K] = -np.inf
+                    break
+                Lt = legendre_matrix(x[train], K)
+                w = 1.0 / e[train] ** 2
+                LtW = Lt.T * w[None, :]
+                c = np.linalg.solve(LtW @ Lt + 1e-10 * np.eye(K + 1),
+                                    LtW @ (f[train] - 1.0))
+                r = (f[val] - 1.0 - legendre_matrix(x[val], K) @ c) / e[val]
+                logL[K] += -0.5 * np.sum(r ** 2)
+        scores[int(code)] = logL - logL[0]
+        band_orders[int(code)] = int(np.argmax(scores[int(code)]))
+    from .data.gaia import BANDS
+    log("Baseline orders: " + ", ".join(
+        f"{BANDS[c]} K={k}" for c, k in band_orders.items()))
+    orders = np.array([band_orders[int(c)] for c in band], dtype=int)
+    return {"orders": orders, "band_orders": band_orders, "scores": scores,
+            "epoch_counts": mask.sum(axis=1).astype(int)}
+
+
+def prepare_gaia(target, eph, lcfile=None, log=print):
+    """Load, clean and segment one Gaia source for a fit.
+
+    ``eph`` is the candidate's ephemeris from the command line (``period``
+    days, ``epoch`` Gaia time, ``duration`` hours, ``depth`` ppm). Cleaning:
+    Gaia's own rejections (in the reader), each band's upward outliers beyond
+    :data:`GAIA_CLIP_SIGMA` robust sigma, and bands left with fewer than
+    :data:`GAIA_MIN_BAND_POINTS` points. The epoch is recentred on the median
+    occupied transit, as for Kepler and TESS.
+    """
+    from .data.gaia import BANDS, EXPOSURE_DAYS
+
+    def _log(msg):
+        if log:
+            log(msg)
+
+    _log(f"[{target}] Reading Gaia epoch photometry...")
+    lc = get_gaia_lightcurve(target, progress=lambda m: _log(f"  {m}"),
+                             lcfile=lcfile)
+    time, flux, ferr = (np.asarray(lc[k], dtype=np.float64)
+                        for k in ("time", "flux", "flux_err"))
+    band = np.asarray(lc["band"], dtype=np.int64)
+    _log("  Points: " + ", ".join(f"{BANDS[c]} {int((band == c).sum())}"
+                                  for c in np.unique(band)))
+    keep = clip_gaia(time, flux, ferr, band)
+    if (~keep).any():
+        _log(f"  Clipped {int((~keep).sum())} upward outlier(s) beyond "
+             f"{GAIA_CLIP_SIGMA:g} robust sigma")
+    time, flux, ferr, band = time[keep], flux[keep], ferr[keep], band[keep]
+    notes = []
+    for c in np.unique(band):
+        n = int((band == c).sum())
+        if n < GAIA_MIN_BAND_POINTS:
+            m = band != c
+            time, flux, ferr, band = time[m], flux[m], ferr[m], band[m]
+            notes.append(f"band {BANDS[c]} dropped: {n} points")
+            _log(f"  Band {BANDS[c]} dropped: {n} points, fewer than "
+                 f"{GAIA_MIN_BAND_POINTS}")
+    if time.size == 0:
+        raise ValueError(f"{target}: no Gaia band has enough points")
+
+    n_pt, _ = nearest_transit(time, eph["period"], eph["epoch"])
+    n_median = int(np.round(np.median(np.unique(n_pt))))
+    eph_fit = dict(eph)
+    eph_fit["epoch"] = eph["epoch"] + n_median * eph["period"]
+    exposure = {BANDS.index(b): v for b, v in EXPOSURE_DAYS.items()}
+    epoch_data = segment_gaia(time, flux, ferr, band, eph_fit["period"],
+                              eph_fit["epoch"], eph_fit["duration"], exposure)
+    chi = gaia_noise_chi(time, flux, ferr, band, eph_fit["period"],
+                         eph_fit["epoch"], eph_fit["duration"])
+    bands = tuple(BANDS[c] for c in np.unique(band))
+    n_tr = epoch_data["n_in_transit"]
+    rb = epoch_data["band"]
+    _log("  In transit (predicted): " + ", ".join(
+        f"{BANDS[c]} {int(n_tr[rb == c].sum())} point(s) in "
+        f"{int((n_tr[rb == c] > 0).sum())} transit(s)" for c in np.unique(rb)))
+    _log("  Robust chi out of transit: " + ", ".join(
+        f"{BANDS[c]} {chi[c]:.2f}" for c in sorted(chi)))
+    _log(f"  Recentered epoch: {eph_fit['epoch']:.5f} (input "
+         f"{eph['epoch']:.5f}); period {eph['period']:.6f} d, duration "
+         f"{eph['duration']:.3f} h; span {time.max() - time.min():.0f} d, "
+         f"{epoch_data['n_epochs']} transit x band rows")
+    g_exp = EXPOSURE_DAYS["G"] if "G" in bands else EXPOSURE_DAYS[bands[0]]
+    return PreparedData(
+        target=target, time=time, flux=flux, flux_err=ferr, eph=eph_fit,
+        eph_nea=dict(eph), cadence_days=g_exp, exposure_time=g_exp,
+        num_resample=1, epoch_data=epoch_data,
+        n_durations=0.5 * eph["period"] / (eph["duration"] / 24.0),
+        mission=str(lc.get("mission", "gaia")), notes=notes, band=band,
+        bands=bands, noise_chi={BANDS[c]: v for c, v in chi.items()})

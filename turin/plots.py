@@ -299,3 +299,90 @@ def model_grid(lp, v_row, *, half_span=None, span_durations=3.0, T14=None,
             law=lp.law, period=p["period"], geometry=lp.geometry,
             f=p.get("f_flux"), theta=p.get("theta"))
         return tt, np.array(f, dtype=np.float64)[0, 0]
+
+
+def gaia_model_grids(lp, v_row, *, half_span, per_T14=400):
+    """Each band's densely sampled transit model at one parameter vector, for
+    a Gaia fold plot: ``{band label: (tt, flux)}``, in float64 on the CPU,
+    at the band's exposure and limb darkening."""
+    import mlx.core as mx
+
+    from . import model as _model
+    from .data.gaia import BANDS, EXPOSURE_DAYS
+
+    T14 = float(v_row[lp.layout.index("T14")])
+    n = max(1000, int(np.ceil(2.0 * half_span / T14 * per_T14)))
+    tt = np.linspace(-half_span, half_span, n)
+    out = {}
+    with mx.stream(mx.cpu):
+        p = lp.unpack(mx.array(np.asarray(v_row, dtype=np.float64)[None, :],
+                               dtype=mx.float64))
+        for j, label in enumerate(lp.layout.bands):
+            exp = EXPOSURE_DAYS[label]
+            grid = _model.build_grid(
+                dict(times_centered=tt[None, :], n_arr=np.zeros(1),
+                     d_arr=np.zeros(1), P_ref=lp.layout.P_ref,
+                     tau0_ref=lp.layout.tau0_ref),
+                np.zeros(1), dtype=mx.float64, exp_time=exp,
+                exp_epoch=np.array([exp]), band_epoch=np.array([0]))
+            f = _model.transit_flux_dev_bands(
+                grid, mid=mx.zeros((1, 1), dtype=mx.float64), k=p["k"],
+                b=p["b"], T14=p["T14"], period=p["period"],
+                q_bands=(p["q_bands"][j],), law=lp.law)
+            out[label] = (tt, 1.0 + np.array(f, dtype=np.float64)[0, 0])
+    return out
+
+
+#: Gaia band colours on a fold plot.
+GAIA_COLOURS = {"G": "#2b7a3d", "BP": "#2a5fa8", "RP": "#b23a2b"}
+
+
+def gaia_fold_plot(path, *, epoch_data, mid_times, baseline, curves, scales,
+                   T14, title="", log=None, span_T14=3.0):
+    """A Gaia fit's phase fold: one panel per band, the baseline divided out,
+    each point with its catalogue error times the band's fitted scale
+    ``scales[band]``, and the band's best-fit curve. The x range is
+    ``span_T14`` durations either side of mid-transit; the points outside it
+    (most of a Gaia light curve) are counted in the panel's corner, and the
+    residual RMS is over every point of the band."""
+    import matplotlib.pyplot as plt
+
+    from .data.gaia import BANDS
+
+    mask = np.asarray(epoch_data["mask"]) > 0
+    t = np.asarray(epoch_data["times_padded"], dtype=np.float64)
+    f = np.asarray(epoch_data["flux_padded"], dtype=np.float64)
+    e = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
+    g = np.asarray(baseline, dtype=np.float64)
+    mid = np.asarray(mid_times, dtype=np.float64)
+    rows_band = np.asarray(epoch_data["band"])
+    labels = list(curves)
+    fig, axes = plt.subplots(len(labels), 1, figsize=(7.0, 2.6 * len(labels)),
+                             sharex=True, squeeze=False)
+    half = span_T14 * T14
+    for ax, label in zip(axes[:, 0], labels):
+        sel = mask & (rows_band == BANDS.index(label))[:, None]
+        dt = (t - mid[:, None])[sel]
+        y = (f / np.where(g != 0, g, 1.0))[sel]
+        ye = (e / np.where(g != 0, g, 1.0))[sel] * float(scales[label])
+        tt, ff = curves[label]
+        resid = y - np.interp(dt, tt, ff)
+        near = np.abs(dt) <= half
+        colour = GAIA_COLOURS.get(label, "k")
+        ax.errorbar(dt[near] * 24.0, y[near], yerr=ye[near], fmt="o", ms=3.5,
+                    color=colour, ecolor=colour, elinewidth=0.8, capsize=0,
+                    alpha=0.85, zorder=3)
+        win = np.abs(tt) <= half
+        ax.plot(tt[win] * 24.0, ff[win], "-", color="k", lw=1.4, zorder=4)
+        ax.text(0.01, 0.04, f"{label}: {int(near.sum())} of {dt.size} points "
+                f"shown; error scale {float(scales[label]):.2f}; residual RMS "
+                f"{np.std(resid) * 1e6:.0f} ppm", transform=ax.transAxes,
+                fontsize=8, color="0.3")
+        ax.set_ylabel("relative flux")
+        ax.grid(alpha=0.25, lw=0.5)
+    axes[-1, 0].set_xlabel("hours from mid-transit")
+    axes[-1, 0].set_xlim(-half * 24.0, half * 24.0)
+    if title:
+        axes[0, 0].set_title(title, fontsize=10)
+    fig.tight_layout()
+    return _save(fig, path, title or "fold", log)

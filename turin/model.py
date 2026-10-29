@@ -276,6 +276,11 @@ class EpochGrid:
     #: flat points that share an exposure, one kernel call each. Empty for a
     #: single cadence.
     groups: tuple = ()
+    #: Gaia (:func:`build_grid`'s ``band_epoch``): the band index of each of
+    #: ``groups``, whose slices are then one band each, every band its own
+    #: kernel call with its own limb darkening (:func:`transit_flux_dev_bands`).
+    #: Empty otherwise.
+    group_band: tuple = ()
 
     @property
     def n_epochs(self) -> int:
@@ -386,7 +391,7 @@ def phase_order(times, d_arr, group=None):
 
 def build_grid(centering, sub_offsets, dtype=mx.float32, *,
                exp_time=0.0, n_gl=N_GL, mask=None, sort_points=True,
-               exp_epoch=None):
+               exp_epoch=None, band_epoch=None):
     """Upload the host-side centred arrays as an :class:`EpochGrid`.
 
     ``centering`` is :func:`turin.prep.centering_constants` output;
@@ -412,6 +417,11 @@ def build_grid(centering, sub_offsets, dtype=mx.float32, *,
     ordered by exposure and then by phase, so the speed measure of
     :func:`phase_order` is kept inside each call. Left out, or all equal, the
     grid is the single-exposure one it always was.
+
+    ``band_epoch`` (Gaia) is each row's band index, 0..B-1: the points are
+    grouped by band instead, every band a group (one alone included) at its
+    rows' exposure from ``exp_epoch``, and ``group_band`` says which band
+    each group is. Only :func:`transit_flux_dev_bands` evaluates such a grid.
     """
     times = np.array(centering["times_centered"], dtype=np.float64)
     d_arr = np.asarray(centering["d_arr"], dtype=np.float64)
@@ -420,6 +430,35 @@ def build_grid(centering, sub_offsets, dtype=mx.float32, *,
         times[pad] = np.broadcast_to(
             d_arr[:, None] + 0.25 * float(centering["P_ref"]), times.shape)[pad]
     gid, groups = None, ()
+    if band_epoch is not None:
+        gid = np.asarray(band_epoch, dtype=np.int64)
+        exp_epoch = np.asarray(exp_epoch, dtype=np.float64)
+        if gid.shape != d_arr.shape or exp_epoch.shape != d_arr.shape:
+            raise ValueError("band_epoch and exp_epoch need one value per row")
+        bands = np.unique(gid)
+        ends = np.cumsum([int((gid == b).sum()) * times.shape[1]
+                          for b in bands])
+        starts = np.concatenate([[0], ends[:-1]])
+        groups = []
+        for b, a, e in zip(bands, starts, ends):
+            ex = np.unique(exp_epoch[gid == b])
+            if ex.size != 1:
+                raise ValueError("every row of a band needs one exposure")
+            groups.append((float(ex[0]), int(a), int(e)))
+        order, unorder = phase_order(times, d_arr, gid)
+        return EpochGrid(
+            times=mx.array(np.ascontiguousarray(times), dtype=dtype),
+            n_arr=mx.array(np.ascontiguousarray(centering["n_arr"]),
+                           dtype=dtype),
+            d_arr=mx.array(np.ascontiguousarray(centering["d_arr"]),
+                           dtype=dtype),
+            sub_offsets=mx.array(np.ascontiguousarray(sub_offsets),
+                                 dtype=dtype),
+            P_ref=float(centering["P_ref"]),
+            tau0_ref=float(centering["tau0_ref"]),
+            dtype=dtype, exp_time=float(exp_time), n_gl=int(n_gl),
+            order=order, unorder=unorder, exp_epoch=exp_epoch,
+            groups=tuple(groups), group_band=tuple(int(b) for b in bands))
     if exp_epoch is not None:
         exp_epoch = np.asarray(exp_epoch, dtype=np.float64)
         if exp_epoch.shape != d_arr.shape:
@@ -645,6 +684,41 @@ def transit_flux_dev(grid, *, mid, k, b, T14, period, q1=None, q2=None,
         a_over_rstar(T14, period, k, b), b, k, u1, u2)
     if grid.order is not None:
         dev = mx.take(dev, grid.unorder, axis=1)
+    return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
+
+
+def transit_flux_dev_bands(grid, *, mid, k, b, T14, period, q_bands,
+                           law="quadratic"):
+    """:func:`transit_flux_dev` for a grid of bands (``build_grid``'s
+    ``band_epoch``): each band's points through elome's tau kernel at that
+    band's exposure, with that band's limb darkening.
+
+    ``q_bands[j]`` is band ``j``'s limb-darkening columns (``law``'s
+    coordinates, each ``(n_chains, 1)``); the geometry is shared. Circular
+    geometry only. Returns ``(n_chains, n_rows, max_pts)``.
+    """
+    if not grid.group_band:
+        raise ValueError("transit_flux_dev_bands needs a grid built with "
+                         "band_epoch")
+    n_chains = mid.shape[0]
+    flat = time_from_mid(grid, mid).reshape(n_chains, -1)
+    flat = mx.take(flat, grid.order, axis=1)
+    a_rs = a_over_rstar(T14, period, k, b)
+    parts = []
+    for (exp, lo, hi), j in zip(grid.groups, grid.group_band):
+        q = q_bands[j]
+        if law == "quadratic":
+            ld = dict(zip(("u1", "u2"), limb_dark_coeffs(*q)))
+        else:
+            ld = dict(limb_dark=law, u=ld_weights(q, law))
+        out = elome.flux_dev_from_tau(
+            flat[:, lo:hi], period, a_rs, b, k, exp_time=exp,
+            integration="contact" if exp > 0 else "none", n_gl=grid.n_gl,
+            **ld)
+        if _RELEASE[0]:
+            mx.eval(out)
+        parts.append(out)
+    dev = mx.take(mx.concatenate(parts, axis=1), grid.unorder, axis=1)
     return dev.reshape(n_chains, grid.n_epochs, grid.max_pts)
 
 

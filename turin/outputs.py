@@ -186,7 +186,9 @@ def export_logrho(outdir, target, mode, log10_rho, *, log=None):
 def export_lcdata(outdir, target, mode, epoch_data, model, *, log=None):
     """(iv) The data that was fitted, with the best-fit model beside it.
 
-    Padded slots are dropped and the rows sorted by time, as hurin does.
+    Padded slots are dropped and the rows sorted by time, as hurin does. A
+    Gaia fit (``epoch_data`` with ``band``) adds a ``band`` column (G, BP,
+    RP); ``flux_err`` stays the catalogue's, before the fitted error scale.
     """
     mask = np.asarray(epoch_data["mask"]) > 0
     t = np.asarray(epoch_data["times_padded"], dtype=np.float64)[mask]
@@ -194,6 +196,15 @@ def export_lcdata(outdir, target, mode, epoch_data, model, *, log=None):
     e = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)[mask]
     m = np.asarray(model, dtype=np.float64)[mask]
     order = np.argsort(t)
+    if "band" in epoch_data:
+        from .data.gaia import BANDS
+        order = np.argsort(t, kind="stable")
+        b = np.broadcast_to(np.asarray(epoch_data["band"])[:, None],
+                            mask.shape)[mask]
+        rows = [f"{t[i]:.10e},{f[i]:.10e},{e[i]:.10e},{m[i]:.10e},"
+                f"{BANDS[b[i]]}" for i in order]
+        return _write_csv(product_path(outdir, target, mode, "lcdata", "csv"),
+                          "time,flux,flux_err,model_flux,band", rows, log)
     rows = [f"{t[i]:.10e},{f[i]:.10e},{e[i]:.10e},{m[i]:.10e}" for i in order]
     return _write_csv(product_path(outdir, target, mode, "lcdata", "csv"),
                       "time,flux,flux_err,model_flux", rows, log)
@@ -386,6 +397,19 @@ class ResumeState:
     #: each epoch integrated over its own; ``()`` for a single cadence, which
     #: is what every older state was. See :meth:`check_exposure`.
     exposures: tuple = ()
+    #: Gaia: the bands fitted (labels). Decided by the data (a band with too
+    #: few points is left out), so checked by :meth:`check_bands`, not a
+    #: GUARD; ``()`` for Kepler and TESS, which every older state was.
+    bands: tuple = ()
+
+    def check_bands(self, bands):
+        """Refuse to continue a Gaia lineage whose fitted bands differ from
+        the light curve's now (a different parameter vector)."""
+        if tuple(self.bands) != tuple(bands):
+            raise SystemExit(
+                f"{self.target} {self.mode}: this run fitted the bands "
+                f"{tuple(self.bands)}, but the light curve now gives "
+                f"{tuple(bands)}; use --fresh to start over")
 
     GUARDS = ("b_prior", "profile_mode", "geometry", "sampler", "ttv_max",
               "gibbsgrid", "ld", "law", "oblate", "rhostar")

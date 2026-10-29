@@ -168,8 +168,419 @@ def test_gaia_refusals_name_their_reason(argv, pattern):
         cli.parse_args(argv)
 
 
-def test_the_pipeline_refuses_a_gaia_target_until_it_can_fit_one(tmp_path):
+
+
+# -- the Gaia likelihood: rows per (transit, band), one baseline per band ----
+
+import math
+
+import mlx.core as mx
+
+from turin import likelihood, model, outputs, params, prep, profile
+from turin.gaialik import GaiaLogProb
+
+_EXP = {i: gaia.EXPOSURE_DAYS[b] for i, b in enumerate(gaia.BANDS)}
+
+
+def gaia_times(rng, n_clusters=20, span=950.0, t_start=1700.0):
+    """Gaia-like G times: clusters of scans ~6 h apart, each a pair of
+    field-of-view transits 106.5 min apart."""
+    t = []
+    for s in np.sort(rng.uniform(0, span, n_clusters)):
+        for j in range(int(rng.integers(2, 6))):
+            ts = s + 0.25 * j + rng.uniform(-0.01, 0.01)
+            t += [ts, ts + 106.5 / 1440]
+    return t_start + np.array(t)
+
+
+def _aRs(T14, P, k, b):
+    s = math.sin(math.pi * T14 / P)
+    return math.sqrt(((1 + k) ** 2 - b ** 2) / s ** 2 + b ** 2)
+
+
+def _dev64(tau, P, k, b, T14, q, exp):
+    """elome's float64 kernel at each point's own time from mid-transit."""
+    import elome
+    u1, u2 = model.limb_dark_coeffs_np(*q)
+    with mx.stream(mx.cpu):
+        d = elome.flux_dev_from_tau(
+            mx.array(np.asarray(tau), dtype=mx.float64), P, _aRs(T14, P, k, b),
+            b, k, float(u1), float(u2), exp_time=exp, integration="contact",
+            n_gl=model.N_GL)
+        return np.array(d)
+
+
+TRUTH = dict(P=1.37, t0=1701.123, k=0.12, b=0.3, T14=0.09,
+             q={0: (0.4, 0.3), 1: (0.5, 0.28), 2: (0.3, 0.33)})
+
+
+def synthetic_gaia(seed=3, bands=(0, 1, 2), noise=2.0, trend=True):
+    """A three-band Gaia-like light curve with a transit, slow per-band
+    trends, and noise ``noise`` times its quoted errors."""
+    rng = np.random.default_rng(seed)
+    tg = gaia_times(rng)
+    t = np.concatenate([tg + 27.0 * j / 86400 for j in range(len(bands))])
+    band = np.repeat(np.asarray(bands), tg.size)
+    o = np.argsort(t, kind="stable")
+    t, band = t[o], band[o]
+    T = TRUTH
+    dev = np.zeros_like(t)
+    for c in bands:
+        m = band == c
+        n = np.round((t[m] - T["t0"]) / T["P"])
+        dev[m] = _dev64(t[m] - (T["t0"] + n * T["P"]), T["P"], T["k"],
+                        T["b"], T["T14"], T["q"][c], _EXP[c])
+    sig = np.where(band == 0, 1e-3, 2e-3)
+    base = 1 + (1e-3 * (t - 2200) / 500 * (band + 1) if trend else 0.0)
+    flux = (1 + dev) * base + noise * sig * rng.standard_normal(t.size)
+    return t, flux, sig, band, dev
+
+
+def _gaia_fit_inputs(seed=3, **kw):
+    t, flux, sig, band, dev = synthetic_gaia(seed, **kw)
+    T = TRUTH
+    eph = dict(period=T["P"], epoch=T["t0"], duration=T["T14"] * 24,
+               depth=T["k"] ** 2 * 1e6)
+    ed = prep.segment_gaia(t, flux, sig, band, T["P"], T["t0"],
+                           T["T14"] * 24, _EXP)
+    cv = prep.cv_band_orders(ed, T["T14"] * 24)
+    cen = prep.centering_constants(ed, eph)
+    labels = tuple(gaia.BANDS[c] for c in np.unique(band))
+    lay = params.gaia_layout(eph, labels)
+    return t, flux, sig, band, dev, eph, ed, cv, cen, lay
+
+
+def _vectors(lay, n=4, seed=0):
+    rng = np.random.default_rng(seed)
+    T = TRUTH
+    beta = T["b"] / (1 + T["k"])
+    V = []
+    for i in range(n):
+        v = [rng.normal(0, 1e-4) * (i > 0), rng.normal(0, 3e-3) * (i > 0),
+             T["k"] * (1 + 0.05 * rng.normal() * (i > 0)),
+             beta + 0.05 * rng.normal() * (i > 0),
+             T["T14"] * (1 + 0.03 * rng.normal() * (i > 0))]
+        for band in lay.bands:
+            v += list(np.clip(np.array(T["q"][gaia.BANDS.index(band)])
+                              + 0.05 * rng.normal(size=2) * (i > 0),
+                              0.01, 0.99))
+        v += list(rng.uniform(-0.2, 1.2, len(lay.bands)))
+        V.append(v)
+    return np.array(V)
+
+
+def _reference_lnL(t, flux, sig, band, lay, cv, ed, v):
+    """The likelihood written out from scratch in float64: each band's
+    points at their own transit, one Legendre baseline per band over the
+    light curve's span, solved by np.linalg.solve, errors times exp(lns)."""
+    dP, dt, k, beta, T14 = v[:5]
+    b = beta * (1 + k)
+    P = lay.P_ref + dP
+    mid, half = ed["x_global"]
+    tot = 0.0
+    for j, label in enumerate(lay.bands):
+        c = gaia.BANDS.index(label)
+        m = band == c
+        n = np.round((t[m] - lay.tau0_ref) / lay.P_ref)
+        q = v[5 + 2 * j:7 + 2 * j]
+        f = 1 + _dev64(t[m] - (lay.tau0_ref + dt + n * P), P, k, b, T14, q,
+                       _EXP[c])
+        L = prep.legendre_matrix((t[m] - mid) / half, cv["band_orders"][c])
+        A = f[:, None] * L
+        w = 1 / sig[m] ** 2
+        coef = np.linalg.solve((A.T * w) @ A, (A.T * w) @ (flux[m] - f))
+        s = math.exp(v[5 + 2 * len(lay.bands) + j])
+        r = (flux[m] - f * (1 + L @ coef)) / (sig[m] * s)
+        tot += (-0.5 * np.sum(r ** 2) - m.sum() * math.log(s)
+                - np.sum(np.log(sig[m])) - 0.5 * m.sum() * math.log(2 * math.pi))
+    return tot
+
+
+def test_every_transit_and_band_with_a_point_is_a_row():
+    t, flux, sig, band, dev, eph, ed, *_ = _gaia_fit_inputs()
+    n_pt, _ = prep.nearest_transit(t, eph["period"], eph["epoch"])
+    want = {(int(c), int(n)) for c, n in zip(band, n_pt)}
+    assert ed["n_epochs"] == len(want)
+    assert int(ed["mask"].sum()) == t.size          # nothing windowed away
+    n_rows = np.round((ed["epoch_centers"] - eph["epoch"]) / eph["period"])
+    assert {(int(c), int(n)) for c, n in zip(ed["band"], n_rows)} == want
+    assert (ed["mask"].sum(axis=1) == 1).any()       # one-point rows kept
+    assert np.all(np.diff(ed["band"]) >= 0)          # band, then transit
+    np.testing.assert_array_equal(ed["exposure"],
+                                  [_EXP[c] for c in ed["band"]])
+
+
+def test_the_gaia_likelihood_is_the_one_written_out_by_hand():
+    t, flux, sig, band, dev, eph, ed, cv, cen, lay = _gaia_fit_inputs()
+    V = _vectors(lay)
+    with mx.stream(mx.cpu):
+        lp = GaiaLogProb(lay, cen, ed, cv["orders"], dtype=mx.float64,
+                         prior=False)
+        got = np.array(lp(mx.array(V, dtype=mx.float64))) + lp.log_const
+    want = [_reference_lnL(t, flux, sig, band, lay, cv, ed, v) for v in V]
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-8)
+    # the prior is the default layout's (b, k) prior and nothing else
+    with mx.stream(mx.cpu):
+        lpp = GaiaLogProb(lay, cen, ed, cv["orders"], dtype=mx.float64)
+        withp = np.array(lpp(mx.array(V, dtype=mx.float64))) + lpp.log_const
+        bk = np.array(params.bk_log_prior(
+            mx.array(V[:, 3:4], dtype=mx.float64),
+            mx.array(V[:, 2:3], dtype=mx.float64)))
+    np.testing.assert_allclose(withp - got, bk, rtol=0, atol=1e-10)
+
+
+def test_the_shared_baseline_solve_matches_numpy():
+    t, flux, sig, band, dev, eph, ed, cv, cen, lay = _gaia_fit_inputs()
+    rng = np.random.default_rng(1)
+    f_dev = np.where(ed["mask"] > 0,
+                     -0.01 * rng.uniform(size=(3,) + ed["mask"].shape), 0.0)
+    orders = np.array([cv["band_orders"][c] for c in range(3)])
+    x = prep.gaia_basis_x(ed)
+    with mx.stream(mx.cpu):
+        d = profile.build_shared_design(ed, orders, ed["band"], x,
+                                        dtype=mx.float64)
+        c = np.array(profile.solve_shared_coefficients(
+            d, mx.array(f_dev, dtype=mx.float64)))
+    ref = profile.solve_shared_coefficients_np(ed, orders, ed["band"], x,
+                                               1.0 + f_dev)
+    for b in range(3):
+        rows = np.where(ed["band"] == b)[0]
+        # every row of a band carries the band's coefficients
+        np.testing.assert_allclose(c[:, rows], np.repeat(
+            ref[:, b:b + 1], rows.size, axis=1), rtol=0, atol=1e-12)
+
+
+def test_gaia_float32_value_and_gradient_against_float64():
+    t, flux, sig, band, dev, eph, ed, cv, cen, lay = _gaia_fit_inputs()
+    V = _vectors(lay, n=6)
+    lo = GaiaLogProb(lay, cen, ed, cv["orders"], dtype=mx.float32)
+    with mx.stream(mx.cpu):
+        hi = GaiaLogProb(lay, cen, ed, cv["orders"], dtype=mx.float64)
+        v64 = np.array(hi(mx.array(V, dtype=mx.float64)))
+        g64 = np.array(mx.grad(lambda x: mx.sum(hi(x)))(
+            mx.array(V, dtype=mx.float64)))
+    v32 = np.array(lo(mx.array(V, dtype=mx.float32)))
+    g32 = np.array(mx.grad(lambda x: mx.sum(lo(x)))(
+        mx.array(V, dtype=mx.float32)))
+    assert np.max(np.abs(v32 - v64)) < 5e-3        # ~400 points
+    scale = np.max(np.abs(g64), axis=0) + 1e-6
+    assert np.max(np.abs(g32 - g64) / scale) < 1e-3
+
+
+def test_error_scales_enter_only_through_r_and_their_normalisation():
+    """lns_b scales band b's residuals and adds -N_b lns_b; the baseline
+    and every other band are untouched."""
+    t, flux, sig, band, dev, eph, ed, cv, cen, lay = _gaia_fit_inputs()
+    V = _vectors(lay, n=1)
+    with mx.stream(mx.cpu):
+        lp = GaiaLogProb(lay, cen, ed, cv["orders"], dtype=mx.float64,
+                         prior=False)
+        p = lp.unpack(mx.array(V, dtype=mx.float64))
+        rows, c = lp._terms(p)
+        rows = np.array(rows)[0]
+        base = float(np.array(lp(mx.array(V, dtype=mx.float64)))[0])
+        i = lay.index("lns_BP")
+        W = V.copy()
+        W[0, i] += 0.4
+        moved = float(np.array(lp(mx.array(W, dtype=mx.float64)))[0])
+        c2 = np.array(lp._terms(lp.unpack(mx.array(W, dtype=mx.float64)))[1])
+    np.testing.assert_array_equal(np.array(c), c2)
+    bp = ed["band"] == 1
+    n_bp = int(ed["mask"][bp].sum())
+    chi2 = -2.0 * (rows[bp].sum() - 0.5 * n_bp)       # sum r^2 at the old s
+    want = (-0.5 * chi2 * (math.exp(-0.8) - 1.0) - n_bp * 0.4)
+    assert moved - base == pytest.approx(want, abs=1e-9)
+
+
+def test_cv_picks_a_trend_where_there_is_one():
+    *_, cv, _, _ = _gaia_fit_inputs(trend=True, noise=1.0)
+    assert all(k >= 1 for k in cv["band_orders"].values())
+    # on white noise the CV can still prefer a higher order, but only by
+    # noise-sized margins (the same rule as turin's per-epoch CV)
+    for seed in range(4):
+        *_, cv, _, _ = _gaia_fit_inputs(seed=seed, trend=False, noise=1.0)
+        assert max(np.max(s) for s in cv["scores"].values()) < 2.0
+
+
+def test_the_band_grid_matches_one_kernel_call_per_band():
+    """transit_flux_dev_bands: each band's points in its own call, at its
+    own exposure and limb darkening, put back where they came from."""
+    t, flux, sig, band, dev, eph, ed, cv, cen, lay = _gaia_fit_inputs()
+    V = _vectors(lay, n=2)
+    with mx.stream(mx.cpu):
+        lp = GaiaLogProb(lay, cen, ed, cv["orders"], dtype=mx.float64)
+        fd = np.array(lp.flux_dev(lp.unpack(mx.array(V, dtype=mx.float64))))
+    m = ed["mask"] > 0
+    rows_t = ed["times_padded"]
+    for i, v in enumerate(V):
+        dP, dt, k, beta, T14 = v[:5]
+        P = lay.P_ref + dP
+        for j in range(3):
+            sel = m & (ed["band"] == j)[:, None]
+            n = np.broadcast_to(cen["n_arr"][:, None], m.shape)[sel]
+            tau = rows_t[sel] - (lay.tau0_ref + dt + n * P)
+            want = _dev64(tau, P, k, beta * (1 + k), T14,
+                          v[5 + 2 * j:7 + 2 * j], _EXP[j])
+            # 3e-13: the centred time representation's rounding
+            np.testing.assert_allclose(fd[i][sel], want, rtol=0, atol=1e-12)
+
+
+def test_the_upward_clip_keeps_dips():
+    rng = np.random.default_rng(0)
+    f = 1 + 1e-3 * rng.standard_normal(200)
+    f[10] += 0.02                         # outlier up
+    f[20] -= 0.02                         # a transit-like dip
+    band = np.zeros(200, dtype=int)
+    keep = prep.clip_gaia(np.arange(200.0), f, np.full(200, 1e-3), band)
+    assert not keep[10] and keep[20] and keep.sum() == 199
+
+
+def test_prepare_gaia_recentres_cleans_and_reports(monkeypatch):
+    t, flux, sig, band, dev = synthetic_gaia()
+    # a band too thin to fit
+    keep = band != 2
+    keep[np.where(band == 2)[0][::20]] = True       # 7 RP points
+    lc = {"time": t[keep], "flux": flux[keep], "flux_err": sig[keep],
+          "band": band[keep].astype(np.int8), "mission": "gaia_dr3"}
+    monkeypatch.setattr(prep, "get_gaia_lightcurve",
+                        lambda *a, **k: dict(lc))
+    T = TRUTH
+    eph = dict(period=T["P"], epoch=T["t0"] - 300 * T["P"],
+               duration=T["T14"] * 24, depth=T["k"] ** 2 * 1e6)
+    logs = []
+    pd = prep.prepare_gaia("GaiaDR3-7", eph, log=logs.append)
+    assert pd.bands == ("G", "BP")
+    assert any("RP dropped" in n for n in pd.notes)
+    # recentred by whole periods onto the data
+    n = (pd.eph["epoch"] - eph["epoch"]) / T["P"]
+    assert abs(n - round(n)) < 1e-9 and pd.time.min() < pd.eph["epoch"] \
+        < pd.time.max()
+    assert set(pd.noise_chi) == {"G", "BP"}
+    assert pd.noise_chi["G"] == pytest.approx(2.0, rel=0.25)
+    assert pd.mission == "gaia_dr3" and pd.exposure_time == _EXP[0]
+
+
+def test_gaia_layout_names_and_boxes():
+    T = TRUTH
+    eph = dict(period=T["P"], epoch=T["t0"], duration=2.0, depth=1e4)
+    lay = params.gaia_layout(eph, ("G", "RP"), law="hybrid4")
+    assert lay.names == ("dP", "dtau0", "k", "beta", "T14",
+                         "q1_G", "q2_G", "q3_G", "q4_G",
+                         "q1_RP", "q2_RP", "q3_RP", "q4_RP", "lns_G", "lns_RP")
+    assert lay.bands == ("G", "RP") and lay.ld_names == ()
+    i = lay.index("lns_G")
+    assert (lay.lo[i], lay.hi[i]) == (params.LNS_LO, params.LNS_HI)
+    with pytest.raises(ValueError, match="sampled"):
+        likelihood.build_target(lay, {}, {}, [], likelihood_only=True)
+
+
+def test_hybrid4_bands_run_and_differ_by_band():
+    t, flux, sig, band, dev, eph, ed, cv, cen, _ = _gaia_fit_inputs()
+    lay = params.gaia_layout(eph, ("G", "BP", "RP"), law="hybrid4")
+    v = [0, 0, 0.12, 0.27, 0.09] + [0.5, 0.5, 0.5, 0.5] * 3 + [0.7] * 3
+    V = np.array([v, v])
+    V[1, 5] = 0.9                         # G's depth weight only
+    lp = GaiaLogProb(lay, cen, ed, cv["orders"])
+    fd = np.array(lp.flux_dev(lp.unpack(mx.array(V, dtype=mx.float32))))
+    g = (ed["band"] == 0)[:, None] & (ed["mask"] > 0)
+    assert np.abs(fd[0][g] - fd[1][g]).max() > 1e-4
+    np.testing.assert_array_equal(fd[0][~g], fd[1][~g])
+    assert np.all(np.isfinite(np.array(lp(mx.array(V, dtype=mx.float32)))))
+
+
+def test_the_float64_exp_is_exact_where_mlx_s_is_not():
+    from turin.gaialik import _exp
+    x = np.linspace(-4.0, 4.0, 4001)
+    with mx.stream(mx.cpu):
+        got = np.array(_exp(mx.array(x, dtype=mx.float64)))
+    assert np.max(np.abs(got / np.exp(x) - 1)) < 1e-14     # MLX's: 4e-7
+
+
+
+def _serve_gaia(monkeypatch, **kw):
+    t, flux, sig, band, dev = synthetic_gaia(**kw)
+    lc = {"time": t, "flux": flux, "flux_err": sig,
+          "band": band.astype(np.int8), "mission": "gaia_dr3",
+          "source": "test"}
+    monkeypatch.setattr(prep, "get_gaia_lightcurve",
+                        lambda *a, **k: {kk: (vv.copy() if hasattr(vv, "copy")
+                                              else vv)
+                                         for kk, vv in lc.items()})
+    T = TRUTH
+    # the candidate's ephemeris: right period, epoch off by 12 minutes
+    return ["--GaiaDR3-7", f"--period={T['P']}",
+            f"--t0={T['t0'] + 12 / 1440}", f"--T14={T['T14'] * 24}",
+            f"--depth={T['k'] ** 2 * 1e6}"]
+
+
+def _gaia_args(tmp_path, argv, **over):
+    a = cli.parse_args(argv)
+    for key, value in dict(chains=64, warmup=150, samples=60,
+                           max_samples=60, outdir=str(tmp_path),
+                           seed=0, **over).items():
+        setattr(a, key, value)
+    return a
+
+
+def test_gaia_pipeline_end_to_end(tmp_path, monkeypatch):
+    import os
+    import tarfile
+
     from turin import pipeline
-    a = cli.parse_args(["--GaiaDR3-1", *_EPH, f"--outdir={tmp_path}"])
-    with pytest.raises(SystemExit, match="not yet fitted"):
-        pipeline.run(a, log=lambda m: None)
+
+    argv = _serve_gaia(monkeypatch)
+    logs = []
+    code = pipeline.run(_gaia_args(tmp_path, argv), log=logs.append)
+    assert code in (0, pipeline.EXIT_UNCONVERGED)
+    text = "\n".join(logs)
+    assert "Gaia bands: G" in text and "not explored" in text
+    assert "Robust chi" in text and "MAP log-density" in text
+    names = sorted(os.listdir(tmp_path))
+    for suffix in ("_lineph_summary.csv", "_lineph_chains.csv.tar.gz",
+                   "_lineph_lcdata.csv", "_lineph_fold.pdf",
+                   "_lineph_corner.pdf", "_lineph_resume.pkl"):
+        assert any(n.endswith(suffix) for n in names), (suffix, names)
+
+    rows = {}
+    for line in open(tmp_path / "GaiaDR3-7_lineph_summary.csv"):
+        f = line.rstrip("\n").split(",")
+        if f[0] and not f[0].startswith(("#", "Parameter")):
+            rows[f[0]] = (float(f[1]), float(f[2]))
+    T = TRUTH
+    for want in ("q1_G", "q2_RP", "lns_BP", "s_G", "s_RP", "T0_TDB",
+                 "b", "log10_rho"):
+        assert want in rows, want
+    # the injected noise is twice the quoted errors in every band
+    for b in ("G", "BP", "RP"):
+        med, sd = rows[f"s_{b}"]
+        assert abs(med - 2.0) < 4 * sd + 0.2, (b, med, sd)
+    assert abs(rows["k"][0] - T["k"]) < 4 * rows["k"][1] + 0.01
+    assert abs(rows["dP"][0] - T["P"]) < 1e-3
+    # the 12-minute epoch error is found, in Gaia time
+    n = round((rows["dtau0"][0] - T["t0"]) / T["P"])
+    assert abs(rows["dtau0"][0] - (T["t0"] + n * T["P"])) * 1440 < 5
+    # and in TDB too (BJD_TDB - 2455197.5; ~19 s earlier than TCB in 2016)
+    shift = (rows["T0_TDB"][0] - rows["dtau0"][0]) * 86400
+    assert -20 < shift < -18.5
+
+    lc = (tmp_path / "GaiaDR3-7_lineph_lcdata.csv").read_text().splitlines()
+    assert lc[0] == "time,flux,flux_err,model_flux,band"
+    assert {r.split(",")[-1] for r in lc[2:]} == {"G", "BP", "RP"}
+    with tarfile.open(tmp_path / "GaiaDR3-7_lineph_chains.csv.tar.gz") as tar:
+        head = tar.extractfile(tar.getmembers()[0]).readline().decode()
+    assert "lns_G" in head and "s_G" in head and head.strip().endswith(
+        "loglike")
+    st = outputs.load_resume(str(tmp_path), "GaiaDR3-7", "lineph")
+    assert st.bands == ("G", "BP", "RP") and st.profile_mode == "exact"
+
+
+def test_gaia_map_starts_hold_the_period_at_the_candidate():
+    from turin import seeding
+    T = TRUTH
+    eph = dict(period=T["P"], epoch=T["t0"], duration=2.0, depth=1e4)
+    lay = params.gaia_layout(eph, ("G",))
+    sd = seeding.map_start_sd(lay)
+    assert sd[lay.index("dP")] == seeding.GAIA_START_SD_DP < 1e-3
+    assert sd[lay.index("k")] == seeding.MAP_START_SD
+    kep = params.lineph_layout(eph)
+    assert np.all(seeding.map_start_sd(kep) == seeding.MAP_START_SD)

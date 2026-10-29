@@ -79,6 +79,15 @@ def _exposures(prepared):
     return () if e is None else tuple(float(x) for x in np.unique(e))
 
 
+def gaia_ephemeris(args):
+    """A Gaia candidate's ephemeris from the command line, in the archive
+    dict's units: ``period`` (d), ``epoch`` (Gaia time), ``duration``
+    (hours), ``depth`` (ppm)."""
+    return dict(period=float(args.period), epoch=float(args.t0),
+                duration=float(args.T14_hours), depth=float(args.depth_ppm),
+                ingress=None)
+
+
 def _rhostar(args):
     """The ``--rhostar`` prior as the layout and the resume guard carry it:
     ``(mean, sigma)``, or ``()`` for none (so "none" is a value a resumed
@@ -123,9 +132,6 @@ def run(args, log=print):
                or law_problem(args) or collapsed_ld_problem(args))
     if problem:
         raise SystemExit(f"turin: {problem}")
-    if is_gaia_target(args.target):
-        raise SystemExit("turin: Gaia targets are read (turin.data.gaia) but "
-                         "not yet fitted; the Gaia likelihood comes next")
     _outputs.set_run_status("")
     _outputs.set_run_tag(args.tag)
     target = args.target
@@ -142,9 +148,15 @@ def run(args, log=print):
             log(f"  --fresh: removed {len(removed)} existing product(s)")
 
     t_start = time.perf_counter()
-    prepared = _prep.prepare_data(
-        target, ttv_max_days=args.ttv_max_days or 0.0,
-        sc_override=args.sc_override, log=log)
+    gaia = is_gaia_target(target)
+    if gaia:
+        prepared = _prep.prepare_gaia(target, gaia_ephemeris(args),
+                                      lcfile=getattr(args, "lcfile", None),
+                                      log=log)
+    else:
+        prepared = _prep.prepare_data(
+            target, ttv_max_days=args.ttv_max_days or 0.0,
+            sc_override=args.sc_override, log=log)
 
     if _exposures(prepared) and args.geometry != "circular":
         raise ValueError(
@@ -155,10 +167,16 @@ def run(args, log=print):
     if getattr(args, "replot", False):
         return replot(args, prepared, outdir, log=log)
 
-    log(f"[{target}] Cross-validating Legendre orders...")
-    cv = _prep.cv_orders(prepared.epoch_data, prepared.eph["duration"],
-                         tau_shift_max=args.ttv_max_days or 0.0,
-                         log=lambda m: log(f"  {m}"))
+    if gaia:
+        log(f"[{target}] Cross-validating each band's baseline order...")
+        cv = _prep.cv_band_orders(prepared.epoch_data,
+                                  prepared.eph["duration"],
+                                  log=lambda m: log(f"  {m}"))
+    else:
+        log(f"[{target}] Cross-validating Legendre orders...")
+        cv = _prep.cv_orders(prepared.epoch_data, prepared.eph["duration"],
+                             tau_shift_max=args.ttv_max_days or 0.0,
+                             log=lambda m: log(f"  {m}"))
 
     if getattr(args, "mle", False):
         code = _run_mle(args, prepared, cv, outdir, log=log)
@@ -350,6 +368,11 @@ def _mode_layout(mode, args, prepared, centering, epoch_data):
                                   b_prior=args.b_prior,
                                   law=getattr(args, "law", "quadratic"),
                                   rhostar=_rhostar(args)), tau_half
+    if prepared.bands:
+        return _params.gaia_layout(prepared.eph, prepared.bands,
+                                   b_prior=args.b_prior,
+                                   law=getattr(args, "law", "quadratic"),
+                                   rhostar=_rhostar(args)), None
     return _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
                                  ld=getattr(args, "ld", "sampled"),
                                  law=getattr(args, "law", "quadratic"),
@@ -731,6 +754,7 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             rhostar=_rhostar(args))
         prior_state.check_exposure(prepared.exposure_time,
                                    _exposures(prepared))
+        prior_state.check_bands(prepared.bands)
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -760,6 +784,10 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             "exact", "required by --ld=collapsed: the omega gradient and "
             "Hessian come from the envelope theorem, which needs the exact "
             "flux-space profile")
+    elif layout.bands:
+        pl_choice = _plselect.fixed_choice(
+            "exact", "Gaia: each band's baseline is solved exactly over the "
+            "whole light curve")
     elif layout.oblate and args.profile_mode == "auto":
         pl_choice = _plselect.fixed_choice(
             "exact", "--oblate: probing the solves would cost dozens of "
@@ -789,7 +817,18 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         log(f"  limb darkening ({layout.law}): collapsed -- integrated out of "
             f"the log-density; {', '.join(_model_ld_names(layout.law))} drawn "
             "afterwards from their exact conditional")
-    if _exposures(prepared):
+    if layout.bands:
+        from .data.gaia import EXPOSURE_DAYS
+
+        log("  Gaia bands: " + ", ".join(
+            f"{b} ({EXPOSURE_DAYS[b] * 86400:.3g} s exposure, order "
+            f"{cv['band_orders'][_gaia_code(b)]} baseline)"
+            for b in layout.bands)
+            + "; each with its own limb darkening and error scale")
+        log("  the period stays on the peak the input ephemeris names: "
+            "rival peaks of a sparse light curve are not explored (fit "
+            "another with its --period)")
+    elif _exposures(prepared):
         log("  exposures: "
             + ", ".join(f"{e * 1440:.3g} min" for e in _exposures(prepared))
             + f" -- {len(_exposures(prepared))} cadences in this light curve, "
@@ -847,6 +886,12 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
                         "peak further from the prediction, or a window "
                         "edge)")
 
+    if layout.bands:
+        # each band's error scale starts at its robust chi out of transit
+        shape0 = {f"lns_{b}": float(np.clip(
+            math.log(max(prepared.noise_chi.get(b, 1.0), 1e-3)),
+            _params.LNS_LO + 0.05, _params.LNS_HI - 0.05))
+            for b in layout.bands}
     v0 = _seeding.initial_model_vector(layout, prepared.eph, shape=shape0,
                                        dtau=seeds)
     cfg = _sampling.SamplerConfig(
@@ -870,7 +915,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         rng = np.random.default_rng(args.seed)
         log("  finding the MAP from 128 starts (anvil.optimize)...")
         u_starts = (transform.from_model_np(v0)[None, :]
-                    + 0.25 * rng.standard_normal((128, layout.dim)))
+                    + _seeding.map_start_sd(layout)
+                    * rng.standard_normal((128, layout.dim)))
         map_res = _seeding.find_map(target_obj, u_starts, seed=args.seed)
         n_conv = int(np.sum(map_res.status == "converged"))
         log(f"    MAP log-density {map_res.value:.3f} in "
@@ -1058,6 +1104,21 @@ def _fold_figure(mode, target, outdir, lp, v_ml, layout, centering,
     (``mode`` by default; ``--mle`` writes ``lineph_mle``)."""
     stem = stem or mode
     mid_abs = _mid_times_absolute(mode, v_ml, layout, centering)
+    if layout.bands:
+        try:
+            real = np.asarray(epoch_data["mask"]) > 0
+            T14 = float(v_ml[layout.index("T14")])
+            curves = _plots.gaia_model_grids(lp, v_ml, half_span=3.0 * T14)
+            scales = {b: math.exp(float(v_ml[layout.index(f"lns_{b}")]))
+                      for b in layout.bands}
+            _plots.gaia_fold_plot(
+                _outputs.product_path(outdir, target, stem, "fold", "pdf"),
+                epoch_data=epoch_data, mid_times=mid_abs, baseline=baseline,
+                curves=curves, scales=scales, T14=T14,
+                title=f"{target} {stem}", log=log)
+        except Exception as exc:
+            log(f"    fold plot skipped: {exc}")
+        return
     try:
         # span the folded data itself, whatever the window width
         real = np.asarray(epoch_data["mask"]) > 0
@@ -1098,6 +1159,41 @@ def _ml_model(lp, v_ml, collapsed):
                             dtype=np.float64)[0]
     return model, baseline, q_ml
 
+
+
+def _gaia_code(label):
+    from .data.gaia import BANDS
+
+    return BANDS.index(label)
+
+
+def _gaia_derived(layout, phys, names):
+    """A Gaia fit's derived rows: each band's error scale ``s_<band>`` (the
+    factor on its catalogue errors), a hybrid4 band's weights
+    ``w1_<band>..``, and the reference epoch in TDB as ``T0_TDB`` =
+    BJD_TDB - 2455197.5 (the sampled epoch is Gaia time, BJD_TCB -
+    2455197.5; other surveys' ephemerides are BJD_TDB). The same offset as
+    Gaia time, because a full BJD (~2.46e6) printed to the products' 11
+    significant figures resolves only ~20 s. Returns ``(names, (n, k)
+    draws)``."""
+    from .data.gaia import gaia_time_to_tdb
+    from .model import ld_names, ld_weights_np
+
+    out_n, out = [], []
+    for band in layout.bands:
+        out_n.append(f"s_{band}")
+        out.append(np.exp(phys[:, names.index(f"lns_{band}")]))
+    if layout.law != "quadratic":
+        qn = ld_names(layout.law)
+        for band in layout.bands:
+            q = np.column_stack([phys[:, names.index(f"{n}_{band}")]
+                                 for n in qn])
+            w = ld_weights_np(q, layout.law)
+            out_n += [f"w{j + 1}_{band}" for j in range(len(qn))]
+            out += [w[:, j] for j in range(len(qn))]
+    out_n.append("T0_TDB")
+    out.append(gaia_time_to_tdb(phys[:, names.index("dtau0")]))
+    return out_n, np.column_stack(out)
 
 
 def _ld_weight_draws(layout, phys, names):
@@ -1230,8 +1326,10 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         np.column_stack([b_draws, rho]), ["b", "log10_rho"])
     summary.update(derived)
     # hybrid4: the physical shape weights w, derived from the sampled q
-    # (uniform on the cube -> uniform on the simplex), reported beside them
-    w_names, w_draws = _ld_weight_draws(layout, phys, names)
+    # (uniform on the cube -> uniform on the simplex), reported beside them;
+    # Gaia: each band's error scale, weights and the BJD_TDB epoch
+    w_names, w_draws = (_gaia_derived(layout, phys, names) if layout.bands
+                        else _ld_weight_draws(layout, phys, names))
     if w_names:
         summary.update(_outputs.summarize(w_draws, w_names))
     # oblate: f, theta (degrees) and the semi-axes, derived from fc, fs, k
@@ -1313,6 +1411,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         ld=layout.ld, law=layout.law, oblate=layout.oblate,
         rhostar=layout.rhostar, exposures=_exposures(prepared),
+        bands=tuple(layout.bands),
         ghk_layout=getattr(lp, "ghk_layout", None),
         ghk_points=getattr(lp, "ghk_points", None),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,

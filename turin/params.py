@@ -111,6 +111,10 @@ class ParamLayout:
     #: Gaussian prior on log10(rho*/kg m^-3) as ``(mean, sigma)``; ``()``
     #: for none (:func:`rhostar_log_prior`)
     rhostar: tuple = ()
+    #: Gaia (:func:`gaia_layout`): the bands fitted, by label. Each has its
+    #: own limb darkening ``<q>_<band>`` and error scale ``lns_<band>``;
+    #: empty for Kepler and TESS.
+    bands: tuple = ()
 
     @property
     def ld_names(self) -> tuple:
@@ -263,6 +267,52 @@ def ttv_layout(eph, centering, tau_half, b_prior="transiting", T14_max=None,
         P_ref=float(eph["period"]), tau0_ref=float(eph["epoch"]),
         n_arr=n_arr, centers_abs=centers, ld=ld, law=law,
         oblate=bool(oblate), rhostar=_rhostar(rhostar))
+
+
+#: Box of a Gaia band's log error scale, ``lns = ln s`` with each point's
+#: catalogue error multiplied by ``s`` (uniform in ``ln s``: scale-free).
+#: Gaia DR3's robust chi out of transit runs 0.8-8.2 per band on 13 known
+#: planets (MetalLS: median 2.85, 90th percentile 16 over a random sample).
+LNS_LO = math.log(0.3)
+LNS_HI = math.log(30.0)
+
+
+def gaia_ld_name(name, band):
+    """A Gaia band's limb-darkening coordinate: ``q1`` of G is ``q1_G``."""
+    return f"{name}_{band}"
+
+
+def gaia_layout(eph, bands, b_prior="transiting", T14_max=None,
+                law="quadratic", rhostar=()):
+    """The LinEph layout of a Gaia fit: ``dP, dtau0, k, beta, T14``, each
+    band's limb darkening (``q1_G, q2_G, q1_BP, ...``), then each band's log
+    error scale (``lns_G, ...``). Bands share the geometry; each has its own
+    limb darkening (a different passband) and its own catalogue-error
+    calibration. Sampled limb darkening only."""
+    if b_prior not in B_PRIORS:
+        raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
+    if law not in LAWS:
+        raise ValueError(f"unknown limb-darkening law {law!r}; expected {LAWS}")
+    bands = tuple(bands)
+    if not bands:
+        raise ValueError("a Gaia layout needs at least one band")
+    rows = [("dP", -DP_HALF, DP_HALF), ("dtau0", -DTAU0_HALF, DTAU0_HALF)]
+    shape = list(_shape_bounds(eph, T14_max=T14_max, law=law))
+    rows += shape[:3]
+    for band in bands:
+        rows += [(gaia_ld_name(n, band), 0.0, 1.0) for n in ld_names(law)]
+    rows += [(f"lns_{band}", LNS_LO, LNS_HI) for band in bands]
+    names = tuple(r[0] for r in rows)
+    off = np.zeros(len(rows))
+    off[0] = float(eph["period"])
+    off[1] = float(eph["epoch"])
+    return ParamLayout(mode="lineph", names=names,
+                       lo=np.array([r[1] for r in rows], dtype=np.float64),
+                       hi=np.array([r[2] for r in rows], dtype=np.float64),
+                       report_offset=off, b_prior=b_prior,
+                       P_ref=float(eph["period"]),
+                       tau0_ref=float(eph["epoch"]), ld="sampled", law=law,
+                       rhostar=_rhostar(rhostar), bands=bands)
 
 
 def _rhostar(prior):

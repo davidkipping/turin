@@ -489,3 +489,148 @@ def solve_coefficients_np(epoch_data, orders, f_transit, mode="exact"):
             AtW = A.T * w[None, :]
             out[ch, e, :k] = np.linalg.solve(AtW @ A, AtW @ target)
     return out
+
+
+# -- one baseline per band, shared across rows (Gaia) -------------------------
+
+
+@dataclass
+class SharedDesign:
+    """Static tensors for a baseline shared by groups of rows (Gaia's bands).
+
+    Rows are :class:`ProfileDesign`'s epochs; each belongs to one group, and
+    every row of a group has the same ``1 + L c`` polynomial in one
+    coordinate across the whole light curve, so a group's coefficients solve
+    one system summed over its rows. Exact flux-space profile only.
+    ``L``, ``y_dev``, ``inv_sigma`` and ``mask`` are what
+    :func:`residual_dev` and :func:`chi2_terms` read, so those are shared.
+    """
+
+    L: mx.array          # (E, P, n) Legendre design, inactive columns zeroed
+    Lw: mx.array         # (E, P, n) L scaled by the group's solve weights
+    G: mx.array          # (E, P, n, n) Lw_i * L_j
+    share: mx.array      # (B, E) 1 where row e belongs to group b
+    diag_fix: mx.array   # (B, n, n) puts 1 on each group's inactive diagonal
+    y_dev: mx.array      # (E, P) observed flux MINUS 1, padded with 0.0
+    inv_sigma: mx.array  # (E, P) 1/sigma, padded points zeroed
+    mask: mx.array       # (E, P) 1.0 for real points
+    group: np.ndarray    # (E,) each row's group index, host-side
+    orders: np.ndarray   # (B,) each group's order, after capping
+    n_real_group: np.ndarray   # (B,) real points per group, host-side
+    n_real: int
+    #: float64 host constant, as ProfileDesign's (error scales excluded)
+    log_const: float
+    n_cols: int
+    dtype: mx.Dtype
+
+
+def build_shared_design(epoch_data, orders, group, x, dtype=mx.float32):
+    """The :class:`SharedDesign` for rows grouped by ``group`` (row -> 0..B-1).
+
+    ``orders`` is one per group; each is capped at the group's real points
+    minus one. ``x`` is the baseline coordinate of every slot,
+    ``(E, P)`` (``prep.gaia_basis_x``). The solve weights are normalised by
+    one scale **per group**: the group's coefficients solve one weighted
+    system, which is invariant to a common scale but not to one per row.
+    """
+    flux = np.asarray(epoch_data["flux_padded"], dtype=np.float64)
+    ferr = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
+    mask = np.asarray(epoch_data["mask"], dtype=np.float64)
+    group = np.asarray(group, dtype=np.int64)
+    n_rows, max_pts = flux.shape
+    n_groups = int(group.max()) + 1
+    n_real_group = np.array([int(mask[group == b].sum())
+                             for b in range(n_groups)])
+    orders = np.clip(np.asarray(orders, dtype=int), 0,
+                     np.maximum(n_real_group - 1, 0))
+    if orders.shape != (n_groups,):
+        raise ValueError(f"orders has shape {orders.shape}, expected "
+                         f"({n_groups},)")
+    n_cols = int(orders.max()) + 1
+    x = np.where(mask > 0, np.asarray(x, dtype=np.float64), 0.0)
+
+    L = np.zeros((n_rows, max_pts, n_cols))
+    for i in range(n_rows):
+        Li = legendre_matrix(x[i], n_cols - 1)
+        Li[:, orders[group[i]] + 1:] = 0.0
+        L[i] = Li
+
+    inv_var = mask / np.maximum(ferr, 1e-300) ** 2
+    scale = np.ones(n_groups)
+    for b in range(n_groups):
+        v = inv_var[(group == b)[:, None] & (mask > 0)]
+        if v.size and np.isfinite(np.median(v)) and np.median(v) > 0:
+            scale[b] = np.median(v)
+    w_solve = inv_var / scale[group][:, None]
+    Lw = w_solve[:, :, None] * L
+    G = Lw[:, :, :, None] * L[:, :, None, :]
+
+    share = np.zeros((n_groups, n_rows))
+    share[group, np.arange(n_rows)] = 1.0
+    diag_fix = np.zeros((n_groups, n_cols, n_cols))
+    for b in range(n_groups):
+        for j in range(orders[b] + 1, n_cols):
+            diag_fix[b, j, j] = 1.0
+
+    inv_sigma = np.where(mask > 0, 1.0 / np.maximum(ferr, 1e-300), 0.0)
+    n_real = int(mask.sum())
+    log_sigma_sum = float(np.sum(np.where(
+        mask > 0, np.log(np.maximum(ferr, 1e-300)), 0.0)))
+    log_const = (-0.5 * n_real - log_sigma_sum
+                 - 0.5 * n_real * math.log(2.0 * math.pi))
+    up = lambda a: mx.array(np.ascontiguousarray(a), dtype=dtype)
+    return SharedDesign(
+        L=up(L), Lw=up(Lw), G=up(G), share=up(share), diag_fix=up(diag_fix),
+        y_dev=up(flux - 1.0), inv_sigma=up(inv_sigma), mask=up(mask),
+        group=group, orders=orders, n_real_group=n_real_group, n_real=n_real,
+        log_const=log_const, n_cols=n_cols, dtype=dtype)
+
+
+def solve_shared_coefficients(design, f_dev):
+    """Each group's profiled coefficients, broadcast to its rows:
+    ``(n_chains, n_rows, n_cols)``.
+
+    The exact normal equations of ``sum w (y - f (1 + L c))^2`` over a
+    group's rows: each row's ``L^T W F^2 L`` and ``L^T W F (y - f)``, as in
+    :func:`solve_coefficients`, summed over the group (``share``), solved
+    once per group, and each row given its group's solution.
+    """
+    d = design
+    n = d.n_cols
+    f = 1.0 + f_dev
+    resid = d.y_dev - f_dev
+    M = mx.einsum("be,ceij->cbij", d.share,
+                  mx.einsum("epij,cep->ceij", d.G, f * f))
+    rhs = mx.einsum("be,cei->cbi", d.share,
+                    mx.einsum("epi,cep->cei", d.Lw, f * resid))
+    M = M + d.diag_fix[None]
+    ridge = RIDGE_REL.get(M.dtype, RIDGE_REL_DEFAULT)
+    M = M * (1.0 + ridge * mx.eye(n, dtype=M.dtype)[None, None])
+    c = _cholesky_solve(M, rhs, n)                     # (C, B, n)
+    return mx.einsum("be,cbi->cei", d.share, c)
+
+
+def solve_shared_coefficients_np(epoch_data, orders, group, x, f_transit):
+    """Float64 NumPy reference for :func:`solve_shared_coefficients`,
+    written from the normal equations with ``np.linalg.solve`` on each
+    group's real points. ``f_transit`` is the absolute flux, ``(C, E, P)``;
+    returns each group's coefficients, ``(C, B, n_cols)``."""
+    flux = np.asarray(epoch_data["flux_padded"], dtype=np.float64)
+    ferr = np.asarray(epoch_data["ferr_padded"], dtype=np.float64)
+    mask = np.asarray(epoch_data["mask"]) > 0
+    group = np.asarray(group)
+    f_transit = np.atleast_3d(np.asarray(f_transit, dtype=np.float64))
+    n_groups = int(group.max()) + 1
+    n_cols = int(np.max(orders)) + 1
+    out = np.zeros((f_transit.shape[0], n_groups, n_cols))
+    for b in range(n_groups):
+        sel = mask & (group == b)[:, None]
+        k = int(orders[b]) + 1
+        Lb = legendre_matrix(np.asarray(x)[sel], k - 1)
+        w = 1.0 / ferr[sel] ** 2
+        for ch in range(f_transit.shape[0]):
+            f = f_transit[ch][sel]
+            A = f[:, None] * Lb
+            AtW = A.T * w[None, :]
+            out[ch, b, :k] = np.linalg.solve(AtW @ A, AtW @ (flux[sel] - f))
+    return out

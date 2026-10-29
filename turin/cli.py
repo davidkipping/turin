@@ -403,7 +403,7 @@ def gaia_problem(args):
         return ("Gaia targets fit LinEph only (--modes=lineph): with about "
                 "one point per transit there is no per-transit time to fit")
     for flag, name in (("--mle", "mle"), ("--oblate", "oblate"),
-                       ("--sc", "sc_override")):
+                       ("--sc", "sc_override"), ("--replot", "replot")):
         if getattr(args, name, False):
             return f"{flag} is not available for Gaia targets"
     if getattr(args, "ld", None) == "collapsed":

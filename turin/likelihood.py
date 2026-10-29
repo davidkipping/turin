@@ -387,7 +387,12 @@ def build_target(layout, centering, epoch_data, orders, *, fp64=True,
     if ld != layout.ld:
         raise ValueError(f"ld_mode={ld_mode!r} but the layout was built with "
                          f"ld={layout.ld!r}")
-    if ld == "collapsed" and layout.law == "hybrid4":
+    if getattr(layout, "bands", ()):
+        if likelihood_only or ld != "sampled":
+            raise ValueError("a Gaia layout is sampled, with sampled limb "
+                             "darkening")
+        from .gaialik import GaiaLogProb as cls
+    elif ld == "collapsed" and layout.law == "hybrid4":
         if likelihood_only:
             from .ldhybrid import ProfileHybridLogProb as cls
         else:
