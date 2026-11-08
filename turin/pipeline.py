@@ -1035,7 +1035,8 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         # ~150 points), prior included
         move = _gibbs.EphemerisGibbs(
             lp, transform, layout, seed=args.seed,
-            units=_params.gaia_peak_box(prepared.eph, prepared.time)[2:])
+            units=_params.gaia_peak_box(prepared.eph, prepared.time)[2:],
+            de=_gibbs.EnsembleDE(target_obj, layout, seed=args.seed + 1))
     elif _gibbsgrid(mode, args) == "on":
         from . import gibbs as _gibbs
 

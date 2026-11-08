@@ -607,15 +607,11 @@ def test_the_box_is_the_seeded_peak():
     assert params.gaia_peak_box(wide, t)[1] == pytest.approx(T["P"] / 4)
 
 
-def test_the_ephemeris_move_leaves_the_exact_conditional_invariant():
-    """Draw (dP, dtau0) from their exact conditional at a fixed shape on a
-    dense grid, sweep once with a coarse grid, and the draws must still
-    follow it. Without the MH correction the same sweep fails by KS
-    statistics of 0.08 (p ~ 1e-100); measured in review."""
-    from scipy import stats
-
-    from turin import gibbs
-
+def _exact_ephemeris_draws(C=20000, seed=1):
+    """Draws of (dP, dtau0) from their exact conditional at a fixed shape,
+    from a dense grid zoomed onto the mass. Returns the layout, ``lp``, the
+    transform, the box, the draws (model space) and the two marginal
+    references ``(column, grid, cell masses)``."""
     t, flux, sig, band, dev, eph, ed, cv, cen, _ = _gaia_fit_inputs()
     box = params.gaia_peak_box(eph, t)
     lay = params.gaia_layout(eph, ("G", "BP", "RP"), box=box[:2])
@@ -645,26 +641,114 @@ def test_the_ephemeris_move_leaves_the_exact_conditional_invariant():
             min(np.searchsorted(cT, 1 - 1e-6) + 3, 300))
     gP, gT, p = dense(gP[a], gP[b], gT[c], gT[d])
 
-    rng = np.random.default_rng(1)
-    C = 20000
+    rng = np.random.default_rng(seed)
     i, j = np.divmod(rng.choice(p.size, size=C, p=p.ravel()), 300)
     V = np.repeat(v0[None], C, axis=0)
     V[:, iP] = gP[i] + (gP[1] - gP[0]) * rng.uniform(size=C)
     V[:, iT] = gT[j] + (gT[1] - gT[0]) * rng.uniform(size=C)
+    return lay, lp, tr, box, V, ((iP, gP, p.sum(1)), (iT, gT, p.sum(0)))
 
+
+def _assert_marginals(v1, lay, refs):
+    from scipy import stats
+
+    for col, grid, m in refs:
+        cdf = np.concatenate([[0.0], np.cumsum(m)])
+        res = stats.kstest(v1[:, col], lambda x: np.interp(x, grid, cdf))
+        assert res.pvalue > 1e-3, (lay.names[col], res)
+
+
+def test_the_ephemeris_move_leaves_the_exact_conditional_invariant():
+    """Draw (dP, dtau0) from their exact conditional at a fixed shape on a
+    dense grid, sweep once with a coarse grid, and the draws must still
+    follow it. Without the MH correction the same sweep fails by KS
+    statistics of 0.08 (p ~ 1e-100); measured in review."""
+    from turin import gibbs
+
+    lay, lp, tr, box, V, refs = _exact_ephemeris_draws()
     move = gibbs.EphemerisGibbs(lp, tr, lay, units=box[2:], n_grid=64,
                                 seed=2)
     u1, st = move.sweep(tr.from_model_np(V))
     v1 = tr.model_np(u1)
     assert 0.05 < st.accept.min() and st.accept.max() < 0.95
     # the shape is untouched
-    others = [k for k in range(lay.dim) if k not in (iP, iT)]
+    others = [k for k in range(lay.dim) if k not in (refs[0][0], refs[1][0])]
     np.testing.assert_allclose(v1[:, others], V[:, others], rtol=1e-12,
                                atol=1e-12)
-    for col, grid, m in ((iP, gP, p.sum(1)), (iT, gT, p.sum(0))):
-        cdf = np.concatenate([[0.0], np.cumsum(m)])
-        res = stats.kstest(v1[:, col], lambda x: np.interp(x, grid, cdf))
-        assert res.pvalue > 1e-3, (lay.names[col], res)
+    _assert_marginals(v1, lay, refs)
+
+
+def test_the_de_move_leaves_the_exact_conditional_invariant():
+    """The same exact conditional draws, then DE steps along (dP, dtau0)
+    against the sampler's density in u: the draws must still follow it, and
+    the move must have moved them."""
+    import anvil
+
+    from turin import gibbs
+
+    lay, lp, tr, box, V, refs = _exact_ephemeris_draws(seed=3)
+    target = anvil.TransformedLogDensity(lp, tr)
+    de = gibbs.EnsembleDE(target, lay, n_steps=5, cols=("dP", "dtau0"),
+                          seed=4)
+    u0 = tr.from_model_np(V)
+    u1, acc, move = de.run(u0)
+    v1 = tr.model_np(u1)
+    assert 0.05 < acc < 0.95 and move.min() > 0.3, (acc, move)
+    others = [k for k in range(lay.dim) if k not in (refs[0][0], refs[1][0])]
+    np.testing.assert_allclose(v1[:, others], V[:, others], rtol=1e-9,
+                               atol=1e-12)
+    _assert_marginals(v1, lay, refs)
+
+
+class _Banana:
+    """A 5-D banana in u with exact draws: x0 ~ N(0, 1), x1 = 0.8 (x0^2 - 1)
+    + 0.3 z, x2 = 0.9 x0 + 0.2 z', x3, x4 ~ N(0, 1)."""
+
+    names = ("dP", "dtau0", "k", "beta", "T14")
+
+    def index(self, name):
+        return self.names.index(name)
+
+    def log_prob(self, u):
+        x0, x1, x2, x3, x4 = (u[:, i] for i in range(5))
+        return -(0.5 * x0 ** 2 + 0.5 * ((x1 - 0.8 * (x0 ** 2 - 1)) / 0.3) ** 2
+                 + 0.5 * ((x2 - 0.9 * x0) / 0.2) ** 2 + 0.5 * x3 ** 2
+                 + 0.5 * x4 ** 2)
+
+    def draws(self, C, rng):
+        z = rng.standard_normal((C, 5))
+        x0 = z[:, 0]
+        return np.column_stack([x0, 0.8 * (x0 ** 2 - 1) + 0.3 * z[:, 1],
+                                0.9 * x0 + 0.2 * z[:, 2], z[:, 3], z[:, 4]])
+
+
+@pytest.mark.parametrize("mh", [True, False])
+def test_the_de_move_leaves_a_curved_posterior_invariant(mh, monkeypatch):
+    """Exact draws of a curved, coupled 5-D posterior through 20 DE steps of
+    every coordinate: each marginal and the banana's two conditional
+    residuals keep their exact laws. With the Metropolis test removed the
+    same check fails (the mutation is the ``mh=False`` case)."""
+    from scipy import stats
+
+    from turin import gibbs
+
+    ban = _Banana()
+    rng = np.random.default_rng(5)
+    u0 = ban.draws(20000, rng)
+    de = gibbs.EnsembleDE(ban, ban, n_steps=20, seed=6)
+    if not mh:
+        monkeypatch.setattr(de, "_log_prob",
+                            lambda U: np.zeros(U.shape[0]))
+    u1, acc, move = de.run(u0)
+    x0, x1, x2 = u1[:, 0], u1[:, 1], u1[:, 2]
+    checks = (x0, (x1 - 0.8 * (x0 ** 2 - 1)) / 0.3, (x2 - 0.9 * x0) / 0.2,
+              u1[:, 3], u1[:, 4])
+    p = min(stats.kstest(c, "norm").pvalue for c in checks)
+    if mh:
+        assert 0.05 < acc < 0.95 and move.min() > 0.5, (acc, move)
+        assert p > 1e-3, p
+    else:
+        assert p < 1e-10, p
 
 
 def test_only_gaia_and_ttv_fits_get_a_gibbs_move(tmp_path, monkeypatch):

@@ -152,6 +152,8 @@ class EphemerisSweepStats:
 
     accept: np.ndarray        # (2,) MH acceptance for dP, dtau0
     jump: np.ndarray          # (2,) fraction moved by more than one unit
+    de_accept: float = np.nan  # the DE steps' acceptance
+    de_move: np.ndarray = None  # (2,) their rms move in dP, dtau0, in sd
 
 
 class EphemerisGibbs:
@@ -176,16 +178,19 @@ class EphemerisGibbs:
     (~150 points) makes cheap.
 
     ``lp`` is the float32 model-space log-density the sampler targets, prior
-    included; ``units`` the two resolution units, for the log.
+    included; ``units`` the two resolution units, for the log; ``de``, if
+    given, an :class:`EnsembleDE` run after each sweep.
     """
 
-    label = "the period and epoch"
-
     def __init__(self, lp, transform, layout, *, units, n_grid=N_GRID,
-                 segment=SEGMENT, batch=16384, seed=0):
+                 segment=SEGMENT, batch=16384, seed=0, de=None):
         if not layout.bands:
             raise ValueError("the ephemeris Gibbs move is for Gaia fits")
         self.lp, self.transform, self.layout = lp, transform, layout
+        self.de = de
+        self.label = "the period and epoch" + (
+            "" if de is None else
+            f", then {de.n_steps} DE steps on {', '.join(de.col_names)},")
         self.segment = int(segment)
         self.batch = int(batch)
         self.rng = np.random.default_rng(seed)
@@ -246,16 +251,115 @@ class EphemerisGibbs:
         :class:`EphemerisSweepStats`."""
         v = self.transform.model_np(np.asarray(u, dtype=np.float64))
         acc, jump = zip(*(self._step(v, i) for i in (0, 1)))
-        return (self.transform.from_model_np(v),
-                EphemerisSweepStats(accept=np.array(acc),
-                                    jump=np.array(jump)))
+        u = self.transform.from_model_np(v)
+        st = EphemerisSweepStats(accept=np.array(acc), jump=np.array(jump))
+        if self.de is not None:
+            u, st.de_accept, move = self.de.run(u)
+            st.de_move = move[:2]
+        return u, st
 
     def describe(self, stats, t_gibbs, elapsed):
         """One log line per round."""
         acc = np.mean([s.accept for s in stats], axis=0)
         jump = np.mean([s.jump for s in stats], axis=0)
-        return (f"  ephemeris Gibbs: {len(stats)} sweeps, {t_gibbs:.1f}s "
+        line = (f"  ephemeris Gibbs: {len(stats)} sweeps, {t_gibbs:.1f}s "
                 f"({t_gibbs / max(elapsed, 1e-9):.0%} of the round), MH "
                 f"acceptance dP {acc[0]:.2f}, dtau0 {acc[1]:.2f}; chains "
                 f"moving more than one resolution unit per sweep: dP "
                 f"{jump[0]:.0%}, dtau0 {jump[1]:.0%}")
+        if self.de is None:
+            return line
+        move = np.mean([s.de_move for s in stats], axis=0)
+        return (line + f"\n  DE steps: acceptance "
+                f"{np.mean([s.de_accept for s in stats]):.3f}; rms move per "
+                f"sweep in the ensemble's sd: dP {move[0]:.2f}, dtau0 "
+                f"{move[1]:.2f} (an independent redraw is 1.41)")
+
+
+#: Differential-evolution steps after each ephemeris Gibbs sweep. At
+#: Kepler-12 b's (Gaia DR3) final positions, 512 chains, 100 steps took
+#: 0.35 s and moved dP and dtau0 by ~1.0 sd rms, 200 by 1.3 (1.41 is an
+#: independent redraw); a Gibbs sweep took 0.27 s.
+DE_STEPS = 100
+#: The coordinates DE proposes along: the geometry, through which the
+#: period and epoch are coupled to the shape. Over all 14 coordinates the
+#: same steps moved dP and dtau0 half as far (acceptance 1.9% vs 1.6%).
+DE_COLS = ("dP", "dtau0", "k", "beta", "T14")
+#: Share of proposals at gamma = 1, which jumps between the ensemble's
+#: clusters (ter Braak 2006).
+DE_UNIT_GAMMA = 0.1
+#: Gaussian jitter added to every proposal, in u, so the move is
+#: irreducible; far below any posterior width.
+DE_JITTER = 1e-6
+
+
+class EnsembleDE:
+    """Differential-evolution Metropolis steps (ter Braak 2006) on a Gaia
+    fit's geometric coordinates, run after each :class:`EphemerisGibbs`
+    sweep.
+
+    Why it exists. With one point in transit per band (Kepler-12 b), that
+    point's depth fixes where it lies inside the transit for a given k, b
+    and T14, so the epoch moves with the shape. The Gibbs move redraws dP
+    and dtau0 at a fixed shape, where each chain's conditional is 3-6x
+    narrower than the marginal, and ChEES crawls along the coupled
+    direction. A proposal along the difference of two other chains follows
+    the ensemble's own shape, coupling included.
+
+    Why it is exact. The chains are split at random into two halves; each
+    chain of one half proposes ``x + gamma (x_j - x_k) + eps`` from two
+    distinct chains of the other half, which is held fixed meanwhile, so the
+    proposal is symmetric and a Metropolis test against the sampler's own
+    log-density in u (Jacobian included) leaves the joint posterior of all
+    chains invariant; then the halves swap. The chains become dependent,
+    as in any ensemble sampler, and the move cannot reach a region no chain
+    spans: the Gibbs move and ChEES explore, DE moves along what they found.
+
+    ``target`` is the anvil target the sampler runs (``log_prob(u)``).
+    """
+
+    def __init__(self, target, layout, *, n_steps=DE_STEPS, cols=DE_COLS,
+                 seed=0):
+        self.target = target
+        self.n_steps = int(n_steps)
+        self.col_names = tuple(cols)
+        self.cols = np.array([layout.index(c) for c in cols])
+        self.gamma = 2.38 / np.sqrt(2 * len(self.cols))
+        self.rng = np.random.default_rng(seed)
+
+    def _log_prob(self, U):
+        return np.array(self.target.log_prob(mx.array(U, dtype=mx.float32)),
+                        dtype=np.float64)
+
+    def run(self, u):
+        """``n_steps`` steps of every chain from ``u`` (``(n_chains,
+        dim)``). Returns the new positions, the acceptance, and each
+        coordinate's rms move in units of the ensemble's sd at the start."""
+        u = np.array(u, dtype=np.float64)
+        C, d, cols, rng = u.shape[0], len(self.cols), self.cols, self.rng
+        if C < 6:
+            raise ValueError("the DE move needs at least 6 chains")
+        u0 = u[:, cols].copy()
+        lp = self._log_prob(u)
+        acc = []
+        for _ in range(self.n_steps):
+            perm = rng.permutation(C)
+            halves = (perm[:C // 2], perm[C // 2:])
+            for A, B in (halves, halves[::-1]):
+                n, m = len(A), len(B)
+                j = rng.integers(0, m, n)
+                k = (j + rng.integers(1, m, n)) % m      # k != j
+                gam = np.where(rng.uniform(size=(n, 1)) < DE_UNIT_GAMMA,
+                               1.0, self.gamma)
+                prop = u[A]
+                prop[:, cols] += (gam * (u[B[j]][:, cols] - u[B[k]][:, cols])
+                                  + DE_JITTER * rng.standard_normal((n, d)))
+                lp_new = self._log_prob(prop)
+                with np.errstate(invalid="ignore"):
+                    ok = np.log(rng.uniform(size=n)) < lp_new - lp[A]
+                u[A[ok]] = prop[ok]
+                lp[A[ok]] = lp_new[ok]
+                acc.append(ok.mean())
+        sd = np.maximum(u0.std(axis=0), 1e-300)
+        move = np.sqrt(np.mean((u[:, cols] - u0) ** 2, axis=0)) / sd
+        return u, float(np.mean(acc)), move
