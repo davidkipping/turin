@@ -417,7 +417,8 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
     a round that fails the convergence gates still contributes its samples,
     so extending is cheap in both warmup and information.
 
-    ``move``, if given, is a :class:`turin.gibbs.GridGibbs` applied every
+    ``move``, if given, is a :class:`turin.gibbs.GridGibbs` (or, for Gaia,
+    :class:`turin.gibbs.EphemerisGibbs`) applied every
     ``move.segment`` draws: each round is drawn as several resumed segments with a
     sweep between them (and one before a cross-process resume). ChEES
     alternated with an exact move is still one Markov chain, so the segments
@@ -470,7 +471,9 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
                 log(f"  round {rnd}: {cfg.n_warmup} warmup + {n_samples} "
                     f"draws/chain on {cfg.n_chains} chains"
                     + ("" if move is None else
-                       f", grid-Gibbs on the epoch times every {seg}"))
+                       f", grid-Gibbs on "
+                       f"{getattr(move, 'label', 'the epoch times')} every "
+                       f"{seg}"))
                 results = anvil.run(kernel, target, u0,
                                     n_warmup=cfg.n_warmup, seed=cfg.seed, **kw)
             else:
@@ -501,7 +504,9 @@ def run_rounds(target, names, u0, cfg, *, log=print, on_round=None,
             + (f"; pooled {verdict.n_draws} draws/chain over "
                f"{len(segments)} segments" if len(segments) > 1 else ""))
         if sweep_stats:
-            log(_describe_sweeps(sweep_stats, names, t_gibbs, el))
+            log(move.describe(sweep_stats, t_gibbs, el)
+                if hasattr(move, "describe")
+                else _describe_sweeps(sweep_stats, names, t_gibbs, el))
         log(verdict.describe())
         if on_round is not None:
             on_round(reported, verdict, rnd)

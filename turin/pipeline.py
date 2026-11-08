@@ -112,11 +112,16 @@ def _label(name):
 def _gibbsgrid(mode, args):
     """The grid-Gibbs setting in effect for this fit.
 
-    Only TTV fits have epoch times to move, and only ChEES has the state
-    turin knows how to move chains in, so everything else is "off" whatever
-    the flag says.
+    TTV fits move their epoch times, Gaia fits their period and epoch
+    (:class:`turin.gibbs.EphemerisGibbs`); a Kepler or TESS LinEph fit has
+    nothing to move. Only ChEES has the state turin knows how to move chains
+    in, so everything else is "off" whatever the flag says.
     """
-    return ("on" if mode == "ttv" and args.sampler == "chees"
+    from .cli import is_gaia_target
+
+    movable = mode == "ttv" or (mode == "lineph"
+                                and is_gaia_target(args.target))
+    return ("on" if movable and args.sampler == "chees"
             and args.gibbsgrid == "on" else "off")
 
 
@@ -369,10 +374,11 @@ def _mode_layout(mode, args, prepared, centering, epoch_data):
                                   law=getattr(args, "law", "quadratic"),
                                   rhostar=_rhostar(args)), tau_half
     if prepared.bands:
+        box = _params.gaia_peak_box(prepared.eph, prepared.time)[:2]
         return _params.gaia_layout(prepared.eph, prepared.bands,
                                    b_prior=args.b_prior,
                                    law=getattr(args, "law", "quadratic"),
-                                   rhostar=_rhostar(args)), None
+                                   rhostar=_rhostar(args), box=box), None
     return _params.lineph_layout(prepared.eph, b_prior=args.b_prior,
                                  ld=getattr(args, "ld", "sampled"),
                                  law=getattr(args, "law", "quadratic"),
@@ -755,6 +761,9 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         prior_state.check_exposure(prepared.exposure_time,
                                    _exposures(prepared))
         prior_state.check_bands(prepared.bands)
+        if prepared.bands:
+            prior_state.check_box(_gaia_box(_mode_layout(
+                mode, args, prepared, centering, epoch_data)[0]))
         want_extend = args.extend1 if mode == "lineph" else args.extend2
         if prior_state.done and not want_extend:
             log(f"  {mode} already converged "
@@ -825,9 +834,13 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             f"{cv['band_orders'][_gaia_code(b)]} baseline)"
             for b in layout.bands)
             + "; each with its own limb darkening and error scale")
-        log("  the period stays on the peak the input ephemeris names: "
-            "rival peaks of a sparse light curve are not explored (fit "
-            "another with its --period)")
+        dP_half, dtau0_half, dP_unit, dtau0_unit = _params.gaia_peak_box(
+            prepared.eph, prepared.time)
+        log(f"  the seeded period peak: P {layout.P_ref:.6f} +- "
+            f"{dP_half:.2e} d, epoch +- {dtau0_half * 24:.2f} h "
+            f"({_params.GAIA_BOX_UNITS:g} resolution units, "
+            f"{dP_unit:.2e} d and {dtau0_unit * 24:.2f} h); peaks outside "
+            "it are not explored (fit another with its --period)")
     elif _exposures(prepared):
         log("  exposures: "
             + ", ".join(f"{e * 1440:.3g} min" for e in _exposures(prepared))
@@ -1015,7 +1028,15 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
         outcome[mode] = verdict
 
     move = None
-    if _gibbsgrid(mode, args) == "on":
+    if _gibbsgrid(mode, args) == "on" and layout.bands:
+        from . import gibbs as _gibbs
+
+        # the sampler's own float32 log-density (one block: a Gaia star is
+        # ~150 points), prior included
+        move = _gibbs.EphemerisGibbs(
+            lp, transform, layout, seed=args.seed,
+            units=_params.gaia_peak_box(prepared.eph, prepared.time)[2:])
+    elif _gibbsgrid(mode, args) == "on":
         from . import gibbs as _gibbs
 
         # its own float32 log-density, blocked for the large batches a
@@ -1159,6 +1180,16 @@ def _ml_model(lp, v_ml, collapsed):
                             dtype=np.float64)[0]
     return model, baseline, q_ml
 
+
+
+def _gaia_box(layout):
+    """A Gaia layout's ephemeris box for the resume state, ``()`` for every
+    other layout."""
+    if not layout.bands:
+        return ()
+    i, j = layout.index("dP"), layout.index("dtau0")
+    return (layout.P_ref, layout.tau0_ref, layout.lo[i], layout.hi[i],
+            layout.lo[j], layout.hi[j])
 
 
 def _gaia_code(label):
@@ -1411,7 +1442,7 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
         model_rev=_MODEL_REV, gibbsgrid=_gibbsgrid(mode, args),
         ld=layout.ld, law=layout.law, oblate=layout.oblate,
         rhostar=layout.rhostar, exposures=_exposures(prepared),
-        bands=tuple(layout.bands),
+        bands=tuple(layout.bands), box=_gaia_box(layout),
         ghk_layout=getattr(lp, "ghk_layout", None),
         ghk_points=getattr(lp, "ghk_points", None),
         n_chains=cfg.n_chains, ttv_max=args.ttv_max_days,

@@ -401,6 +401,27 @@ class ResumeState:
     #: few points is left out), so checked by :meth:`check_bands`, not a
     #: GUARD; ``()`` for Kepler and TESS, which every older state was.
     bands: tuple = ()
+    #: Gaia: the sampled ephemeris box, ``(P_ref, tau0_ref, dP_lo, dP_hi,
+    #: dtau0_lo, dtau0_hi)`` in days. Set by the input ephemeris and the data
+    #: (:func:`turin.params.gaia_peak_box`), so checked by
+    #: :meth:`check_box`; ``()`` for Kepler and TESS, and for a Gaia state
+    #: written before the box was the seeded peak's (0.1.102's +-0.1 d).
+    box: tuple = ()
+
+    def check_box(self, box):
+        """Refuse to continue a Gaia lineage sampled in a different
+        ephemeris box: a different ``--period``/``--t0``/``--T14``, or a
+        state from before the box was the seeded peak's."""
+        stored = tuple(float(x) for x in self.box)
+        box = tuple(float(x) for x in box)
+        same = len(stored) == len(box) and all(
+            abs(a - b) <= 1e-12 * max(abs(a), abs(b), 1.0)
+            for a, b in zip(stored, box))
+        if not same:
+            raise SystemExit(
+                f"{self.target} {self.mode}: this run sampled the ephemeris "
+                f"box {stored or 'of turin <= 0.1.102 (+-0.1 d)'}, but the "
+                f"inputs now give {box}; use --fresh to start over")
 
     def check_bands(self, bands):
         """Refuse to continue a Gaia lineage whose fitted bands differ from

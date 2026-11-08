@@ -515,9 +515,9 @@ def _serve_gaia(monkeypatch, **kw):
 
 def _gaia_args(tmp_path, argv, **over):
     a = cli.parse_args(argv)
-    for key, value in dict(chains=64, warmup=150, samples=60,
-                           max_samples=60, outdir=str(tmp_path),
-                           seed=0, **over).items():
+    for key, value in {**dict(chains=64, warmup=150, samples=60,
+                              max_samples=60, outdir=str(tmp_path),
+                              seed=0), **over}.items():
         setattr(a, key, value)
     return a
 
@@ -584,3 +584,120 @@ def test_gaia_map_starts_hold_the_period_at_the_candidate():
     assert sd[lay.index("k")] == seeding.MAP_START_SD
     kep = params.lineph_layout(eph)
     assert np.all(seeding.map_start_sd(kep) == seeding.MAP_START_SD)
+
+
+def test_the_box_is_the_seeded_peak():
+    T = TRUTH
+    eph = dict(period=T["P"], epoch=2200.0, duration=T["T14"] * 24,
+               depth=1e4)
+    t = np.array([1700.0, 2200.0, 2650.0])
+    dP_half, dt_half, dP_unit, dt_unit = params.gaia_peak_box(eph, t)
+    # the furthest point is 500 d (365 orbits) from the epoch
+    n_max = 500.0 / T["P"]
+    assert dP_unit == pytest.approx(T["T14"] / (2 * n_max), rel=1e-12)
+    assert dt_unit == pytest.approx(T["T14"] / 2, rel=1e-12)
+    assert dP_half == pytest.approx(params.GAIA_BOX_UNITS * dP_unit)
+    assert dt_half == pytest.approx(params.GAIA_BOX_UNITS * dt_unit)
+    lay = params.gaia_layout(eph, ("G",), box=(dP_half, dt_half))
+    i, j = lay.index("dP"), lay.index("dtau0")
+    assert (lay.lo[i], lay.hi[i], lay.lo[j], lay.hi[j]) == (
+        -dP_half, dP_half, -dt_half, dt_half)
+    # a long duration on a short period: never a quarter period or more
+    wide = dict(eph, duration=0.4 * T["P"] * 24)
+    assert params.gaia_peak_box(wide, t)[1] == pytest.approx(T["P"] / 4)
+
+
+def test_the_ephemeris_move_leaves_the_exact_conditional_invariant():
+    """Draw (dP, dtau0) from their exact conditional at a fixed shape on a
+    dense grid, sweep once with a coarse grid, and the draws must still
+    follow it. Without the MH correction the same sweep fails by KS
+    statistics of 0.08 (p ~ 1e-100); measured in review."""
+    from scipy import stats
+
+    from turin import gibbs
+
+    t, flux, sig, band, dev, eph, ed, cv, cen, _ = _gaia_fit_inputs()
+    box = params.gaia_peak_box(eph, t)
+    lay = params.gaia_layout(eph, ("G", "BP", "RP"), box=box[:2])
+    lp = GaiaLogProb(lay, cen, ed, cv["orders"])
+    tr = lay.transform()
+    v0 = _vectors(lay, n=1)[0]
+    iP, iT = lay.index("dP"), lay.index("dtau0")
+
+    def dense(loP, hiP, loT, hiT, n=300):
+        gP, gT = np.linspace(loP, hiP, n + 1), np.linspace(loT, hiT, n + 1)
+        V = np.repeat(v0[None], n * n, axis=0)
+        V[:, iP] = np.repeat(0.5 * (gP[1:] + gP[:-1]), n)
+        V[:, iT] = np.tile(0.5 * (gT[1:] + gT[:-1]), n)
+        L = np.concatenate([np.array(lp(mx.array(V[s:s + 16384],
+                                                  dtype=mx.float32)),
+                                     dtype=np.float64)
+                            for s in range(0, n * n, 16384)]).reshape(n, n)
+        p = np.exp(L - L.max())
+        return gP, gT, p / p.sum()
+
+    gP, gT, p = dense(lay.lo[iP], lay.hi[iP], lay.lo[iT], lay.hi[iT])
+    # zoom onto the mass, so the reference resolves it
+    cP, cT = np.cumsum(p.sum(1)), np.cumsum(p.sum(0))
+    a, b = (max(np.searchsorted(cP, 1e-6) - 2, 0),
+            min(np.searchsorted(cP, 1 - 1e-6) + 3, 300))
+    c, d = (max(np.searchsorted(cT, 1e-6) - 2, 0),
+            min(np.searchsorted(cT, 1 - 1e-6) + 3, 300))
+    gP, gT, p = dense(gP[a], gP[b], gT[c], gT[d])
+
+    rng = np.random.default_rng(1)
+    C = 20000
+    i, j = np.divmod(rng.choice(p.size, size=C, p=p.ravel()), 300)
+    V = np.repeat(v0[None], C, axis=0)
+    V[:, iP] = gP[i] + (gP[1] - gP[0]) * rng.uniform(size=C)
+    V[:, iT] = gT[j] + (gT[1] - gT[0]) * rng.uniform(size=C)
+
+    move = gibbs.EphemerisGibbs(lp, tr, lay, units=box[2:], n_grid=64,
+                                seed=2)
+    u1, st = move.sweep(tr.from_model_np(V))
+    v1 = tr.model_np(u1)
+    assert 0.05 < st.accept.min() and st.accept.max() < 0.95
+    # the shape is untouched
+    others = [k for k in range(lay.dim) if k not in (iP, iT)]
+    np.testing.assert_allclose(v1[:, others], V[:, others], rtol=1e-12,
+                               atol=1e-12)
+    for col, grid, m in ((iP, gP, p.sum(1)), (iT, gT, p.sum(0))):
+        cdf = np.concatenate([[0.0], np.cumsum(m)])
+        res = stats.kstest(v1[:, col], lambda x: np.interp(x, grid, cdf))
+        assert res.pvalue > 1e-3, (lay.names[col], res)
+
+
+def test_only_gaia_and_ttv_fits_get_a_gibbs_move(tmp_path, monkeypatch):
+    from turin import pipeline
+
+    gaia_args = _gaia_args(tmp_path, _serve_gaia(monkeypatch))
+    assert pipeline._gibbsgrid("lineph", gaia_args) == "on"
+    gaia_args.gibbsgrid = "off"
+    assert pipeline._gibbsgrid("lineph", gaia_args) == "off"
+    kep = cli.parse_args(["--KOI-518.02"])
+    assert pipeline._gibbsgrid("lineph", kep) == "off"
+    assert pipeline._gibbsgrid("ttv", kep) == "on"
+
+
+def test_a_gaia_lineage_refuses_a_different_box(tmp_path, monkeypatch):
+    from turin import pipeline
+
+    argv = _serve_gaia(monkeypatch)
+    logs = []
+    pipeline.run(_gaia_args(tmp_path, argv), log=logs.append)
+    text = "\n".join(logs)
+    assert "ephemeris Gibbs:" in text and "the seeded period peak" in text
+    st = outputs.load_resume(str(tmp_path), "GaiaDR3-7", "lineph")
+    assert st.gibbsgrid == "on" and len(st.box) == 6
+    lo, hi = st.box[2], st.box[3]
+    assert lo == -hi and 0 < hi < 1e-3
+    # a different --T14 is a different box
+    argv2 = [a if not a.startswith("--T14=") else
+             f"--T14={TRUTH['T14'] * 24 * 1.5}" for a in argv]
+    with pytest.raises(SystemExit, match="ephemeris box"):
+        pipeline.run(_gaia_args(tmp_path, argv2, max_samples=120),
+                     log=lambda m: None)
+    # a state from before the box (0.1.102) reads (), and is refused too
+    st.box = ()
+    with pytest.raises(SystemExit, match="0.1.102"):
+        st.check_box((1.0,) * 6)

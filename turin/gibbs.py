@@ -144,3 +144,118 @@ class GridGibbs:
             accept=acc.mean(axis=0),
             mode_change=(acc & (np.abs(new - old) > self.T14)).mean(axis=0))
         return self.transform.from_model_np(v), stats
+
+
+@dataclass
+class EphemerisSweepStats:
+    """Outcome of one :class:`EphemerisGibbs` sweep, averaged over chains."""
+
+    accept: np.ndarray        # (2,) MH acceptance for dP, dtau0
+    jump: np.ndarray          # (2,) fraction moved by more than one unit
+
+
+class EphemerisGibbs:
+    """An exact Gibbs move on a Gaia fit's ``dP`` and then ``dtau0``.
+
+    Why it exists. Sparse photometry puts one or two points in each transit,
+    so a period or epoch change that moves a point across a transit's edge
+    changes the likelihood by tens of nats in minutes, and inside those edges
+    it is flat. ChEES tunes its step to the edges and crawls across the flat
+    lobes between them: on Kepler-12 b, HAT-P-1 b and Kepler-43 b (Gaia DR3)
+    every chain crossed the whole period range, but R-hat on dP was still
+    1.02-1.21 at the 16,384-draw cap.
+
+    How. Each coordinate in turn is drawn from its conditional given every
+    other parameter, by the same independence proposal as
+    :class:`GridGibbs` (a cell of a grid over the coordinate's whole box by
+    its mass, uniform within it) and a Metropolis-Hastings correction
+    against the exact log-density, so any grid is exact. The box is the
+    seeded peak's (:func:`turin.params.gaia_peak_box`), so the move never
+    leaves it. Nothing factorises here: each grid point is one full
+    evaluation, ``2 n_grid`` per chain per sweep, which a Gaia light curve
+    (~150 points) makes cheap.
+
+    ``lp`` is the float32 model-space log-density the sampler targets, prior
+    included; ``units`` the two resolution units, for the log.
+    """
+
+    label = "the period and epoch"
+
+    def __init__(self, lp, transform, layout, *, units, n_grid=N_GRID,
+                 segment=SEGMENT, batch=16384, seed=0):
+        if not layout.bands:
+            raise ValueError("the ephemeris Gibbs move is for Gaia fits")
+        self.lp, self.transform, self.layout = lp, transform, layout
+        self.segment = int(segment)
+        self.batch = int(batch)
+        self.rng = np.random.default_rng(seed)
+        self.cols = (layout.index("dP"), layout.index("dtau0"))
+        self.units = np.asarray(units, dtype=np.float64)
+        self.n_grid = int(n_grid)
+        lo = layout.lo[list(self.cols)]
+        hi = layout.hi[list(self.cols)]
+        self.lo, self.hi = lo, hi
+        self.edges = lo[:, None] + (hi - lo)[:, None] * np.linspace(
+            0.0, 1.0, self.n_grid + 1)[None, :]                # (2, G+1)
+        self.width = (hi - lo) / self.n_grid
+        self.mids = 0.5 * (self.edges[:, 1:] + self.edges[:, :-1])
+
+    def _log_prob(self, V):
+        out = []
+        for s in range(0, V.shape[0], self.batch):
+            out.append(np.array(self.lp(
+                mx.array(V[s:s + self.batch], dtype=mx.float32)),
+                dtype=np.float64))
+        return np.concatenate(out)
+
+    def _step(self, v, i):
+        """Redraw coordinate ``i`` (0: dP, 1: dtau0) of every chain."""
+        C, G, col = v.shape[0], self.n_grid, self.cols[i]
+        V = np.repeat(v, G, axis=0)
+        V[:, col] = np.tile(self.mids[i], C)
+        L = self._log_prob(V).reshape(C, G)
+        # a non-finite cell (outside a prior's support) gets no mass
+        L = np.where(np.isfinite(L), L, -np.inf)
+        logq = L - L.max(axis=1, keepdims=True)
+        logq -= np.log(np.exp(logq).sum(axis=1, keepdims=True))
+
+        cdf = np.cumsum(np.exp(logq), axis=1)
+        j = np.minimum((cdf < self.rng.uniform(size=(C, 1))).sum(axis=1),
+                       G - 1)
+        new = self.edges[i, j] + self.width[i] * self.rng.uniform(size=C)
+        span = self.hi[i] - self.lo[i]
+        new = np.clip(new, self.lo[i] + 1e-9 * span, self.hi[i] - 1e-9 * span)
+        old = v[:, col].copy()
+        j_old = np.clip(((old - self.lo[i]) // self.width[i]).astype(int),
+                        0, G - 1)
+
+        v_new = v.copy()
+        v_new[:, col] = new
+        rows = np.arange(C)
+        with np.errstate(invalid="ignore"):
+            log_a = (self._log_prob(v_new) - self._log_prob(v)
+                     + logq[rows, j_old] - logq[rows, j])
+        acc = np.log(self.rng.uniform(size=C)) < log_a
+        v[:, col] = np.where(acc, new, old)
+        jump = acc & (np.abs(new - old) > self.units[i])
+        return acc.mean(), jump.mean()
+
+    def sweep(self, u):
+        """One sweep (dP, then dtau0) over every chain. ``u``: ``(n_chains,
+        dim)`` unconstrained positions. Returns the new positions and an
+        :class:`EphemerisSweepStats`."""
+        v = self.transform.model_np(np.asarray(u, dtype=np.float64))
+        acc, jump = zip(*(self._step(v, i) for i in (0, 1)))
+        return (self.transform.from_model_np(v),
+                EphemerisSweepStats(accept=np.array(acc),
+                                    jump=np.array(jump)))
+
+    def describe(self, stats, t_gibbs, elapsed):
+        """One log line per round."""
+        acc = np.mean([s.accept for s in stats], axis=0)
+        jump = np.mean([s.jump for s in stats], axis=0)
+        return (f"  ephemeris Gibbs: {len(stats)} sweeps, {t_gibbs:.1f}s "
+                f"({t_gibbs / max(elapsed, 1e-9):.0%} of the round), MH "
+                f"acceptance dP {acc[0]:.2f}, dtau0 {acc[1]:.2f}; chains "
+                f"moving more than one resolution unit per sweep: dP "
+                f"{jump[0]:.0%}, dtau0 {jump[1]:.0%}")

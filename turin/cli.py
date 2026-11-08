@@ -106,7 +106,9 @@ usage: turin --KOI-448.02 [options]
   --gibbsgrid=on|off      TTV fits: redraw every transit time from its exact
                           grid conditional between ChEES segments, so chains
                           move between timing modes (default on). off gives
-                          independent ChEES chains only
+                          independent ChEES chains only. Gaia fits: the
+                          same for the period and epoch, within the seeded
+                          peak's box
   --seed=N                random seed, a non-negative integer (default 0)
 
   --bprior=transiting|nongrazing|box   (b, k) prior (default transiting)

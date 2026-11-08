@@ -277,18 +277,50 @@ LNS_LO = math.log(0.3)
 LNS_HI = math.log(30.0)
 
 
+#: Half-width of a Gaia fit's dP and dtau0 box, in resolution units (see
+#: :func:`gaia_peak_box`). Sparse photometry gives the period posterior
+#: lobes about two units across (Kepler-12 b, one point in transit per band:
+#: 98% of draws within +-2 units); a distinct period, an alias, lies tens of
+#: units away (the step-0 rivals of NGTS-5 b, Kepler-12 b, WASP-163 b: 16,
+#: 50, 95).
+GAIA_BOX_UNITS = 5.0
+
+
+def gaia_peak_box(eph, time):
+    """The (dP, dtau0) box of a Gaia fit: the seeded period peak.
+
+    The resolution units are ``T14 / (2 n_max)`` in period, with ``n_max``
+    the orbits from the recentred epoch to the furthest point (the period
+    change that moves the furthest transit by half a duration), and
+    ``T14 / 2`` in epoch. The box is :data:`GAIA_BOX_UNITS` of each, capped
+    at a quarter period so it never holds another transit. Returns
+    ``(dP_half, dtau0_half, dP_unit, dtau0_unit)`` in days.
+    """
+    period = float(eph["period"])
+    T14 = float(eph["duration"]) / 24.0
+    n_max = max(float(np.max(np.abs(np.asarray(time, dtype=np.float64)
+                                    - float(eph["epoch"])))) / period, 1.0)
+    dP_unit = T14 / (2.0 * n_max)
+    dtau0_unit = T14 / 2.0
+    return (min(GAIA_BOX_UNITS * dP_unit, period / 4.0),
+            min(GAIA_BOX_UNITS * dtau0_unit, period / 4.0),
+            dP_unit, dtau0_unit)
+
+
 def gaia_ld_name(name, band):
     """A Gaia band's limb-darkening coordinate: ``q1`` of G is ``q1_G``."""
     return f"{name}_{band}"
 
 
 def gaia_layout(eph, bands, b_prior="transiting", T14_max=None,
-                law="quadratic", rhostar=()):
+                law="quadratic", rhostar=(), box=(DP_HALF, DTAU0_HALF)):
     """The LinEph layout of a Gaia fit: ``dP, dtau0, k, beta, T14``, each
     band's limb darkening (``q1_G, q2_G, q1_BP, ...``), then each band's log
     error scale (``lns_G, ...``). Bands share the geometry; each has its own
     limb darkening (a different passband) and its own catalogue-error
-    calibration. Sampled limb darkening only."""
+    calibration. Sampled limb darkening only. ``box`` is the ``(dP,
+    dtau0)`` half-widths in days; the pipeline passes the seeded peak's
+    (:func:`gaia_peak_box`)."""
     if b_prior not in B_PRIORS:
         raise ValueError(f"unknown b_prior {b_prior!r}; expected {B_PRIORS}")
     if law not in LAWS:
@@ -296,7 +328,8 @@ def gaia_layout(eph, bands, b_prior="transiting", T14_max=None,
     bands = tuple(bands)
     if not bands:
         raise ValueError("a Gaia layout needs at least one band")
-    rows = [("dP", -DP_HALF, DP_HALF), ("dtau0", -DTAU0_HALF, DTAU0_HALF)]
+    dP_half, dtau0_half = (float(x) for x in box)
+    rows = [("dP", -dP_half, dP_half), ("dtau0", -dtau0_half, dtau0_half)]
     shape = list(_shape_bounds(eph, T14_max=T14_max, law=law))
     rows += shape[:3]
     for band in bands:
