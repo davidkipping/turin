@@ -836,11 +836,11 @@ def _fit_mode(mode, args, prepared, cv, outdir, *, log, outcome,
             + "; each with its own limb darkening and error scale")
         dP_half, dtau0_half, dP_unit, dtau0_unit = _params.gaia_peak_box(
             prepared.eph, prepared.time)
-        log(f"  the seeded period peak: P {layout.P_ref:.6f} +- "
+        log(f"  prior: the seeded period peak, P {layout.P_ref:.6f} +- "
             f"{dP_half:.2e} d, epoch +- {dtau0_half * 24:.2f} h "
             f"({_params.GAIA_BOX_UNITS:g} resolution units, "
-            f"{dP_unit:.2e} d and {dtau0_unit * 24:.2f} h); peaks outside "
-            "it are not explored (fit another with its --period)")
+            f"{dP_unit:.2e} d and {dtau0_unit * 24:.2f} h), uniform; peaks "
+            "outside it are not explored (fit another with its --period)")
     elif _exposures(prepared):
         log("  exposures: "
             + ", ".join(f"{e * 1440:.3g} min" for e in _exposures(prepared))
@@ -1264,6 +1264,57 @@ ALIGNED_F_MIN = 0.05
 ALIGNED_WARN_SHARE = 0.05
 
 
+#: A Gaia fit's box (:func:`turin.params.gaia_peak_box`) is a prior: the
+#: period posterior of sparse photometry is a comb of lobes that runs on past
+#: it (17 known planets at 0.1.104: widening the box from 5 to 15 units
+#: showed more of the comb, piled draws against the new edge and pulled one
+#: rival-seeded run onto the true period). The log gives the share of draws
+#: in each side's outer :data:`GAIA_EDGE_FRACTION` of the box, and above
+#: :data:`GAIA_EDGE_WARN` warns and names the seeds of the neighbouring boxes.
+GAIA_EDGE_FRACTION = 0.1
+GAIA_EDGE_WARN = 0.03
+
+
+def gaia_edge_shares(layout, phys, names):
+    """``{name: (low, high)}``: the share of draws in the outer
+    :data:`GAIA_EDGE_FRACTION` of each side of a Gaia fit's ``dP`` and
+    ``dtau0`` box. ``phys`` holds absolute periods and epochs."""
+    out = {}
+    for name, ref in (("dP", layout.P_ref), ("dtau0", layout.tau0_ref)):
+        i = layout.index(name)
+        lo, hi = layout.lo[i], layout.hi[i]
+        x = phys[:, names.index(name)] - ref
+        out[name] = (float(np.mean(x < lo * (1.0 - GAIA_EDGE_FRACTION))),
+                     float(np.mean(x > hi * (1.0 - GAIA_EDGE_FRACTION))))
+    return out
+
+
+def _log_gaia_edges(layout, phys, names, log):
+    shares = gaia_edge_shares(layout, phys, names)
+    log(f"  draws in the outer {100 * GAIA_EDGE_FRACTION:.0f}% of the box "
+        "(below, above): "
+        + "; ".join(f"{'period' if n == 'dP' else 'epoch'} "
+                    f"{100 * a:.1f}%, {100 * b:.1f}%"
+                    for n, (a, b) in shares.items()))
+    seeds = []
+    for name, (a, b) in shares.items():
+        i = layout.index(name)
+        for share, edge in ((a, layout.lo[i]), (b, layout.hi[i])):
+            if share <= GAIA_EDGE_WARN:
+                continue
+            if name == "dP":
+                seeds.append(f"--period={layout.P_ref + 2 * edge:.6f} "
+                             f"--t0={layout.tau0_ref:.6f}")
+            else:
+                seeds.append(f"--period={layout.P_ref:.6f} "
+                             f"--t0={layout.tau0_ref + 2 * edge:.6f}")
+    if seeds:
+        log("  WARNING: the period posterior runs on past the box, whose "
+            "edges are a prior (sparse photometry makes it a comb of lobes). "
+            "The neighbouring boxes are separate fits: "
+            + "; ".join(seeds))
+
+
 def aligned_central_share(f, theta_deg, b):
     """Share of draws in the aligned-oblate-on-a-central-chord family."""
     f, th, b = (np.asarray(x, dtype=np.float64) for x in (f, theta_deg, b))
@@ -1388,6 +1439,9 @@ def _export_all(mode, args, prepared, epoch_data, centering, orders, layout,
                    f"{100 * math.log(10) * layout.rhostar[1]:.0f}%"
                    if layout.rhostar else
                    "try --rhostar=MEAN,SIGMA (log10 kg m^-3)"))
+
+    if layout.bands:
+        _log_gaia_edges(layout, phys, names, log)
 
     _outputs.export_summary(outdir, target, mode, summary, log=log)
     _outputs.export_logrho(outdir, target, mode, rho, log=log)

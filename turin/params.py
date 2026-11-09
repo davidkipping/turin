@@ -282,7 +282,12 @@ LNS_HI = math.log(30.0)
 #: lobes about two units across (Kepler-12 b, one point in transit per band:
 #: 98% of draws within +-2 units); a distinct period, an alias, lies tens of
 #: units away (the step-0 rivals of NGTS-5 b, Kepler-12 b, WASP-163 b: 16,
-#: 50, 95).
+#: 50, 95). Lobes sit ~5 units apart, and once chains cross between them
+#: (0.1.104) the comb runs on past the box: the box is a prior, and the
+#: pipeline warns when draws pile at its edge. 15 units was tried (0.1.105,
+#: 17 runs): 8 of 13 archive-seeded fits converged, draws piled at the new
+#: edge (13% of HAT-P-1 b's), and NGTS-5 b's rival-seeded fit, 16 units out,
+#: was pulled onto the true period.
 GAIA_BOX_UNITS = 5.0
 
 

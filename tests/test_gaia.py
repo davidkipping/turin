@@ -607,6 +607,39 @@ def test_the_box_is_the_seeded_peak():
     assert params.gaia_peak_box(wide, t)[1] == pytest.approx(T["P"] / 4)
 
 
+def test_draws_at_the_box_edge_are_warned_with_the_next_seeds():
+    from turin import pipeline
+
+    T = TRUTH
+    eph = dict(period=T["P"], epoch=2200.0, duration=T["T14"] * 24,
+               depth=1e4)
+    h, ht = 1e-3, 0.05
+    lay = params.gaia_layout(eph, ("G",), box=(h, ht))
+    names = list(lay.names)
+    rng = np.random.default_rng(0)
+    n = 10000
+    phys = np.zeros((n, len(names)))
+    # 5% of the periods in the box's upper outer tenth, epochs central
+    dP = rng.uniform(-0.5 * h, 0.5 * h, n)
+    dP[:n // 20] = rng.uniform(0.91 * h, h, n // 20)
+    phys[:, names.index("dP")] = T["P"] + dP
+    phys[:, names.index("dtau0")] = 2200.0 + rng.uniform(-0.5, 0.5, n) * ht
+    shares = pipeline.gaia_edge_shares(lay, phys, names)
+    assert shares["dP"] == (0.0, pytest.approx(0.05))
+    assert shares["dtau0"] == (0.0, 0.0)
+    logs = []
+    pipeline._log_gaia_edges(lay, phys, names, logs.append)
+    assert "period 0.0%, 5.0%" in logs[0]
+    assert len(logs) == 2 and "WARNING" in logs[1]
+    assert f"--period={T['P'] + 2 * h:.6f} --t0=2200.000000" in logs[1]
+    # under the threshold: the shares only
+    dP[:n // 20] = 0.0
+    phys[:, names.index("dP")] = T["P"] + dP
+    logs = []
+    pipeline._log_gaia_edges(lay, phys, names, logs.append)
+    assert len(logs) == 1
+
+
 def _exact_ephemeris_draws(C=20000, seed=1):
     """Draws of (dP, dtau0) from their exact conditional at a fixed shape,
     from a dense grid zoomed onto the mass. Returns the layout, ``lp``, the
@@ -770,7 +803,9 @@ def test_a_gaia_lineage_refuses_a_different_box(tmp_path, monkeypatch):
     logs = []
     pipeline.run(_gaia_args(tmp_path, argv), log=logs.append)
     text = "\n".join(logs)
-    assert "ephemeris Gibbs:" in text and "the seeded period peak" in text
+    assert ("ephemeris Gibbs:" in text and "DE steps:" in text
+            and "prior: the seeded period peak" in text
+            and "draws in the outer 10% of the box" in text)
     st = outputs.load_resume(str(tmp_path), "GaiaDR3-7", "lineph")
     assert st.gibbsgrid == "on" and len(st.box) == 6
     lo, hi = st.box[2], st.box[3]
