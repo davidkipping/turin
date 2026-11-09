@@ -1,11 +1,14 @@
 # turin
 
-GPU transit fitting for Kepler and TESS, on Apple Silicon.
+GPU transit fitting for Kepler, TESS and Gaia, on Apple Silicon.
 
 turin downloads PDC light curves from MAST, queries ephemerides from the NASA
 Exoplanet Archive, detrends each transit's local baseline with a
 profile-likelihood Legendre polynomial, and samples the transit parameters
-with hundreds of parallel chains on the Metal GPU.
+with hundreds of parallel chains on the Metal GPU. It also fits transit
+candidates in Gaia epoch photometry (DR3 from the Gaia archive, or any
+release from a CSV), from the ephemeris of the search that found them; see
+[Gaia epoch photometry](#gaia-epoch-photometry).
 
 It is the successor to [hurin](https://github.com/davidkipping/hurin), and
 keeps that package's science pipeline and command line while replacing both
@@ -43,6 +46,8 @@ For development against local clones of the sibling packages:
 ```bash
 turin --KOI-448.02
 turin --TOI-406.01
+turin --GaiaDR3-1864885215233116032 --period=0.9689951 --t0=2049.74791 \
+      --T14=2.4888 --depth=11460
 ```
 
 Each run writes its products into a `<TARGET>/` directory and can be
@@ -641,6 +646,76 @@ left both unconverged at the draw cap, while every 25 converged both about
 the timing posteriors. `--gibbsgrid=off` gives independent ChEES chains only. The setting is a resume guard, so a lineage
 cannot pool chains drawn both ways.
 
+### Gaia epoch photometry
+
+A Gaia source is a target of the form `--GaiaDR3-<source_id>`. No archive
+holds an ephemeris for a Gaia candidate, so it comes from the command line,
+all four flags required: `--period` (days), `--t0` (Gaia time, BJD(TCB) -
+2455197.5), `--T14` (hours) and `--depth` (ppm), as a box-least-squares search
+reports them. DR3's epoch photometry is downloaded from the Gaia archive
+(DataLink), with Gaia's own rejections applied; `--lcfile=PATH` reads a CSV of
+`time, flux, flux_err[, band]` instead, which is the route for DR4 until its
+format is public.
+
+Gaia data are nothing like a Kepler light curve: a star has 20-80 points
+per band in ~20 clusters over ~1,000 days, usually one or two in any transit,
+and catalogue errors that are typically 2-3x too small. So a Gaia fit differs
+from a Kepler or TESS one in these ways:
+
+- **G, BP and RP are fitted jointly.** They share the period, epoch, `k`, `b`
+  and `T14`. Each band has its own limb darkening (`q1_G, q2_G, ...`, either
+  `--law`), its own exposure (G 40 s, BP and RP 4.4 s) and its own **error
+  scale** `s_<band>`, which multiplies its catalogue errors and is fitted
+  (uniform in ln s on [0.3, 30]). The log reports each band's robust chi out
+  of transit for comparison.
+- **One baseline per band**, a Legendre polynomial over the whole light curve
+  with its order chosen by cross-validation, instead of one per transit (most
+  transits have one point). It is profiled exactly, as always.
+- **The fit stays on the period you give.** Over ~1,000 days of sparse data
+  the likelihood in period is a comb of narrow peaks, and the period a search
+  reports is often an alias of the true one. turin does not search between
+  aliases: it samples a box of +-5 resolution units about the given period
+  and epoch, where a unit is `T14 / (2 n_max)` in period (`n_max` is the
+  number of orbits to the furthest point) and `T14 / 2` in epoch, capped at a
+  quarter period. **The box is a uniform prior, and the period posterior is
+  local to it.** To fit another alias, run again with its `--period`.
+- **The period posterior inside the box is still a comb** of lobes about two
+  units wide and ~5 apart, and ChEES alone crosses between them slowly. So
+  every 25 draws (`--gibbsgrid=on`, the default) each chain redraws the period
+  and then the epoch from their exact grid conditionals over the box, and then
+  100 differential-evolution steps move the period, epoch, `k`, `b` and `T14`
+  together using the differences between chains (all moves are exact,
+  Metropolis-corrected). On Kepler-12 b this took R-hat at the draw cap from
+  1.21 to 1.02.
+- **Draws at the box edge are reported.** Every export logs the share of
+  period and epoch draws in the outer 10% of each side of the box. Above 3%
+  on a side the comb continues past the box, and the log warns and prints the
+  `--period=... --t0=...` of the neighbouring box to fit separately.
+- **LinEph only.** With about one point per transit there is no per-transit
+  time to fit. Also refused for Gaia: `--mle`, `--oblate`,
+  `--ld=collapsed`, `--geometry=chord`, `--PL=ratio|hybrid`, `--sc` and
+  `--replot`.
+
+The products are the usual LinEph seven, plus per-band `q` and `lns` rows,
+derived `s_<band>` (and `w*_<band>` under `--law=hybrid4`), and `T0_TDB`, the
+fitted epoch in BJD_TDB - 2455197.5 for comparison with other surveys'
+ephemerides. `lcdata` gains a `band` column, and the fold plot has one panel
+per band. The resume state records the bands and the box, so a lineage never
+continues under a different `--period`, `--t0` or `--T14`.
+
+**Accuracy on 13 known hot Jupiters** (DR3, archive ephemerides as input,
+one seed each; `docs/bench/gaia_acceptance.md`): 10 of 13 converged. Every
+period and epoch is within 1.9 sd of the literature (except WASP-18 b's
+period, 3.0 sd). Epochs are often 20 min to 3 h from the literature, because
+with one or two points in transit the epoch posterior is that wide. `k`, `b`
+and `T14` are mostly weakly constrained (k to +-0.15 typically; KELT-16 b's
+to +-0.003) and agree with the literature except in two cases. WASP-18 b's
+`T14` came out 0.9 h long (2.7 sd), and Kepler-490 b went to a grazing
+solution (b 1.0 against 0.05). The fitted error scales track each band's
+robust chi (median 1.08x, 80% within 0.89-1.39x). Sparse photometry leaves the shape uncertain, and a
+stellar-density prior (`--rhostar`; Gaia's FLAME gives one) is the natural
+way to tighten it.
+
 ## Options
 
 ```
@@ -660,7 +735,9 @@ cannot pool chains drawn both ways.
 --warmup=N                   warmup iterations (default 800)
 --samples=N --max-samples=N --leapfrog=N --seed=N
 --gibbsgrid=on|off           TTV fits: move chains between timing modes with
-                             an exact grid-Gibbs step (default on), see below
+                             an exact grid-Gibbs step (default on), see
+                             above; Gaia fits: the same for the period and
+                             epoch, plus differential-evolution steps
 
 --bprior=transiting|nongrazing|box      (b, k) prior, see above; --nongrazing
                              is an alias for --bprior=nongrazing
@@ -688,6 +765,13 @@ cannot pool chains drawn both ways.
                              round or --oblate, then TTV), see above
 --SNRgate=X                  --mle: fit TTVs only above this median
                              single-transit SNR (default 5)
+
+--period=DAYS --t0=T0 --T14=HOURS --depth=PPM
+                             Gaia targets only, all four required: the
+                             candidate's ephemeris (t0 in Gaia time,
+                             BJD(TCB) - 2455197.5); see above
+--lcfile=PATH                Gaia targets only: photometry from a CSV
+                             (time, flux, flux_err[, band])
 
 --sc                         prefer short cadence
 --cache-dir=PATH --outdir=PATH --clear-cache

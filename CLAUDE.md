@@ -5,8 +5,9 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 ## Project overview
 
 **turin** fits transiting-exoplanet light curves from Kepler and TESS on
-the Apple GPU. It is the successor to **hurin** (`../hurin`), keeping that
-package's science pipeline — MAST download, NASA Exoplanet Archive
+the Apple GPU, and since 0.1.101-0.1.105 transit candidates in Gaia epoch
+photometry (see "Gaia epoch photometry" below). It is the successor to
+**hurin** (`../hurin`), keeping that package's science pipeline — MAST download, NASA Exoplanet Archive
 ephemerides, per-epoch windowing, cross-validated Legendre order
 selection, and **profile-likelihood polynomial detrending** — while
 replacing the two compute-bound halves:
@@ -152,16 +153,19 @@ feature that needs it, not the package.
 ```
 turin/
   cli.py          kwargs CLI (argv regex grammar + did-you-mean)
-  data/           lightcurve.py, ephemeris.py, preprocessing.py (ported from hurin)
+  data/           lightcurve.py, ephemeris.py, preprocessing.py (ported from hurin);
+                  gaia.py (DR3 DataLink reader, --lcfile, Gaia time -> TDB)
   prep.py         windows, epoch segmentation, centering, Legendre CV, exposure nodes
   model.py        MLX transit model: params -> per-epoch tau -> z -> flux
   profile.py      batched per-epoch Legendre profile solve (exact | ratio)
   likelihood.py   epoch-block-chunked Gaussian logL, priors, anvil Transform/target
+  gaialik.py      Gaia: G/BP/RP jointly, one profiled baseline per band, per-band LD and error scale
   params.py       LinEph/TTV parameter specs, b-k prior modes, derived quantities
   seeding.py      template-sweep tau seeds; MAP and chain starts via anvil.optimize
   mle.py          --mle: maximum likelihood (LinEph round/oblate, then TTV), LD profiled, best fit only
   sampling.py     anvil driver, convergence loop, diagnostics, trapped-chain checks
-  gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments
+  gibbs.py        grid-Gibbs: exact per-epoch timing move between ChEES segments;
+                  Gaia: the (dP, dtau0) grid move and differential-evolution steps
   ldmarg.py       --ld=collapsed: LD integrated out (MarginalLDLogProb), q1,q2 drawn after (OmegaSampler)
   ldhybrid.py     --law=hybrid4 --ld=collapsed: the same over a 4-simplex (MarginalHybridLogProb, HybridOmegaSampler)
   simplexmass.py  GHK over a simplex, two-pass MGS/TSQR, triangular solves, exact simplex QP on R
@@ -1110,6 +1114,86 @@ the move, and must turn it off rather than leave it running.
   changing the move. It does **not** fix
   the separate grazing/non-grazing bimodality in (k, b), which still holds
   shape R-hat up on low-SNR targets.
+
+### Gaia epoch photometry (0.1.101-0.1.105)
+
+Plan agreed with the user 2026-10-28/29 (`~/.claude/plans/noble-rolling-piglet.md`):
+DR3 now, DR4-ready; **G + BP + RP fitted jointly, a fitted error scale per
+band, the ephemeris from the command line, and the fit kept on the period
+it is seeded at** ("the BLS returns a favored period and we'll just seed from
+there ... we could always rerun the fit at the other modes"). **Kepler and
+TESS must stay bitwise unchanged**: every Gaia commit checked the 26
+log-density quantities on KOI-518.02 (scratchpad `gaia/dump26.py`), and none
+bumped `MODEL_REV`.
+
+- **Data** (`data/gaia.py`). Target `--GaiaDR3-<source_id>`; DataLink with
+  `DATA_STRUCTURE=DATAMODEL_STANDARD` (the archive stopped accepting
+  MetalLS's `INDIVIDUAL`); Gaia's `rejected_by_photometry` and
+  `variability_flag_<band>_reject` applied; each band divided by its median;
+  upward outliers clipped at 5 robust sigma per band (dips kept; the sliding
+  `sigma_clip` does not apply to sparse data). Gaia time = BJD(TCB) -
+  2455197.5 throughout; `gaia_time_to_tdb` only for the `T0_TDB` product.
+  `--lcfile=` is the DR4 route. The flags `--period --t0 --T14 --depth`
+  are required for Gaia and refused for KOI/TOI (`cli.gaia_problem`, which
+  also refuses TTV, `--mle`, `--oblate`, collapsed LD, chord, `--PL`
+  ratio/hybrid, `--sc`, `--replot`).
+- **Epoch rows** (`prep.segment_gaia`). One padded row per (transit, band)
+  with any point, no window, so the tau/centring machinery is reused as is.
+  Not `segment_epochs`, and not its `MIN_PTS`: a Gaia transit has one point.
+- **Baseline** (`gaialik.GaiaLogProb`, `profile.build_shared_design` /
+  `solve_shared_coefficients`). One Legendre baseline per band over the
+  whole light curve (order by turin's CV, `prep.cv_band_orders`), profiled
+  exactly; always one epoch block. The bands factorise given theta.
+- **Per band**: limb darkening `q*_<band>` (either law), exposure (G 40 s,
+  BP/RP 4.4 s; `data.gaia.EXPOSURE_DAYS`, one kernel call per band via
+  `model.transit_flux_dev_bands`) and **error scale** `lns_<band>`, uniform
+  on [ln 0.3, ln 30]: `-N_b ln s_b` plus the recentred chi^2 at `s_b sigma`.
+  The profiled baseline biases `s` low by ~K/N, turin's usual profile
+  convention, noted not fixed. Fitted `s` is 1.08x the robust chi (median)
+  on 39 bands.
+- **MLX's float64 `exp` errs by ~4e-7 relative** (its `log` is exact), so
+  `gaialik._exp` computes float64 exp by series and squaring. The float64
+  reference paths of `normtail.py` and `simplexmass.py` also call `mx.exp`
+  and carry the same error. Not measured whether that matters to any test
+  there; it is a finding, not a fixed bug.
+- **The box is a prior** (`params.gaia_peak_box`, `GAIA_BOX_UNITS` = 5):
+  dP +- 5 x T14/(2 n_max), dtau0 +- 5 x T14/2, each capped at P/4; logged as
+  "prior: the seeded period peak ... uniform". The period likelihood is a
+  comb of lobes ~2 units wide and ~5 apart that runs on past any box; step
+  0 found rival peaks 16-95 units out, some higher than the truth. **15
+  units was tried and rejected** (0.1.105): 8 of 13 converged against 10,
+  draws piled at the new edge, and NGTS-5 b's rival-seeded fit (16 units
+  out) was pulled onto the true period, which breaks the rule that a fit
+  stays where it is seeded. Don't widen it to "include the lobes"; the
+  edge warning is the answer.
+- **Edge warning** (`pipeline.gaia_edge_shares`, `_log_gaia_edges`): every
+  export logs the share of dP and dtau0 draws in each side's outer 10%;
+  above 3% it warns and prints the neighbouring box's `--period --t0`
+  (2 half-widths over, with `tau0_ref`, which is valid at any period). It
+  names the adjacent box, not the next peak (NGTS-5 b's rival is at 16
+  units, the suggested box covers 5-15).
+- **Moves** (`gibbs.EphemerisGibbs`, every 25 draws, `--gibbsgrid=on`;
+  Kepler/TESS LinEph still has none). dP, then dtau0, from a 512-cell grid
+  of the conditional over the box plus an MH correction; then
+  `gibbs.EnsembleDE`: 100 DE-MC steps (ter Braak 2006) on dP, dtau0, k,
+  beta, T14, complementary halves, gamma 2.38/sqrt(2d) or 1 (10%),
+  Metropolis against the sampler's u-space log-density. Both exact (tests
+  against the exact (dP, dtau0) conditional on a dense grid, and a curved
+  5-D posterior that fails without the MH step). Why DE: with one point in
+  transit the epoch moves *with the shape* (that point's depth fixes its
+  place in the transit), so each chain's (dP, dtau0) conditional is 3-6x
+  narrower than the marginal and a Gibbs move on those two alone barely
+  helps (Kepler-12 b: R-hat 1.138 at the cap with Gibbs, 1.020 with DE).
+  DE cannot reach a region no chain spans. `ResumeState.box` is a guard.
+- **MAP starts** hold dP and dtau0 at the candidate
+  (`seeding.map_start_sd`), else the start ball hops to a rival peak.
+- **Where it stands** (`docs/bench/gaia_acceptance.md`, 13 known planets):
+  10 of 13 converged. Periods and epochs agree with the literature, except
+  WASP-18 b's period at 3.0 sd. Shape is weak without `--rhostar`: WASP-18
+  b's T14 is 2.7 sd long, and Kepler-490 b is grazing against b 0.05.
+  HAT-P-1 b is slow in every batch, cause undiagnosed. Lobe-switching with
+  distinct shapes (HD 189733 b: a far lobe at T14 2.6 h vs 4.0 h, 2.8 nats
+  higher) is what keeps R-hat up. Not done: injection coverage.
 
 ### Memory: inference on every draw, export on a bounded subsample
 
