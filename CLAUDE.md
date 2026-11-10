@@ -1115,7 +1115,7 @@ the move, and must turn it off rather than leave it running.
   the separate grazing/non-grazing bimodality in (k, b), which still holds
   shape R-hat up on low-SNR targets.
 
-### Gaia epoch photometry (0.1.101-0.1.105)
+### Gaia epoch photometry (0.1.101-0.1.107)
 
 Plan agreed with the user 2026-10-28/29 (`~/.claude/plans/noble-rolling-piglet.md`):
 DR3 now, DR4-ready; **G + BP + RP fitted jointly, a fitted error scale per
@@ -1193,7 +1193,25 @@ bumped `MODEL_REV`.
   b's T14 is 2.7 sd long, and Kepler-490 b is grazing against b 0.05.
   HAT-P-1 b is slow in every batch, cause undiagnosed. Lobe-switching with
   distinct shapes (HD 189733 b: a far lobe at T14 2.6 h vs 4.0 h, 2.8 nats
-  higher) is what keeps R-hat up. Not done: injection coverage.
+  higher) is what keeps R-hat up.
+- **Injection coverage** (0.1.107, `docs/bench/gaia_acceptance.md`,
+  scripts in `docs/bench/gaia_injection/`): 50 injections on real DR3
+  cadences. 33 of 50 converged; convergence is set by the points in transit
+  (3 points: 2 of 12; 7+: 26 of 28). P, T0, s and q are calibrated. k, b and
+  T14 sit above the truth (about two-thirds of u < 0.5, none > 0.95;
+  T14 +11% at the median run).
+  - **The likelihood at the truth is fine**: 2 dlnL to the best draw has
+    median 7.9 against chi^2_14's 13.3.
+  - **k and b** are prior volume (k ~ U(0, 1) gives large grazing planets
+    room on thin data): the offset is confined to unconverged and 3-4-point
+    runs, and reweighting the draws by a rho* prior removes it.
+  - **T14 is unexplained**: its offset is largest in the data-rich runs and
+    survives the rho* reweighting.
+  - **The truths were not drawn from turin's prior**, so this coverage test
+    is not exact. The diagnosis is a run with truths drawn from turin's
+    prior (data-only selection keeps it valid).
+  - Do not read median-minus-truth in sd as coverage on bimodal posteriors
+    (inj36: -8.8 sd, u = 0.93).
 
 ### Memory: inference on every draw, export on a bounded subsample
 

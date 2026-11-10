@@ -716,6 +716,17 @@ robust chi (median 1.08x, 80% within 0.89-1.39x). Sparse photometry leaves the s
 stellar-density prior (`--rhostar`; Gaia's FLAME gives one) is the natural
 way to tighten it.
 
+**Injection coverage** (50 injections on real DR3 cadences, true ephemeris
+as the candidate; `docs/bench/gaia_acceptance.md`): 33 of 50 converged.
+That is 26 of 28 with 7 or more points in transit, but 2 of 12 with only 3.
+Period, epoch, error scales and limb darkening are calibrated. `k`, `b` and
+`T14` lean high: the posterior median is above the truth in about
+two-thirds of runs, and T14 runs 11% long at the median run. For `k` and
+`b` this is the prior's room for large grazing planets where the data are
+thin, and a stellar-density prior removes it. T14's offset is not yet
+explained and is under study. Treat sparse-data T14 and grazing solutions
+with care, and use `--rhostar` where a density is known.
+
 ## Options
 
 ```

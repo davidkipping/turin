@@ -113,5 +113,101 @@ chi out of transit in brackets.
   is 1.08, 80% lie within 0.89-1.39, and the full range is 0.66-1.77
   (39 bands). Catalogue errors are 1.1-9.7x too small.
 
-Not done here: the injection-coverage run, about 50 injections on DR3
-cadences, which waits for the user's go-ahead.
+## Injection coverage (turin 0.1.106, 50 injections)
+
+Scripts and tables in `docs/bench/gaia_injection/`.
+
+**Set-up** (`inj_build.py`, seed 2026). Each injection keeps one real DR3
+source's timestamps, bands and catalogue errors (MetalLS's DataLink zips,
+hosts with >= 10 points in every band, 212 eligible, 50 drawn). Its flux is
+1 + elome's float64 transit (contact rule, each band's exposure, turin's
+circle relation for a/R*) + `s_band * error * N(0, 1)`. Truths are drawn
+from these distributions:
+
+- P ~ logU(1, 10) d, rho* ~ logU(0.3, 3) solar, k ~ U(0.05, 0.2);
+- b = U(0, 1) (1 + k), T14 from (P, rho*, k, b);
+- q1, q2 ~ U(0, 1) per band, s ~ U(1, 4) per band;
+- t0 uniform over the first period.
+
+An injection is kept at noiseless SNR >= 7 with >= 3 points in transit
+(59% of draws were rejected). Each was fitted at turin's defaults
+(`inj_batch.sh`) with the true `--period --t0 --T14 --depth` as the
+candidate. For each run and parameter, `u` is the posterior quantile of the
+truth (`inj_coverage.py`).
+
+**Convergence: 33 of 50**. It is set by the number of points in transit
+(`inj_shape.py`):
+
+| points in transit | runs | converged | edge warning | median R-hat |
+|---|---|---|---|---|
+| 3 (the selection floor) | 12 | 2 | 9 | 1.030 |
+| 4-6 | 10 | 5 | 2 | 1.012 |
+| 7+ | 28 | 26 | 1 | 1.007 |
+
+Of the 12 runs that warned, 9 were unconverged. Wall time was 14.3 h:
+converged runs took 716 s on average, unconverged ones 1,640 s (to the
+cap).
+
+**Coverage** (binomial 1-sigma at n = 50: +-0.07 at 68%, +-0.03 at 95%;
+"converged" is the 33):
+
+| param | 68% | 95% | KS p | KS p, converged |
+|---|---|---|---|---|
+| P | 0.66 | 0.94 | 0.63 | 0.86 |
+| T0 | 0.78 | 0.94 | 0.53 | 0.32 |
+| k | 0.64 | 1.00 | **0.003** | 0.36 |
+| b | 0.66 | 0.96 | 0.08 | 0.47 |
+| T14 | 0.64 | 0.96 | **0.019** | **0.019** |
+| s_G, s_BP, s_RP | 0.64-0.70 | 0.90-0.98 | 0.04-0.28 | 0.12-0.34 |
+| q1, q2 (6) | 0.60-0.80 | 0.92-0.98 | 0.07-0.97 | 0.01-0.94 |
+
+Truths outside the 99% interval: inj05 and inj25 (s_G), inj02 (q1_G) and
+inj33 (q2_RP), 4 of 700.
+
+- **Period, epoch, error scales and limb darkening are calibrated.**
+- **k, b and T14 sit above the truth.** For each, about two-thirds of runs
+  have u < 0.5, and none has u > 0.95. Medians of (posterior median - truth)
+  in half 16-84% widths: k +0.09, b +0.32, T14 +0.28. T14's posterior
+  median is 11% longer than the truth at the median run, and 41% or more
+  longer in a quarter of runs. This is the same direction as WASP-18 b's T14
+  and Kepler-490 b's grazing b above.
+- **The likelihood at the truth is not disfavoured** (`inj_truth_lnl.py`:
+  the float64 likelihood alone, prepared exactly as turin fitted). It is
+  never above the best draw's. 2 (lnL_best - lnL_truth) has median 7.9
+  against chi^2_14's 13.3 (range 0.65-23.7). The best draw is not the
+  maximum, and limb darkening is near flat, so a smaller value is expected.
+  A model error would show up as a larger one. The test cannot see a shift
+  of 0.3 sd, which costs < 0.1 nat. The injections use turin's own kernel
+  and relation, and the Gaia likelihood is tested against an independent
+  float64 version (`test_the_gaia_likelihood_is_the_one_written_out_by_hand`).
+  The best draws are offset the same way as the medians (T14 +14%, k +21%,
+  b +0.11 at the median run).
+- **k and b: the offset is prior volume where the data are weak.** It lies
+  in the unconverged runs and the 3-point ones (u's KS p 0.000 for k
+  unconverged, 0.36 converged; mean u 0.22 at 3-4 points in transit against 0.46 above).
+  turin's priors, k ~ U(0, 1) and T14 ~ U(0, 3 T14_in), give large-k grazing
+  solutions room that the injection distribution does not. The posterior's
+  grazing share correlates with k's offset (Spearman 0.52, p 1e-4). The
+  draws were importance-weighted by a stellar-density prior, as `--rhostar`
+  would apply, centred on truth + N(0, sigma) (`inj_rhostar_rw.py`; weight
+  ESS >= 3,400). In converged runs that removes it: mean u 0.52 (k) and 0.50
+  (b), KS p 0.45-0.72, at sigma 0.04 or 0.1 dex.
+- **T14: not explained.** Its offset is largest where the data are richest
+  (5+ points in transit: mean u 0.34, KS p 0.005; 3-4 points: 0.54). It does
+  not track the grazing share (Spearman -0.24), and it survives the rho*
+  weighting (converged mean u 0.38-0.41, 95% coverage 0.85-0.88).
+- **Caveat.** The truths were drawn from the injection distribution, not
+  from turin's prior. Exact coverage is guaranteed only when the two match,
+  so a prior-driven offset is expected where the data are weak. That fits k
+  and b, but not T14 in the data-rich runs. The test that separates a prior
+  effect from a fault draws the truths from turin's own prior; it is run
+  next.
+- The half-width offsets mislead on bimodal posteriors. inj36 (converged;
+  truth grazing, b 0.96, k 0.193) puts 92.5% of its draws on a smaller,
+  central planet (k median 0.084, 16-84% 0.077-0.101; b median 0.52). That
+  is -8.8 half-widths, yet the truth lies in the grazing tail at u = 0.93,
+  inside the 95% interval. The coverage figures use u.
+
+The chains' `loglike` column is the sampler's stored target (prior and box
+Jacobian included), so it differs from the likelihood alone by up to 28
+nats here. `inj_truth_lnl.py` recomputes the likelihood alone.
