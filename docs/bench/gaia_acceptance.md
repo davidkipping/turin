@@ -195,13 +195,15 @@ inj33 (q2_RP), 4 of 700.
 - **T14: not explained.** Its offset is largest where the data are richest
   (5+ points in transit: mean u 0.34, KS p 0.005; 3-4 points: 0.54). It does
   not track the grazing share (Spearman -0.24), and it survives the rho*
-  weighting (converged mean u 0.38-0.41, 95% coverage 0.85-0.88).
+  weighting (converged mean u 0.38-0.41, 95% coverage 0.85-0.88). The
+  prior-drawn run below finds T14 calibrated, which makes this a mismatch
+  between the injection population and turin's prior, not a fault.
 - **Caveat.** The truths were drawn from the injection distribution, not
   from turin's prior. Exact coverage is guaranteed only when the two match,
   so a prior-driven offset is expected where the data are weak. That fits k
   and b, but not T14 in the data-rich runs. The test that separates a prior
-  effect from a fault draws the truths from turin's own prior; it is run
-  next.
+  effect from a fault draws the truths from turin's own prior: see the
+  next section.
 - The half-width offsets mislead on bimodal posteriors. inj36 (converged;
   truth grazing, b 0.96, k 0.193) puts 92.5% of its draws on a smaller,
   central planet (k median 0.084, 16-84% 0.077-0.101; b median 0.52). That
@@ -211,3 +213,104 @@ inj33 (q2_RP), 4 of 700.
 The chains' `loglike` column is the sampler's stored target (prior and box
 Jacobian included), so it differs from the likelihood alone by up to 28
 nats here. `inj_truth_lnl.py` recomputes the likelihood alone.
+
+## Calibration with truths from turin's prior (turin 0.1.107, 50 runs)
+
+Scripts and tables in `docs/bench/gaia_injection/` (`sbc_*`).
+
+The injection test above drew its truths from a physical population and
+seeded each fit at the truth. Coverage is exact only when the truths come
+from the fit's own prior, so this run draws them from it (simulation-based
+calibration). A fault in the likelihood or the sampler shows in this test;
+a prior that differs from the injection population does not.
+
+**Set-up** (`sbc_build.py`, seed 2027):
+
+- Each run keeps one real DR3 source's timestamps, bands and catalogue
+  errors (the same 212 eligible hosts).
+- The candidate is drawn independently of the truth, as a BLS would supply
+  it: P_in logU(1, 10) d, a physical k_in, b_in and stellar density for
+  T14_in, and t0_in. The fit is seeded at the candidate (`sbc_batch.sh`,
+  turin's defaults).
+- The truth is drawn from the prior turin puts on that candidate's fit:
+  - dP and dtau0 uniform in the peak box about the recentred epoch
+    (`params.gaia_peak_box`);
+  - k ~ U(0, 1), and b given k uniform on (0, 1 + k) with the grazing
+    taper;
+  - T14 ~ U(0, 3 T14_in);
+  - q1, q2 ~ U(0, 1) per band;
+  - ln s ~ U(ln 0.3, ln 30) per band.
+- Flux is elome float64 plus s * error * N(0, 1).
+- Selection is on the data alone, which keeps calibration exact given the
+  selection: nothing clipped by turin's upward clip; at least 3 points more
+  than 4 robust sigma below a band's median; those points' median deficit at
+  most 5%.
+- For all 50 runs, turin's box and recentred epoch were checked to match
+  the ones the truths were drawn in, and every truth lies inside the bounds.
+
+The truths span k 0.05-0.96, SNR 9-562 and 3-46 points in transit (median
+11). T14 runs long against the candidate (truth / T14_in median 1.86),
+because longer transits pass the selection more often. 11 truths are
+grazing.
+
+**Convergence: 29 of 50** (14.9 h). It is again set by the points in
+transit: 0 of 9 runs with 6 or fewer converged, 15 of 25 with 7-12, and 14
+of 16 with 13 or more. 22 runs warned at the box edge. That warning is
+expected here, because the box is the prior and the truths fill it.
+
+**Coverage** (binomial 1-sigma: +-0.07 at 68%, +-0.03 at 95% and +-0.041
+on mean u at n = 50; at n = 29, +-0.09, +-0.04 and +-0.054):
+
+| param | 68% | 95% | mean u | KS p | converged: 68% / 95% / mean u / KS p |
+|---|---|---|---|---|---|
+| P | 0.72 | 0.92 | 0.46 | 0.76 | 0.69 / 0.90 / 0.46 / 0.65 |
+| T0 | 0.72 | 0.92 | 0.49 | 0.84 | 0.69 / 0.90 / 0.51 / 0.91 |
+| k | 0.74 | 0.92 | 0.44 | 0.25 | 0.79 / 0.93 / 0.45 / 0.31 |
+| b | 0.74 | 0.96 | 0.45 | 0.27 | 0.76 / 0.97 / 0.46 / 0.46 |
+| **T14** | 0.74 | 0.94 | **0.55** | **0.23** | 0.79 / 0.93 / **0.51** / **0.69** |
+| s_G, s_BP, s_RP | 0.58-0.60 | 0.90-0.96 | 0.48-0.58 | 0.07-0.77 | 0.55-0.62 / 0.86-0.97 / 0.43-0.56 / 0.02-0.57 |
+| q1, q2 (6) | 0.60-0.76 | 0.92-0.96 | 0.46-0.58 | 0.11-0.43 | 0.55-0.72 / 0.86-0.97 / 0.40-0.59 / 0.04-0.70 |
+
+- **T14 is calibrated under turin's own prior.** Its mean u is 0.55 against
+  the injection test's 0.38-0.41. A fault of that size would put the mean
+  near 0.40 here, 3.6 sigma from what was measured. So the injection
+  offset comes from where those truths sit against turin's prior (T14
+  seeded at the truth, k up to 0.2, b uniform), not from the likelihood or
+  the sampler. The same holds for k and b. Nothing in this run singles out
+  which feature of the injection population is responsible; the 14 runs
+  whose truth lies within 1.5x the candidate's T14 have mean u 0.46 (KS p
+  0.48), too few to say more.
+- **P, T0, k, b and the limb darkening are calibrated.** Over all runs
+  their smallest KS p is 0.11 (q2_G); in the converged subset, 0.04 (q1_G)
+  among these 10.
+- **The error scales cover a little under nominal at 68%** (0.55-0.62).
+  s_G's posterior leans low (mean u 0.58, 1.9 sigma), as the profiled
+  baseline's known K/N low bias predicts. s_BP's converged mean u (0.43,
+  KS p 0.02) leans the other way, so this is not a clean signal.
+- **Missed modes.** P and T0 have 95% coverage of 0.90-0.92, and 3 runs
+  put the truth outside the 99% interval on the ephemeris: sbc26, sbc30 and
+  sbc37. 0.5 such runs are expected; three or more has p 0.014. sbc37 is unconverged
+  (R-hat 1.20). sbc26 and sbc30 converged (R-hat 1.009 and 1.010, all 512
+  chains healthy), yet every draw lies on one side of the truth in P, T0
+  and T14 (u = 0 or 1).
+  - **The truth is not out-fitted by a better solution** (`sbc_truth_lnl.py`).
+    The best draw is 3.5 and 4.6 nats above the truth in posterior density.
+    That is less than the ~7 expected for a typical draw from the right mode
+    in 14 dimensions.
+  - **Maximising from the truth finds a second mode** (`sbc_lobe_peak.py`,
+    float64 L-BFGS-B inside the box). The second mode's peak is close to the
+    one the chains found, and its T14 is different:
+
+    | run | chains' mode: peak, T14 | truth's mode: peak, T14 | separation |
+    |---|---|---|---|
+    | sbc26 | 497.33, 0.27 h | 496.57, 1.50 h (truth 2.52 h) | ~40 posterior sd in P |
+    | sbc30 | 790.61, 2.14 h | 790.84, 5.42 h (truth 4.61 h) | another period lobe, 3.3 units away |
+
+    In sbc30 the truth's mode has the higher peak.
+  - Both are the failure noted for HD 189733 b: a rival mode that needs a
+    different shape. The ephemeris Gibbs move holds the shape fixed, and
+    DE cannot reach a region no chain spans. Every chain lands in one mode,
+    so R-hat cannot see it.
+  - That is 2 of 29 converged runs. These are the miscalibration this
+    test finds, and they are on the ephemeris and T14 together, not on T14
+    alone.

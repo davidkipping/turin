@@ -723,9 +723,15 @@ Period, epoch, error scales and limb darkening are calibrated. `k`, `b` and
 `T14` lean high: the posterior median is above the truth in about
 two-thirds of runs, and T14 runs 11% long at the median run. For `k` and
 `b` this is the prior's room for large grazing planets where the data are
-thin, and a stellar-density prior removes it. T14's offset is not yet
-explained and is under study. Treat sparse-data T14 and grazing solutions
-with care, and use `--rhostar` where a density is known.
+thin, and a stellar-density prior removes it. A second run drew its truths
+from turin's own prior (50 runs, 29 converged). There `T14`, `k`, `b`, the
+period, epoch and limb darkening are all calibrated, so the lean comes from
+the prior, not from a fault. That run also found 2 converged fits whose
+chains all sat in one mode while the truth lay in another of similar
+height, with a different `T14` (and, in one, another period lobe). R-hat
+cannot see this. Treat sparse-data `T14` and grazing solutions with care,
+use `--rhostar` where a density is known, and re-run at other `--T14`
+values when the shape matters.
 
 ## Options
 

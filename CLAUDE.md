@@ -1115,7 +1115,7 @@ the move, and must turn it off rather than leave it running.
   the separate grazing/non-grazing bimodality in (k, b), which still holds
   shape R-hat up on low-SNR targets.
 
-### Gaia epoch photometry (0.1.101-0.1.107)
+### Gaia epoch photometry (0.1.101-0.1.108)
 
 Plan agreed with the user 2026-10-28/29 (`~/.claude/plans/noble-rolling-piglet.md`):
 DR3 now, DR4-ready; **G + BP + RP fitted jointly, a fitted error scale per
@@ -1205,11 +1205,23 @@ bumped `MODEL_REV`.
   - **k and b** are prior volume (k ~ U(0, 1) gives large grazing planets
     room on thin data): the offset is confined to unconverged and 3-4-point
     runs, and reweighting the draws by a rho* prior removes it.
-  - **T14 is unexplained**: its offset is largest in the data-rich runs and
-    survives the rho* reweighting.
-  - **The truths were not drawn from turin's prior**, so this coverage test
-    is not exact. The diagnosis is a run with truths drawn from turin's
-    prior (data-only selection keeps it valid).
+  - **T14** (largest in the data-rich runs, survives the rho* reweighting)
+    is also prior mismatch: the truths were not drawn from turin's prior,
+    and the run below that does draw them is calibrated.
+- **Calibration with truths from turin's prior** (0.1.108, `sbc_*` in the
+  same directory): candidate drawn independently, truth from turin's prior
+  given it (box, k U(0,1), b|k with the taper, T14 U(0, 3 T14_in), q, ln s),
+  selection on the data alone. 29 of 50 converged (0 of 9 at <= 6 points in
+  transit). **Shape, ephemeris and LD pass KS** (95% P/T0 coverage 0.90-0.92, see below): T14 mean u
+  0.55 (converged 0.51), KS p 0.23 (0.69), where the injection test's 0.40
+  would sit 3.6 sigma off. Error scales cover 0.55-0.62 at 68%.
+  - **Missed modes:** sbc26 and sbc30 converged (R-hat 1.01, all chains
+    healthy) with every draw on one side of the truth in P, T0 and T14.
+    Maximising from the truth finds a second mode of nearly equal peak
+    (-0.76 and +0.23 nats) with a different T14 (1.50 vs 0.27 h; 5.42 vs
+    2.14 h), in sbc30 another period lobe. This is the HD 189733 b failure:
+    the Gibbs move holds the shape, DE needs a chain already there, and
+    R-hat sees one mode. Not fixed; the user decides whether to pursue it.
   - Do not read median-minus-truth in sd as coverage on bimodal posteriors
     (inj36: -8.8 sd, u = 0.93).
 
